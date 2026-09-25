@@ -42,8 +42,9 @@ export function HostStatus({ r }: { r: any }) {
 
 export function HostFlags({ r }: { r: any }) {
   const out: React.ReactNode[] = [];
-  if (r.dup_count > 1) out.push(<Badge key="d" tone="serious" title={`${r.dup_count} active agents share IP ${r.local_ip}`}>DUP ×{r.dup_count}</Badge>);
-  if (r.is_reinstall) out.push(<Badge key="r" tone="violet" title={`Reinstall – older agent matched by ${r.reinstall_reason}`}>REINSTALL</Badge>);
+  if (r.dup_count > 1) out.push(<Badge key="d" tone="serious" title={`${r.dup_count} agents with connection IP ${r.connection_ip} and local IP ${r.local_ip} (at most one online)`}>DUP ×{r.dup_count}</Badge>);
+  if (r.rc_count > 1) out.push(<Badge key="rc" tone="crit" title={`${r.rc_count} online agents share connection IP ${r.connection_ip} and local IP ${r.local_ip}`}>ROUTING ×{r.rc_count}</Badge>);
+  if (r.is_reinstall) out.push(<Badge key="r" tone="violet" title="Reinstall – an older agent ID had the same connection IP">REINSTALL</Badge>);
   if ((r.rfm || "").toLowerCase() === "yes") out.push(<Badge key="f" tone="warn" title="Reduced functionality mode">RFM</Badge>);
   if (r.containment_status && r.containment_status !== "normal") out.push(<Badge key="c" tone="crit">{r.containment_status.toUpperCase()}</Badge>);
   const fs = hoursSince(r.first_seen);
@@ -138,3 +139,15 @@ export const COVERAGE_HELP: Record<string, string> = {
   "Non Live": "Inventory marks the node Non Live — excluded from coverage",
 };
 export const CoverageBadge = ({ v }: { v?: string }) => (v ? <Badge tone={COVERAGE_TONE[v] || "neutral"} title={COVERAGE_HELP[v]}>{v}</Badge> : <span className="text-muted">–</span>);
+/** Duplicate tag for an inventory row: repeated in the uploaded file and/or sharing IP / node name with other rows of the LOB */
+export function dupReasons(r: any) {
+  const out: string[] = [];
+  if (r.file_dups > 0) out.push(`${r.file_dups + 1} rows in the uploaded file`);
+  if (r.dup_ip > 1) out.push(`IP shared by ${r.dup_ip} rows`);
+  if (r.dup_name > 1) out.push(`node name shared by ${r.dup_name} rows`);
+  return out;
+}
+export const DupBadge = ({ r }: { r: any }) => {
+  const why = dupReasons(r);
+  return why.length ? <Badge tone="serious" title={"Duplicate: " + why.join(", ")}>DUP</Badge> : null;
+};

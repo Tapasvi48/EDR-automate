@@ -63,3 +63,12 @@ export function fillDays<T extends Record<string, any>>(rows: T[], start: string
   }
   return out;
 }
+export function fmtBytes(b: number) {
+  if (b < 1024) return `${b} B`;
+  if (b < 1024 * 1024) return `${(b / 1024).toFixed(0)} KB`;
+  return `${(b / 1024 / 1024).toFixed(1)} MB`;
+}
+export function fmtSecs(s: number) {
+  s = Math.max(0, Math.round(s));
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
+}

@@ -36,7 +36,7 @@ export function CoverageTable({ rows, mode, showLob = true, maxHeight, actions, 
             <th className={cn(th, "text-right")} title="Applicable nodes with no Falcon agent">Not installed</th>
             <th className={cn(th, "text-right")} title="Agent removed from / hidden in the console">Removed / hidden</th>
             <th className={cn(th, "text-right")} title="Agents tagged to this LOB/MSP that are missing from its inventory">Not in inventory</th>
-            {dup && <th className={cn(th, "text-right")} title="Installed nodes whose IP is shared by several active agents">Dup IPs (EDR)</th>}
+            {dup && <th className={cn(th, "text-right")} title="Installed nodes whose agent has duplicates (same connection + local IP)">Dup IPs (EDR)</th>}
             {dup && mode === "lob" && <th className={cn(th, "text-right")} title="Same IP listed under more than one MSP">IPs in &gt;1 MSP</th>}
             {actions && <th className={th} />}
           </tr>

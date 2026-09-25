@@ -65,16 +65,22 @@ fewer than half of the previously active hosts, so an API or scope problem can't
 
   If an AID comes back, it is marked **restored**.
 - **Online · stale last seen**: Falcon's online-state API says *online*, but `last_seen` is older than `stale_online_hours`.
-- **Duplicate**: two or more *active* AIDs share a local IP (or hostname or serial). Agents that share an IP count as **one device**. The device is online if any of its agents is online. All fleet counts and the All assets / Offline lists use devices, so duplicates never inflate the online or offline numbers. Shared ranges such as NAT, VPN and loopback can be excluded in Settings.
-- **Reinstall**: a new AID where an *older* AID had the same IP (including NIC history) and/or hostname. The confidence is shown as `ip+hostname` › `hostname` › `ip`.
+- **Duplicate agents**: two or more *active* AIDs with the same **connection IP and local IP**, where at most one of them is online
+  (the same machine re-imaged, cloned or reinstalled). They count as **one device**; the online (else most recently seen) agent is the primary.
+- **Routing conflict**: two or more agents with the same connection IP and local IP that are **online at the same time**, i.e. different
+  live machines that look identical on the network. Listed under *Routing conflicts*; each agent counts as its own device. The device is online if any of its agents is online. All fleet counts and the All assets / Offline lists use devices, so duplicates never inflate the online or offline numbers. Shared ranges such as NAT, VPN and loopback can be excluded in Settings.
+- **Reinstall**: a new AID where an *older* AID had the same **connection IP** (its current one or any connection IP recorded in earlier syncs). Hostname and local IP are not used.
 - **Went offline on day X**: the host is currently offline and its last_seen date is X.
-- **Outdated sensor**: older than the three newest sensor versions seen per platform (N-2).
+- **Sensor level**: versions are grouped by release (major.minor, e.g. 7.40.19206.0 → 7.40). Per platform the newest release in the console is N; N-1 and N-2 are the release numbers right before it (7.39, 7.38 when N is 7.40), whether or not they are installed anywhere; anything older is **outdated**.
 - Every change between syncs is written to the **Activity log**: new, removed, hidden, restored, IP change, hostname change, sensor update, reinstall.
 
 ## LOB → MSP model and coverage
 - Each **LOB** has one or more **MSPs**. MSPs are created manually or automatically from the inventory's MSP column.
   An inventory upload can cover the whole LOB, using the MSP column, or **a single MSP**. A single-MSP upload replaces only that MSP's rows
   and carries every other MSP's rows into the new version unchanged.
+- A LOB can also have **inventory types** (e.g. Servers, Network devices). Each type has its **own inventory file and version history**
+  (v1, v2 …). A type upload sets the node type of every row to the type name and replaces only that type's rows; the main inventory
+  and other types stay unchanged. The LOB's current inventory is the main inventory plus the current version of every type.
 - Every inventory node gets one **EDR status**:
   - **Non Live** / **Not Feasible**: the node is not applicable and is excluded from coverage.
   - **Online** / **Offline**: the node is *installed*.
@@ -83,7 +89,7 @@ fewer than half of the previously active hosts, so an API or scope problem can't
 - **Applicable** = Live and EDR feasible. **Coverage** = Installed ÷ Applicable. **Pending** = Not Installed + Hidden + Removed.
 - **Not in inventory** means agents tagged to a LOB/MSP but missing from its inventory. To tag agents, upload a sheet with an Agent ID column
   (hostname or IP also work) and an MSP column from the LOB page. **Unmapped agents** are agents that no LOB inventory or tag claims.
-- **IPs in >1 MSP**: the same IP is listed by two MSPs of one LOB. **Dup IPs (EDR)**: installed nodes whose IP is shared by several active agents.
+- **Duplicate IPs**: an IP on several inventory rows of one LOB. **IPs in other LOBs**: the same IP is also listed by another LOB. **Dup IPs (EDR)**: installed nodes whose agent has duplicate agents.
 
 ## LOB inventory
 - **Templates** map the LOB spreadsheet's columns to the standard fields: IP, Node Name, Node Type, Domain, Live/Non Live, OS, EDR Feasible,

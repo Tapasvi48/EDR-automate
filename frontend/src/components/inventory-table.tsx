@@ -1,12 +1,15 @@
 "use client";
 import * as React from "react";
+import * as Popover from "@radix-ui/react-popover";
 import { useQuery } from "@tanstack/react-query";
+import { SlidersHorizontal, X } from "lucide-react";
 import { api } from "@/lib/api";
-import { fmtDt } from "@/lib/format";
-import { Badge, Card, Chip, KV, Loading, SearchInput, Select, Sheet, SectionTitle } from "./ui";
+import { fmtDt, fmtN } from "@/lib/format";
+import { cn } from "@/lib/utils";
+import { Badge, Button, Card, Checkbox, Field, KV, Loading, SearchInput, Select, Sheet, SectionTitle } from "./ui";
 import { DataTable, SimpleTable, type Column } from "./data-table";
 import { useMeta } from "@/lib/hooks";
-import { ActualBadge, ChangeTag, CoverageBadge, COVERAGE_HELP, HostLink, Live, Mono, VERIFICATION_HELP, VerifBadge, When, YN } from "./badges";
+import { ActualBadge, ChangeTag, DupBadge, dupReasons, CoverageBadge, COVERAGE_HELP, HostLink, Live, Mono, VERIFICATION_HELP, VerifBadge, When, YN } from "./badges";
 
 export const VERIFICATIONS = Object.keys(VERIFICATION_HELP);
 export const COVERAGE_STATUSES = Object.keys(COVERAGE_HELP);
@@ -16,7 +19,7 @@ const MATCHES = ["ip+hostname", "hostname", "ip", "ip (hostname differs)", "ip_h
 export function inventoryColumns(showLob: boolean, historical: boolean): Column[] {
   const cols: Column[] = [
     ...(showLob ? [{ key: "lob", label: "LOB", render: (r: any) => <b>{r.lob}</b> }] : []),
-    { key: "change_tag", label: "Tag", sort: historical ? false : undefined, render: (r: any) => <ChangeTag t={r.change_tag} /> },
+    { key: "change_tag", label: "Tag", sort: historical ? false : undefined, render: (r: any) => <span className="inline-flex gap-1"><ChangeTag t={r.change_tag} /><DupBadge r={r} /></span> },
     { key: "ip", label: "IP", render: (r: any) => <Mono>{r.ip}</Mono> },
     { key: "node_name", label: "Node name", render: (r: any) => <b>{r.node_name}</b> },
     { key: "msp", label: "MSP", render: (r: any) => r.msp || <span className="text-muted">Unassigned</span> },
@@ -45,14 +48,58 @@ export function inventoryColumns(showLob: boolean, historical: boolean): Column[
   return cols;
 }
 
-export function InventoryTable({ lobId, state, set, reset, facets, versions, showLob, lobs }: {
-  lobId: number; state: Record<string, string>; set: any; reset: () => void; facets?: Record<string, { label: string; n: number }[]>;
-  versions?: any[]; showLob?: boolean; lobs?: { id: number; name: string }[];
+type Facet = { label: string; n: number }[];
+type Facets = Record<string, any> & { dup?: Record<string, number>; total?: number };
+
+const STATUS_MAIN: [string, string][] = [["", "All"], ["Online", "Online"], ["Offline", "Offline"], ["Not Installed", "Not installed"]];
+const CHECKS: [string, string][] = [
+  ["applicable", "Applicable only (Live & feasible)"],
+  ["claimed_missing", "Inventory says Yes · no agent"],
+  ["marked_no", "Inventory says No · agent running"],
+];
+const DUPS: [string, string, string][] = [
+  ["any", "Any duplicate", "any_dup"], ["file", "Repeated rows in uploaded file", "file_dup"],
+  ["ip", "Same IP on several rows", "ip_dup"], ["name", "Same node name on several rows", "name_dup"], ["cross_msp", "IP in more than one MSP", ""],
+  ["cross_lob", "IP also in another LOB", ""],
+];
+/** labels for the active-filter pills (params can also arrive from dashboard links) */
+const PILL: Record<string, string> = {
+  coverage_status: "EDR status", node_type: "Node type", os: "OS", domain: "Domain", live: "Live / Non Live", edr_feasible: "EDR feasible",
+  edr_installed: "EDR installed (inventory)", dup: "Duplicates", change_tag: "Change", verification: "Claim check", edr_actual: "Falcon detail",
+  match_method: "Matched by", edr_state: "Agent state", applicable: "Applicable only", installed: "Installed", pending: "Not installed / removed / hidden",
+  claimed_missing: "Inventory says Yes · no agent", marked_no: "Inventory says No · agent running", installed_na: "Not applicable · agent running",
+  cross_msp_dup: "IP in more than one MSP", in_scope: "Applicable only", mismatch: "Inventory claim mismatch",
+};
+const MORE_KEYS = ["live", "edr_feasible", "edr_installed", "domain", "dup", "change_tag", "applicable", "claimed_missing", "marked_no",
+  "installed", "pending", "installed_na", "cross_msp_dup", "verification", "edr_actual", "match_method", "edr_state", "in_scope", "mismatch"];
+const isMainStatus = (v?: string) => STATUS_MAIN.some(([s]) => s && s === v);
+
+export function InventoryTable({ lobId, state, set, reset, versions, showLob, lobs, types }: {
+  lobId: number; state: Record<string, string>; set: any; reset: () => void;
+  versions?: any[]; showLob?: boolean; lobs?: { id: number; name: string }[]; types?: { id: number; name: string }[];
 }) {
   const historical = !!state.version_id;
   const [item, setItem] = React.useState<any>(null);
   const cols = React.useMemo(() => inventoryColumns(!!showLob, historical), [showLob, historical]);
-  const opts = (key: string, fallback: string[] = []) => (facets?.[key]?.length ? facets[key].map((f) => [f.label, `${f.label} (${f.n})`] as [string, string]) : fallback.map((v) => [v, v] as [string, string]));
+  const scopeLob = lobId || (state.lob ? +state.lob : 0);
+  const { data: facets } = useQuery({
+    queryKey: ["inv-facets", scopeLob, state.msp || ""],
+    queryFn: () => api<Facets>("/api/inventory/facets", { params: { lob: scopeLob || undefined, msp: state.msp || undefined } }),
+  });
+  const list = (key: string): Facet => (Array.isArray(facets?.[key]) ? facets![key] : []);
+  const opts = (key: string, fallback: string[] = []) =>
+    list(key).length ? list(key).map((f) => [f.label, `${f.label} (${fmtN(f.n)})`] as [string, string]) : fallback.map((v) => [v, v] as [string, string]);
+  const count = (key: string, v: string) => list(key).find((f) => f.label === v)?.n ?? (facets ? 0 : undefined);
+  const moreActive = MORE_KEYS.filter((k) => state[k]).length + (state.coverage_status && !isMainStatus(state.coverage_status) ? 1 : 0);
+  const pills = Object.keys(PILL).filter((k) => state[k] && !(k === "coverage_status" && isMainStatus(state.coverage_status)));
+  const pillValue = (k: string) => {
+    const v = state[k];
+    if (v === "1") return null;
+    if (k === "dup") return DUPS.find(([d]) => d === v)?.[1] || v;
+    if (k === "change_tag") return v === "new" ? "New in latest version" : v === "modified" ? "Modified in latest version" : v;
+    return v.split("|").join(", ");
+  };
+  const clearAll = () => set(Object.fromEntries(Object.keys(PILL).map((k) => [k, undefined])));
   return (
     <>
       <DataTable
@@ -63,42 +110,104 @@ export function InventoryTable({ lobId, state, set, reset, facets, versions, sho
         state={state}
         setState={set}
         omit={["tab", "id"]}
-        storageKey={"inv2" + (showLob ? "all" : "")}
+        storageKey={"inv3" + (showLob ? "all" : "")}
         noun="items"
         defaultSize={100}
         rowKey={(r: any) => `${r.lob_id || ""}|${r.item_key}`}
         onReset={reset}
         onRowClick={(r) => setItem(r)}
         filters={<>
-          <SearchInput className="w-72" value={state.q || ""} onChange={(v) => set({ q: v })} placeholder="IP, node name, remarks… (paste many)" />
-          {versions && (
-            <Select value={state.version_id || ""} onChange={(v) => set({ version_id: v })} placeholder={`Current version${versions[0] ? ` (v${versions[0].version_no})` : ""}`}
-              options={versions.slice(1).map((v) => ({ value: v.id, label: `v${v.version_no} · ${fmtDt(v.uploaded_at)}` }))} />
+          <SearchInput className="w-64" value={state.q || ""} onChange={(v) => set({ q: v })} placeholder="IP, node name, remarks… (paste many)" />
+          {!historical && (
+            <div className="inline-flex rounded-lg border border-border-strong bg-surface p-0.5 shadow-card" role="group" aria-label="EDR status">
+              {STATUS_MAIN.map(([v, l]) => {
+                const on = v ? state.coverage_status === v : !state.coverage_status;
+                const n = v ? count("coverage_status", v) : facets?.total;
+                return (
+                  <button key={l} onClick={() => set({ coverage_status: v || undefined })} aria-pressed={on}
+                    className={cn("h-7 rounded-md px-2.5 text-xs font-medium transition-colors", on ? "bg-accent-soft text-accent-fg" : "text-fg-2 hover:text-fg")}>
+                    {l}{n !== undefined && <span className="ml-1 tabular opacity-60">{fmtN(n)}</span>}
+                  </button>
+                );
+              })}
+            </div>
           )}
           {showLob && lobs && <Select value={state.lob} onChange={(v) => set({ lob: v, msp: undefined })} placeholder="All LOBs" options={lobs.map((l) => ({ value: l.id, label: l.name }))} />}
-          {!historical && <MspSelect lobId={lobId || (state.lob ? +state.lob : 0)} value={state.msp} onChange={(v) => set({ msp: v })} />}
-          {!historical && <Select value={state.coverage_status} onChange={(v) => set({ coverage_status: v })} placeholder="Any EDR status" options={opts("coverage_status", COVERAGE_STATUSES)} />}
-          <Select value={state.live} onChange={(v) => set({ live: v })} placeholder="Live / Non Live" options={opts("live", ["Live", "Non Live", "(blank)"])} />
-          <Select value={state.edr_feasible} onChange={(v) => set({ edr_feasible: v })} placeholder="EDR feasible" options={opts("edr_feasible", ["Yes", "No", "(blank)"])} />
-          <Select value={state.edr_installed} onChange={(v) => set({ edr_installed: v })} placeholder="EDR installed (inventory)" options={opts("edr_installed", ["Yes", "No", "(blank)"])} />
-          {facets?.node_type && <Select value={state.node_type} onChange={(v) => set({ node_type: v })} placeholder="Node type" options={opts("node_type")} />}
-          {facets?.os && <Select value={state.os} onChange={(v) => set({ os: v })} placeholder="OS" options={opts("os")} />}
-          {facets?.domain && <Select value={state.domain} onChange={(v) => set({ domain: v })} placeholder="Domain" options={opts("domain")} />}
-          <div className="flex w-full flex-wrap gap-1.5">
-            {([
-              ["applicable", "Applicable (Live & feasible)", true],
-              ["installed", "Installed", !historical],
-              ["pending", "Not installed / removed / hidden", !historical],
-              ["claimed_missing", "Inventory says Yes · no agent", !historical],
-              ["marked_no", "Inventory says No · agent running", !historical],
-              ["cross_msp_dup", "IP in more than one MSP", !historical],
-            ] as [string, string, boolean][]).filter(([, , show]) => show).map(([k, l]) => (
-              <Chip key={k} on={state[k] === "1"} onClick={() => set({ [k]: state[k] === "1" ? undefined : "1" })}>{l}</Chip>
-            ))}
-            {!historical && <Chip on={state.change_tag === "new"} onClick={() => set({ change_tag: state.change_tag === "new" ? undefined : "new" })}>New in latest version</Chip>}
-            {!historical && <Chip on={state.change_tag === "modified"} onClick={() => set({ change_tag: state.change_tag === "modified" ? undefined : "modified" })}>Modified in latest version</Chip>}
-            {historical && <Badge tone="warn" className="ml-1">Viewing a historical snapshot — EDR status is only computed for the current version</Badge>}
-          </div>
+          {!historical && types && types.length > 0 && (
+            <Select value={state.type} onChange={(v) => set({ type: v })} placeholder="All inventories"
+              options={[["main", "Main inventory"], ...types.map((t) => [String(t.id), `Type: ${t.name}`] as [string, string])]} />
+          )}
+          {!historical && <MspSelect lobId={scopeLob} value={state.msp} onChange={(v) => set({ msp: v })} />}
+          <Select value={state.node_type} onChange={(v) => set({ node_type: v })} placeholder="All node types" options={opts("node_type")} />
+          <Select value={state.os} onChange={(v) => set({ os: v })} placeholder="All OS" options={opts("os")} />
+          <Popover.Root>
+            <Popover.Trigger asChild>
+              <Button variant={moreActive ? "soft" : "default"}>
+                <SlidersHorizontal /> More filters{moreActive > 0 && <Badge tone="info" className="ml-0.5">{moreActive}</Badge>}
+              </Button>
+            </Popover.Trigger>
+            <Popover.Portal>
+              <Popover.Content align="start" sideOffset={6} className="z-50 w-[min(560px,94vw)] rounded-xl border border-border bg-surface p-4 shadow-xl">
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {!historical && (
+                    <Field label="EDR status (every value)">
+                      <Select className="max-w-none" value={state.coverage_status} onChange={(v) => set({ coverage_status: v })} placeholder="Any" options={opts("coverage_status", COVERAGE_STATUSES)} />
+                    </Field>
+                  )}
+                  <Field label="Live / Non Live">
+                    <Select className="max-w-none" value={state.live} onChange={(v) => set({ live: v })} placeholder="Any" options={opts("live", ["Live", "Non Live", "(blank)"])} />
+                  </Field>
+                  <Field label="EDR feasible">
+                    <Select className="max-w-none" value={state.edr_feasible} onChange={(v) => set({ edr_feasible: v })} placeholder="Any" options={opts("edr_feasible", ["Yes", "No", "(blank)"])} />
+                  </Field>
+                  <Field label="EDR installed (inventory)">
+                    <Select className="max-w-none" value={state.edr_installed} onChange={(v) => set({ edr_installed: v })} placeholder="Any" options={opts("edr_installed", ["Yes", "No", "(blank)"])} />
+                  </Field>
+                  <Field label="Domain">
+                    <Select className="max-w-none" value={state.domain} onChange={(v) => set({ domain: v })} placeholder="Any" options={opts("domain")} />
+                  </Field>
+                  <Field label="Duplicates">
+                    <Select className="max-w-none" value={state.dup} onChange={(v) => set({ dup: v, cross_msp_dup: undefined })} placeholder="Any row"
+                      options={DUPS.filter(([d]) => !historical || d === "file").map(([d, l, fk]) => [d, fk && facets?.dup ? `${l} (${fmtN(facets.dup[fk])})` : l] as [string, string])} />
+                  </Field>
+                  {!historical && (
+                    <Field label="Change in latest version">
+                      <Select className="max-w-none" value={state.change_tag} onChange={(v) => set({ change_tag: v })} placeholder="Any" options={[["new", "New"], ["modified", "Modified"], ["unchanged", "Unchanged"]]} />
+                    </Field>
+                  )}
+                </div>
+                <div className="mt-4 border-t border-border pt-3">
+                  <div className="mb-2 text-xs font-medium text-fg-2">Checks</div>
+                  <div className="flex flex-col gap-2">
+                    {CHECKS.filter(([k]) => !historical || k === "applicable").map(([k, l]) => (
+                      <Checkbox key={k} checked={state[k] === "1"} onChange={(on) => set({ [k]: on ? "1" : undefined })} label={l} />
+                    ))}
+                  </div>
+                </div>
+              </Popover.Content>
+            </Popover.Portal>
+          </Popover.Root>
+          {versions && (
+            <Select className="ml-auto" value={state.version_id || ""} onChange={(v) => set({ version_id: v })} placeholder="Current inventory"
+              options={versions.filter((v) => !v.is_current).map((v) => ({ value: v.id, label: `${v.type_name || "Main"} v${v.version_no} · ${fmtDt(v.uploaded_at)}` }))} />
+          )}
+          {(pills.length > 0 || historical) && (
+            <div className="flex w-full flex-wrap items-center gap-1.5">
+              {pills.map((k) => {
+                const v = pillValue(k);
+                return (
+                  <span key={k} className="inline-flex h-6 items-center gap-1 rounded-full bg-accent-soft pl-2.5 pr-1 text-[11.5px] font-medium text-accent-fg">
+                    <span>{PILL[k]}{v && <span className="font-normal">: {v}</span>}</span>
+                    <button aria-label={`Remove ${PILL[k]} filter`} className="grid size-4 place-items-center rounded-full hover:bg-accent/15" onClick={() => set({ [k]: undefined })}>
+                      <X className="size-3" />
+                    </button>
+                  </span>
+                );
+              })}
+              {pills.length > 1 && <button className="px-1 text-[11.5px] text-accent-fg hover:underline" onClick={clearAll}>Clear all</button>}
+              {historical && <Badge tone="warn">Viewing a historical snapshot — EDR status is only computed for the current version</Badge>}
+            </div>
+          )}
         </>}
       />
       {item && <ItemSheet lobId={item.lob_id || lobId} item={item} onClose={() => setItem(null)} />}
@@ -121,6 +230,9 @@ function ItemSheet({ lobId, item, onClose }: { lobId: number; item: any; onClose
               ["IP", <Mono key="i">{cur.ip}</Mono>], ["Node name", cur.node_name], ["MSP", cur.msp || "Unassigned"], ["Node type", cur.node_type], ["Domain", cur.domain],
               ["Live / Non Live", <Live key="l" v={cur.live} />], ["OS", cur.os], ["EDR feasible", <YN key="f" v={cur.edr_feasible} />],
               ["EDR installed (inventory)", <YN key="e" v={cur.edr_installed} />], ["Remarks", cur.remarks],
+              ...(dupReasons({ ...item, ...cur }).length
+                ? [["Duplicate", <span key="d" className="text-serious-fg">{dupReasons({ ...item, ...cur }).join(" · ")}</span>] as [string, React.ReactNode]]
+                : []),
               ...Object.entries(cur.extra || {}).map(([k, v]) => [k, String(v)] as [string, React.ReactNode]),
             ]} />
           </Card>

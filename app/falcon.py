@@ -85,8 +85,17 @@ class FalconClient:
             reason = (self.hosts.token_fail_reason or "").rstrip(".")
             if code in (0, None) or "connect" in reason.lower() or "resolve" in reason.lower():
                 raise FalconError(friendly(0, reason, "Authentication"))
-            raise FalconError(f"Authentication failed ({reason or 'HTTP ' + str(code)}). Check the client ID and secret, "
-                              f"and that the cloud region ({self.hosts.base_url}) is the one your Falcon tenant uses.")
+            bad_creds = ("Falcon does not recognise this client ID / secret pair in "
+                         f"{self.hosts.base_url}. Re-copy both values (the secret is shown only once when the client is "
+                         "created; if unsure, reset it), and check the cloud region matches your Falcon console URL.")
+            hint = {
+                400: bad_creds,
+                401: "The client ID / secret pair is wrong, or the client is in a different cloud region than "
+                     f"{self.hosts.base_url}. Re-copy both values (the secret is shown only once when the client is created).",
+                403: "The API client is disabled, the server's public IP is not in the client's IP allowlist, "
+                     "or the Member CID is not a child this client can access.",
+            }.get(code, f"Check the client ID and secret, and that the cloud region ({self.hosts.base_url}) is the one your Falcon tenant uses.")
+            raise FalconError(f"Authentication failed (HTTP {code}: {reason or 'no reason given'}). {hint}")
 
     def _call(self, fn, what, retries=5, **kw):
         for attempt in range(retries):

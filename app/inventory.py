@@ -195,7 +195,7 @@ def make_key(item, key_field):
     return f"{msp}|{base}" if (msp and base) else base
 
 
-def build_items(parsed, mapping, key_field, forced_msp=None):
+def build_items(parsed, mapping, key_field, forced_msp=None, forced_type=None, key_prefix=""):
     headers = parsed["headers"]
     idx = {h: i for i, h in enumerate(headers)}
     mapped_headers = set(v for v in mapping.values() if v)
@@ -209,22 +209,31 @@ def build_items(parsed, mapping, key_field, forced_msp=None):
             it[f] = r[idx[h]] if h in idx else ""
         it["ip"] = norm_ip(it["ip"])
         it["msp"] = (forced_msp or it["msp"] or "").strip()
+        if forced_type:
+            it["node_type"] = forced_type
         it["live"] = norm_live(it["live"])
         it["edr_feasible"] = norm_yes_no(it["edr_feasible"])
         it["edr_installed"] = norm_yes_no(it["edr_installed"])
         it["extra"] = {h: r[idx[h]] for h in extra_headers if r[idx[h]]}
         key = make_key(it, key_field)
+        key = key_prefix + key if key else key
         if not key:
             no_key += 1
             continue
         if key in items:
+            # same key repeated in the file: keep the first row, count the repeats and tag the item as duplicate
             dups += 1
+            items[key]["file_dups"] = items[key].get("file_dups", 0) + 1
             if dups <= 25:
-                warnings.append(f"Row {n}: duplicate key '{key}' - kept first occurrence")
+                warnings.append(f"Row {n}: duplicate key '{key}' - merged into the first occurrence (row {items[key]['_row']})")
             continue
+        it["_row"] = n
+        it["file_dups"] = 0
         items[key] = it
+    for it in items.values():
+        it.pop("_row", None)
     if dups > 25:
-        warnings.append(f"... {dups - 25} more duplicate keys skipped")
+        warnings.append(f"... {dups - 25} more duplicate rows merged")
     if no_key:
         warnings.append(f"{no_key} rows skipped: no IP / Node Name value")
     return items, warnings
@@ -302,24 +311,51 @@ def _brief(it):
 ROW_COLS = ", ".join(FIELDS)
 
 
+# ------------------------------------------------------------------ inventory streams (main + one per type)
+def get_type(c, lob_id, type_id):
+    if not type_id:
+        return None
+    t = db.one(c, "SELECT * FROM lob_types WHERE id=? AND lob_id=?", (type_id, lob_id))
+    if not t:
+        raise ValueError("Inventory type not found in this LOB")
+    return t
+
+
+def stream_version_id(c, lob, type_id):
+    """Current version of the main inventory (type_id None) or of one inventory type."""
+    if not type_id:
+        return lob["current_version_id"]
+    t = get_type(c, lob["id"], type_id)
+    return t["current_version_id"]
+
+
+def type_key_prefix(type_id):
+    # keeps item keys of different inventory types apart in inventory_current
+    return f"t{type_id}|" if type_id else ""
+
+
 def commit_version(c, lob_id, items, *, filename, note, uploaded_by, template_id, key_field, mapping,
-                   warnings=None, restored_from=None, scope_msp=None):
+                   warnings=None, restored_from=None, scope_msp=None, type_id=None):
     lob = db.one(c, "SELECT * FROM lobs WHERE id=?", (lob_id,))
     if not lob:
         raise ValueError("LOB not found")
-    prev_items = load_version_items(c, lob["current_version_id"])
+    type_id = type_id or None
+    prev_items = load_version_items(c, stream_version_id(c, lob, type_id))
     summary, (added, removed, modified, unchanged) = _diff_summary(prev_items, items, sample=0)
-    vno = (c.execute("SELECT MAX(version_no) FROM inventory_versions WHERE lob_id=?", (lob_id,)).fetchone()[0] or 0) + 1
+    vno = (c.execute("SELECT MAX(version_no) FROM inventory_versions WHERE lob_id=? AND type_id IS ?",
+                     (lob_id, type_id)).fetchone()[0] or 0) + 1
     vid = c.execute(
         """INSERT INTO inventory_versions(lob_id, version_no, filename, note, uploaded_by, uploaded_at, template_id,
-           key_field, mapping, row_count, added, removed, modified, unchanged, restored_from, scope_msp, warnings)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           key_field, mapping, row_count, added, removed, modified, unchanged, restored_from, scope_msp, warnings, type_id)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (lob_id, vno, filename, note, uploaded_by, db.now_iso(), template_id, key_field, json.dumps(mapping),
-         len(items), len(added), len(removed), len(modified), unchanged, restored_from, scope_msp, json.dumps(warnings or []))).lastrowid
+         len(items), len(added), len(removed), len(modified), unchanged, restored_from, scope_msp, json.dumps(warnings or []),
+         type_id)).lastrowid
     ph = ",".join("?" * len(FIELDS))
     c.executemany(
-        f"""INSERT INTO inventory_rows(version_id, item_key, {ROW_COLS}, extra, row_hash) VALUES (?,?,{ph},?,?)""",
-        [(vid, k, *[it.get(f, "") for f in FIELDS], json.dumps(it.get("extra") or {}), _hash(it)) for k, it in items.items()])
+        f"""INSERT INTO inventory_rows(version_id, item_key, {ROW_COLS}, extra, row_hash, file_dups) VALUES (?,?,{ph},?,?,?)""",
+        [(vid, k, *[it.get(f, "") for f in FIELDS], json.dumps(it.get("extra") or {}), _hash(it), it.get("file_dups") or 0)
+         for k, it in items.items()])
     chg = [(lob_id, vid, k, "added", None, None, None) for k in added]
     chg += [(lob_id, vid, k, "removed", None, None, None) for k in removed]
     for k, fields in modified.items():
@@ -329,8 +365,9 @@ def commit_version(c, lob_id, items, *, filename, note, uploaded_by, template_id
 
     # rebuild current
     prev_cur = {r["item_key"]: dict(r) for r in c.execute(
-        "SELECT item_key, first_version_no, last_changed_version_no FROM inventory_current WHERE lob_id=?", (lob_id,))}
-    c.execute("DELETE FROM inventory_current WHERE lob_id=?", (lob_id,))
+        "SELECT item_key, first_version_no, last_changed_version_no FROM inventory_current WHERE lob_id=? AND type_id IS ?",
+        (lob_id, type_id))}
+    c.execute("DELETE FROM inventory_current WHERE lob_id=? AND type_id IS ?", (lob_id, type_id))
     added_s, mod_s = set(added), set(modified)
     cur_rows = []
     for k, it in items.items():
@@ -338,37 +375,46 @@ def commit_version(c, lob_id, items, *, filename, note, uploaded_by, template_id
         tag = "new" if k in added_s else ("modified" if k in mod_s else "unchanged")
         cur_rows.append((lob_id, k, *[it.get(f, "") for f in FIELDS], json.dumps(it.get("extra") or {}),
                          p.get("first_version_no") or vno,
-                         vno if tag != "unchanged" else (p.get("last_changed_version_no") or vno), tag))
+                         vno if tag != "unchanged" else (p.get("last_changed_version_no") or vno), tag, it.get("file_dups") or 0,
+                         type_id))
     c.executemany(
-        f"""INSERT INTO inventory_current(lob_id, item_key, {ROW_COLS}, extra, first_version_no, last_changed_version_no, change_tag)
-           VALUES (?,?,{ph},?,?,?,?)""", cur_rows)
-    c.execute("UPDATE lobs SET current_version_id=? WHERE id=?", (vid, lob_id))
+        f"""INSERT INTO inventory_current(lob_id, item_key, {ROW_COLS}, extra, first_version_no, last_changed_version_no, change_tag,
+           file_dups, type_id) VALUES (?,?,{ph},?,?,?,?,?,?)""", cur_rows)
+    if type_id:
+        c.execute("UPDATE lob_types SET current_version_id=? WHERE id=?", (vid, type_id))
+    else:
+        c.execute("UPDATE lobs SET current_version_id=? WHERE id=?", (vid, lob_id))
     refresh_matches(c, lob_id)
-    return {"version_id": vid, "version_no": vno, **{k: v for k, v in summary.items() if k != "samples"}}
+    return {"version_id": vid, "version_no": vno, "type_id": type_id, **{k: v for k, v in summary.items() if k != "samples"}}
 
 
-def scoped_items(c, lob, parsed, mapping, key_field, scope_msp=None):
-    items, warnings = build_items(parsed, mapping, key_field, forced_msp=scope_msp)
-    prev = load_version_items(c, lob["current_version_id"])
+def scoped_items(c, lob, parsed, mapping, key_field, scope_msp=None, type_id=None):
+    t = get_type(c, lob["id"], type_id)
+    items, warnings = build_items(parsed, mapping, key_field, forced_msp=scope_msp, forced_type=t and t["name"],
+                                  key_prefix=type_key_prefix(type_id))
+    prev = load_version_items(c, stream_version_id(c, lob, type_id))
     if scope_msp:
         items = merge_scope(prev, items, scope_msp)
     return prev, items, warnings
 
 
-def preview_upload(c, lob_id, token, mapping, key_field, sheet=None, header_row=None, scope_msp=None):
+def preview_upload(c, lob_id, token, mapping, key_field, sheet=None, header_row=None, scope_msp=None, type_id=None):
     parsed = parse_upload(token, sheet, header_row)
     lob = db.one(c, "SELECT * FROM lobs WHERE id=?", (lob_id,))
     if not lob:
         raise ValueError("LOB not found")
-    prev, items, warnings = scoped_items(c, lob, parsed, mapping, key_field, scope_msp)
-    prev_key = db.one(c, "SELECT key_field FROM inventory_versions WHERE id=?", (lob["current_version_id"],)) if lob["current_version_id"] else None
+    prev, items, warnings = scoped_items(c, lob, parsed, mapping, key_field, scope_msp, type_id)
+    cur_vid = stream_version_id(c, lob, type_id)
+    prev_key = db.one(c, "SELECT key_field FROM inventory_versions WHERE id=?", (cur_vid,)) if cur_vid else None
     if prev_key and prev_key["key_field"] != key_field:
         warnings.insert(0, f"Key field changed from {KEY_FIELDS.get(prev_key['key_field'])} to {KEY_FIELDS.get(key_field)} "
                            "- most rows will show as removed+added.")
     summary, _ = _diff_summary(prev, items)
     summary["warnings"] = warnings
-    summary["is_first_version"] = not lob["current_version_id"]
+    summary["is_first_version"] = not cur_vid
+    summary["type"] = (get_type(c, lob_id, type_id) or {}).get("name")
     summary["scope_msp"] = scope_msp
+    summary["file_duplicates"] = sum(it.get("file_dups") or 0 for it in items.values())
     existing = {m["name"].lower() for m in db.rows(c, "SELECT name FROM msps WHERE lob_id=?", (lob_id,))}
     summary["new_msps"] = sorted({(it.get("msp") or "").strip() for it in items.values()
                                   if (it.get("msp") or "").strip() and (it.get("msp") or "").strip().lower() not in existing})
@@ -382,7 +428,7 @@ def restore_version(c, lob_id, version_id, uploaded_by="", note=""):
     items = load_version_items(c, version_id)
     return commit_version(c, lob_id, items, filename=v["filename"], note=note or f"Restored from v{v['version_no']}",
                           uploaded_by=uploaded_by, template_id=v["template_id"], key_field=v["key_field"],
-                          mapping=db.jloads(v["mapping"], {}), restored_from=version_id)
+                          mapping=db.jloads(v["mapping"], {}), restored_from=version_id, type_id=v["type_id"])
 
 
 def compare_versions(c, lob_id, v_old, v_new):
@@ -521,7 +567,25 @@ def refresh_matches(c, lob_id=None):
            cs_online_state=?, cs_last_seen=?, cs_agent_version=?, cs_os=?, edr_actual=?, verification=?,
            applicable=?, edr_state=?, coverage_status=?
            WHERE lob_id=? AND item_key=?""", updates)
+    tag_duplicates(c, lob_id)
     rebuild_host_map(c)
+
+
+def tag_duplicates(c, lob_id=None):
+    """Count rows per LOB sharing an IP / node name. dup_ip or dup_name > 1 marks a duplicate."""
+    where, params = ("WHERE lob_id=?", (lob_id,)) if lob_id else ("", ())
+    rows = db.rows(c, f"SELECT lob_id, item_key, ip, node_name FROM inventory_current {where}", params)
+    by_ip, by_name = {}, {}
+    for r in rows:
+        ip, nn = (r["ip"] or "").strip().lower(), db.norm_hostname(r["node_name"])
+        r["_ip"], r["_nn"] = ip, nn
+        if ip:
+            by_ip[(r["lob_id"], ip)] = by_ip.get((r["lob_id"], ip), 0) + 1
+        if nn:
+            by_name[(r["lob_id"], nn)] = by_name.get((r["lob_id"], nn), 0) + 1
+    c.executemany("UPDATE inventory_current SET dup_ip=?, dup_name=? WHERE lob_id=? AND item_key=?",
+                  [(by_ip.get((r["lob_id"], r["_ip"]), 0), by_name.get((r["lob_id"], r["_nn"]), 0), r["lob_id"], r["item_key"])
+                   for r in rows])
 
 
 def _ts_num(ts):

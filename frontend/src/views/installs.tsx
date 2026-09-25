@@ -25,7 +25,7 @@ export default function Installs() {
     <div>
       <PageHeader
         title="New installs"
-        sub={<>Agents by first-seen (install) date. A <b>reinstall</b> means an older, different agent ID already had the same IP and/or hostname — the sensor was reinstalled or the machine re-imaged. Confidence: IP + hostname &gt; hostname &gt; IP only.</>}
+        sub={<>Agents by first-seen (install) date. A <b>reinstall</b> means an older, different agent ID already had the same connection IP — the sensor was reinstalled or the machine re-imaged.</>}
         actions={<>
           <Segmented value={preset} onChange={(v) => { const p = PRESETS.find((x) => x[0] === v); if (p) { const [a, b] = p[2](); set({ first_from: a, first_to: b }); } }}
             options={PRESETS.map(([k, l]) => [k, l] as [string, string])} />
@@ -36,7 +36,7 @@ export default function Installs() {
       />
       <KpiGrid className="grid-cols-[repeat(auto-fill,minmax(220px,1fr))]">
         <Kpi label="New agents" value={tot} tone="info" active={!state.reinstall} onClick={() => set({ reinstall: undefined })} />
-        <Kpi label="Fresh installs" value={tot - re} tone="good" foot="no earlier agent on same IP/hostname" />
+        <Kpi label="Fresh installs" value={tot - re} tone="good" foot="no earlier agent on the same connection IP" />
         <Kpi label="Reinstalls" value={re} tone="violet" foot={`${pct(re, tot)}% of new agents`} active={state.reinstall === "1"} onClick={() => set({ reinstall: state.reinstall === "1" ? undefined : "1" })} />
       </KpiGrid>
       <Card className="mt-4">

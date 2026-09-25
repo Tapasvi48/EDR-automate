@@ -1,23 +1,36 @@
 "use client";
 import * as React from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, FileSpreadsheet, Info, UploadCloud } from "lucide-react";
 import { toast } from "sonner";
-import { api } from "@/lib/api";
+import { api, apiUpload, type UploadProgress } from "@/lib/api";
 import { useMeta } from "@/lib/hooks";
 import { fmtN } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import { Badge, Button, Callout, Checkbox, Field, Input, Modal, Select, Spinner, Tabs } from "./ui";
+import { Badge, Button, Callout, Checkbox, Field, Input, Modal, ProgressPanel, Select, Tabs } from "./ui";
 import { SimpleTable } from "./data-table";
 import { Live, Mono, YN } from "./badges";
 
 const STEPS = ["Choose file", "Map columns", "Review changes", "Done"];
+type Task = { label: string; detail?: string; startedAt: number; progress?: UploadProgress };
 
-export function UploadWizard({ lob, open, onOpenChange, mspId }: { lob: { id: number; name: string }; open: boolean; onOpenChange: (v: boolean) => void; mspId?: number | null }) {
+export function UploadWizard({ lob, open, onOpenChange, mspId, typeId }: { lob: { id: number; name: string }; open: boolean; onOpenChange: (v: boolean) => void; mspId?: number | null; typeId?: number | null }) {
   const qc = useQueryClient();
   const { data: meta } = useMeta();
   const [step, setStep] = React.useState(0);
-  const [busy, setBusy] = React.useState(false);
+  const [task, setTask] = React.useState<Task | null>(null);
+  const busy = !!task;
+  /** run a server step with a visible progress panel and elapsed timer */
+  const run = async <T,>(label: string, fn: () => Promise<T>, detail?: string): Promise<T | undefined> => {
+    setTask({ label, detail, startedAt: Date.now() });
+    try {
+      return await fn();
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setTask(null);
+    }
+  };
   const [parsed, setParsed] = React.useState<any>(null);
   const [mapping, setMapping] = React.useState<Record<string, string>>({});
   const [keyField, setKeyField] = React.useState("ip");
@@ -32,9 +45,14 @@ export function UploadWizard({ lob, open, onOpenChange, mspId }: { lob: { id: nu
   const [drag, setDrag] = React.useState(false);
   const fileRef = React.useRef<HTMLInputElement>(null);
   const [scope, setScope] = React.useState(mspId ? String(mspId) : "");
+  const [invType, setInvType] = React.useState(typeId ? String(typeId) : "");
+  const { data: typeList } = useQuery({ queryKey: ["lob-types", lob.id], queryFn: () => api<any>(`/api/lobs/${lob.id}/types`) });
+  const types: { id: number; name: string; current_version?: number }[] = typeList?.rows || [];
+  const typeName = types.find((t) => String(t.id) === invType)?.name;
   const lobMsps = (meta?.msps || []).filter((m) => m.lob_id === lob.id);
   const scopeName = lobMsps.find((m) => String(m.id) === scope)?.name;
-  const fields = (meta?.inventory_fields || []).filter(([f]) => !(scope && f === "msp"));
+  // a type upload sets node type from the type itself
+  const fields = (meta?.inventory_fields || []).filter(([f]) => !(scope && f === "msp") && !(invType && f === "node_type"));
 
   const applyParse = (r: any) => {
     setParsed(r);
@@ -43,12 +61,16 @@ export function UploadWizard({ lob, open, onOpenChange, mspId }: { lob: { id: nu
     setTemplateId(r.template_id ? String(r.template_id) : "");
   };
   const onFile = async (f?: File) => {
-    if (!f) return;
-    setBusy(true);
+    if (!f || busy) return;
+    const startedAt = Date.now();
+    setTask({ label: `Uploading ${f.name}`, startedAt, progress: { loaded: 0, total: f.size, startedAt } });
     try {
       const fd = new FormData();
       fd.append("file", f);
-      const up = await api<any>("/api/uploads", { method: "POST", body: fd });
+      const reading: Task = { label: `Reading ${f.name}`, detail: "detecting sheet, header row and columns", startedAt };
+      // once every byte is sent the server parses the sheet: switch to the indeterminate bar
+      const up = await apiUpload<any>("/api/uploads", fd, (progress) => setTask(progress.loaded >= progress.total ? reading : (t) => t && { ...t, progress }));
+      setTask(reading);
       const r = await api<any>(`/api/uploads/${up.token}/parse`, { method: "POST", body: { lob_id: lob.id } });
       applyParse(r);
       setTplName(`${lob.name} inventory`);
@@ -56,39 +78,27 @@ export function UploadWizard({ lob, open, onOpenChange, mspId }: { lob: { id: nu
     } catch (e: any) {
       toast.error(e.message);
     } finally {
-      setBusy(false);
+      setTask(null);
+      if (fileRef.current) fileRef.current.value = "";
     }
   };
-  const reparse = async (patch: { sheet?: string; header_row?: number; template_id?: string }) => {
-    setBusy(true);
-    try {
+  const reparse = (patch: { sheet?: string; header_row?: number; template_id?: string }) =>
+    run("Re-reading the file", async () => {
       const r = await api<any>(`/api/uploads/${parsed.token}/parse`, {
         method: "POST",
         body: { sheet: patch.sheet ?? parsed.sheet, header_row: patch.header_row ?? parsed.header_row, template_id: patch.template_id !== undefined ? (patch.template_id ? +patch.template_id : null) : (templateId ? +templateId : null), lob_id: lob.id },
       });
       applyParse(r);
       if (patch.template_id !== undefined) setTemplateId(patch.template_id);
-    } catch (e: any) {
-      toast.error(e.message);
-    } finally {
-      setBusy(false);
-    }
-  };
-  const body = () => ({ token: parsed.token, sheet: parsed.sheet, header_row: parsed.header_row, mapping: scope ? { ...mapping, msp: "" } : mapping, key_field: keyField, scope_msp_id: scope ? +scope : null });
-  const doPreview = async () => {
-    setBusy(true);
-    try {
+    });
+  const body = () => ({ token: parsed.token, sheet: parsed.sheet, header_row: parsed.header_row, mapping: scope ? { ...mapping, msp: "" } : mapping, key_field: keyField, scope_msp_id: scope ? +scope : null, type_id: invType ? +invType : null });
+  const doPreview = () =>
+    run(`Comparing ${fmtN(parsed.row_count)} rows with the current version`, async () => {
       setPreview(await api(`/api/lobs/${lob.id}/upload/preview`, { method: "POST", body: body() }));
       setStep(2);
-    } catch (e: any) {
-      toast.error(e.message);
-    } finally {
-      setBusy(false);
-    }
-  };
-  const commit = async () => {
-    setBusy(true);
-    try {
+    });
+  const commit = () =>
+    run("Saving the new version and matching it against Falcon", async () => {
       try { localStorage.setItem("uploader", uploadedBy); } catch {}
       const r = await api(`/api/lobs/${lob.id}/upload/commit`, {
         method: "POST",
@@ -98,12 +108,7 @@ export function UploadWizard({ lob, open, onOpenChange, mspId }: { lob: { id: nu
       setStep(3);
       qc.invalidateQueries();
       toast.success(`Version v${r.version_no} created`);
-    } catch (e: any) {
-      toast.error(e.message);
-    } finally {
-      setBusy(false);
-    }
-  };
+    }, `${fmtN(preview?.total)} items`);
 
   const usedHeaders = new Set(Object.values(mapping).filter(Boolean));
   const extraHeaders = (parsed?.headers || []).filter((h: string) => !usedHeaders.has(h));
@@ -123,6 +128,7 @@ export function UploadWizard({ lob, open, onOpenChange, mspId }: { lob: { id: nu
           {step === 3 && <Button variant="primary" onClick={() => onOpenChange(false)}>Close</Button>}
         </>
       }>
+      {task && step > 0 && <ProgressPanel className="sticky top-0 z-10 mb-4 shadow-card" label={task.label} detail={task.detail} startedAt={task.startedAt} />}
       <div className="mb-5 grid grid-cols-4 gap-2">
         {STEPS.map((s, i) => (
           <div key={s} className={cn("rounded-lg border px-3 py-2 text-xs font-semibold", i === step ? "border-accent bg-accent-soft text-accent-fg" : i < step ? "border-border text-good-fg" : "border-border text-muted")}>
@@ -133,13 +139,25 @@ export function UploadWizard({ lob, open, onOpenChange, mspId }: { lob: { id: nu
 
       {step === 0 && (
         <div>
+          <div className="mb-3 flex flex-wrap items-center gap-3">
+            <span className="w-24 text-[13px] font-medium">Inventory</span>
+            <Select value={invType} onChange={setInvType} placeholder={`Main ${lob.name} inventory`}
+              options={types.map((t) => ({ value: t.id, label: `Type: ${t.name}${t.current_version ? ` (now v${t.current_version})` : " (first upload)"}` }))} />
+            <span className="text-xs text-muted">{invType ? `own version history — only ${typeName} nodes are replaced` : types.length ? "the main inventory; types keep their own versions" : "add types on the LOB page to keep separate inventories"}</span>
+          </div>
           {lobMsps.length > 0 && (
-            <div className="mb-4 flex items-center gap-3">
-              <span className="text-[13px] font-medium">Upload for</span>
+            <div className="mb-4 flex flex-wrap items-center gap-3">
+              <span className="w-24 text-[13px] font-medium">Upload for</span>
               <Select value={scope} onChange={setScope} placeholder={`Whole ${lob.name} (all MSPs)`} options={lobMsps.map((m) => ({ value: m.id, label: `MSP: ${m.name}` }))} />
-              <span className="text-xs text-muted">{scope ? "only this MSP's nodes will be replaced" : "the file replaces the whole LOB inventory"}</span>
+              <span className="text-xs text-muted">{scope ? "only this MSP's nodes will be replaced" : `the file replaces the whole ${invType ? typeName : "main"} inventory`}</span>
             </div>
           )}
+          {task ? (
+            <div className="rounded-2xl border-2 border-dashed border-accent bg-accent-soft/40 px-6 py-10">
+              <ProgressPanel className="mx-auto max-w-xl bg-surface" label={task.label} detail={task.detail} startedAt={task.startedAt}
+                loaded={task.progress?.loaded} total={task.progress?.total} />
+            </div>
+          ) : (
           <div
             onClick={() => fileRef.current?.click()}
             onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
@@ -147,11 +165,12 @@ export function UploadWizard({ lob, open, onOpenChange, mspId }: { lob: { id: nu
             onDrop={(e) => { e.preventDefault(); setDrag(false); onFile(e.dataTransfer.files[0]); }}
             className={cn("cursor-pointer rounded-2xl border-2 border-dashed px-6 py-14 text-center transition-colors", drag ? "border-accent bg-accent-soft" : "border-border-strong bg-surface-2 hover:border-accent")}
           >
-            {busy ? <Spinner className="mx-auto size-8" /> : <UploadCloud className="mx-auto size-10 text-muted" />}
+            <UploadCloud className="mx-auto size-10 text-muted" />
             <div className="mt-3 text-[15px] font-semibold">Drop the inventory file here or click to browse</div>
             <div className="mt-1 text-xs text-muted">.xlsx, .xlsm or .csv · header row is detected automatically · extra columns are kept</div>
-            <input ref={fileRef} type="file" accept=".xlsx,.xlsm,.csv,.txt" className="hidden" onChange={(e) => onFile(e.target.files?.[0])} />
           </div>
+          )}
+          <input ref={fileRef} type="file" accept=".xlsx,.xlsm,.csv,.txt" className="hidden" onChange={(e) => onFile(e.target.files?.[0])} />
           <Callout className="mt-4">
             <b>How versioning works:</b> rows are matched to the previous version by the <b>key field</b> (IP by default). New keys are tagged <Badge tone="info">NEW</Badge>, missing keys are recorded as removed, and any changed field is logged with its old and new value. Every upload is an immutable version — you can view, compare or restore any earlier version.
           </Callout>
@@ -168,6 +187,9 @@ export function UploadWizard({ lob, open, onOpenChange, mspId }: { lob: { id: nu
             <Field label="Key field (row identity across versions)"><Select value={keyField} onChange={setKeyField} options={Object.entries(meta?.key_fields || {})} /></Field>
             <Field label="This file contains"><Select value={scope} onChange={setScope} placeholder="All MSPs (use MSP column)" options={lobMsps.map((m) => ({ value: m.id, label: `Only ${m.name}'s nodes` }))} /></Field>
           </div>
+          {invType && (
+            <Callout className="mb-4">Uploading into type <b>{typeName}</b> — every row gets node type <b>{typeName}</b> and is compared with the current {typeName} version only. The main inventory and other types are not touched.</Callout>
+          )}
           {scope ? (
             <Callout className="mb-4">Every row is assigned to <b>{scopeName}</b>. Only {scopeName}&apos;s nodes are replaced — other MSPs&apos; rows are carried over unchanged into the new version.</Callout>
           ) : !mapping.msp && lobMsps.length > 0 ? (
@@ -225,7 +247,7 @@ export function UploadWizard({ lob, open, onOpenChange, mspId }: { lob: { id: nu
       {step === 3 && result && (
         <div className="py-6 text-center">
           <div className="mx-auto mb-3 grid size-12 place-items-center rounded-full bg-good-soft"><Check className="size-6 text-good-fg" /></div>
-          <div className="text-[17px] font-semibold">Version v{result.version_no} created</div>
+          <div className="text-[17px] font-semibold">{typeName ? `${typeName} ` : ""}Version v{result.version_no} created</div>
           <div className="mt-1 text-muted">{fmtN(result.total)} items · <span className="text-accent-fg">+{fmtN(result.added)} new</span> · <span className="text-crit-fg">−{fmtN(result.removed)} removed</span> · <span className="text-warn-fg">{fmtN(result.modified)} modified</span> · {fmtN(result.unchanged)} unchanged</div>
           <div className="mt-1 text-xs text-muted">EDR verification has been recalculated against the current Falcon data.</div>
           {result.warnings?.length > 0 && <Callout tone="warn" className="mx-auto mt-4 max-w-xl text-left">{result.warnings.map((w: string) => <div key={w}>{w}</div>)}</Callout>}
@@ -245,8 +267,14 @@ export function Preview({ p }: { p: any }) {
   ];
   return (
     <div>
-      {p.is_first_version && <Callout className="mb-3"><Info className="mr-1 inline size-4" />This is the first inventory for this LOB — every row will be tagged NEW.</Callout>}
+      {p.is_first_version && <Callout className="mb-3"><Info className="mr-1 inline size-4" />This is the first {p.type ? `${p.type} inventory` : "inventory for this LOB"} — every row will be tagged NEW.</Callout>}
+      {p.type && !p.is_first_version && <Callout className="mb-3">Compared with the current <b>{p.type}</b> version only. The main inventory and other types are unchanged.</Callout>}
       {p.scope_msp && <Callout className="mb-3">Only <b>{p.scope_msp}</b>&apos;s nodes are compared and replaced. Other MSPs are unchanged.</Callout>}
+      {p.file_duplicates > 0 && (
+        <Callout tone="warn" className="mb-3">
+          <b>{fmtN(p.file_duplicates)}</b> duplicate row{p.file_duplicates === 1 ? "" : "s"} in the file share a key with an earlier row. Each is merged into its first occurrence, which is tagged <Badge tone="serious">DUP</Badge> so you can filter them in the inventory.
+        </Callout>
+      )}
       {p.new_msps?.length > 0 && <Callout className="mb-3">New MSPs will be created: <b>{p.new_msps.join(", ")}</b></Callout>}
       <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
         <Box label="Rows in file" value={p.total} />

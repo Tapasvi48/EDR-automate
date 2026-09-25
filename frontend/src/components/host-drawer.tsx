@@ -33,7 +33,11 @@ function HostSheet({ aid, onClose, onBack, canBack }: { aid: string; onClose: ()
   React.useEffect(() => setTab("overview"), [aid]);
   const d = q.data;
   const h = d?.host;
-  const dupCount = d ? d.same_ip.filter((x: any) => x.console_state === "active").length + (h.console_state === "active" ? 1 : 0) : 0;
+  // same connection IP + local IP: at most one online = duplicate agents, two or more online = routing conflict
+  const peers = d && h.console_state === "active" ? [h, ...d.same_ip.filter((x: any) => x.console_state === "active")] : [];
+  const peersOnline = peers.filter((x: any) => x.online_state === "online").length;
+  const dupCount = peersOnline < 2 ? peers.length : 0;
+  const rcCount = peersOnline >= 2 ? peers.length : 0;
   const stale = (globalThis as any).__staleHours || 1;
 
   const refreshNic = async () => {
@@ -62,7 +66,7 @@ function HostSheet({ aid, onClose, onBack, canBack }: { aid: string; onClose: ()
     <Sheet
       open
       onOpenChange={(o) => !o && onClose()}
-      title={h ? <span>{h.hostname || "(no hostname)"} <HostFlags r={{ ...h, dup_count: dupCount }} /></span> : "Loading…"}
+      title={h ? <span>{h.hostname || "(no hostname)"} <HostFlags r={{ ...h, dup_count: dupCount, rc_count: rcCount }} /></span> : "Loading…"}
       sub={h ? <span className="flex flex-wrap items-center gap-2"><Mono>{h.aid}</Mono>
         <button title="Copy AID" onClick={() => { navigator.clipboard?.writeText(h.aid); toast.success("AID copied"); }}><Copy className="size-3.5" /></button>
         · <HostStatus r={h} /></span> : undefined}
@@ -82,7 +86,7 @@ function HostSheet({ aid, onClose, onBack, canBack }: { aid: string; onClose: ()
           )}
           {h.is_reinstall ? (
             <Callout tone="info" className="mb-3">
-              <b>Reinstall:</b> an older agent ID had the same {h.reinstall_reason?.replace("+", " + ")}. See the “Related agents” tab.
+              <b>Reinstall:</b> an older agent ID had the same connection IP. See the “Related agents” tab.
             </Callout>
           ) : null}
           <Tabs value={tab} onChange={setTab} tabs={[
@@ -155,8 +159,8 @@ function HostSheet({ aid, onClose, onBack, canBack }: { aid: string; onClose: ()
                   <SectionTitle className="mt-0">Reinstall of — older agent IDs</SectionTitle>
                   <Card><SimpleTable rows={h.reinstall_of} columns={[
                     { key: "hostname", label: "Hostname", render: (r: any) => <PeerLink aid={r.aid}>{r.hostname || r.aid}</PeerLink> },
-                    { key: "match", label: "Matched by", render: (r: any) => <Badge tone="violet">{r.match}</Badge> },
-                    { key: "ip", label: "IP", render: (r: any) => <Mono>{r.ip}</Mono> },
+                    { key: "shared_ip", label: "Shared connection IP", render: (r: any) => <Mono>{r.shared_ip || r.ip}</Mono> },
+                    { key: "ip", label: "Its current connection IP", render: (r: any) => <Mono>{r.ip}</Mono> },
                     { key: "state", label: "Console state" },
                     { key: "first_seen", label: "First seen", render: (r: any) => fmtDt(r.first_seen) },
                     { key: "last_seen", label: "Last seen", render: (r: any) => fmtDt(r.last_seen) },
@@ -174,8 +178,8 @@ function HostSheet({ aid, onClose, onBack, canBack }: { aid: string; onClose: ()
                 </div>
               )}
               <div>
-                <SectionTitle className="mt-0">Other agents on the same IP ({d.same_ip.length})</SectionTitle>
-                <Card><SimpleTable rows={d.same_ip} columns={peerCols} empty="No other agent ID uses this IP" /></Card>
+                <SectionTitle className="mt-0">Other agents with the same connection IP and local IP ({d.same_ip.length})</SectionTitle>
+                <Card><SimpleTable rows={d.same_ip} columns={peerCols} empty="No other agent ID has this connection IP and local IP" /></Card>
               </div>
               <div>
                 <SectionTitle className="mt-0">Other agents with the same hostname ({d.same_hostname.length})</SectionTitle>

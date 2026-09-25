@@ -147,8 +147,9 @@ def executive_report():
             ("New installs today", k["new_today"]), ("New installs 7 days", k["new_7d"]), ("New installs 30 days", k["new_30d"]),
             ("Reinstalls 7 days", k["reinstall_7d"]), ("Reinstalls 30 days", k["reinstall_30d"]),
             ("Went offline last 24h", k["went_offline_24h"]), ("Went offline last 7 days", k["went_offline_7d"]),
-            ("Offline > 30 days", k["offline_gt30d"]), ("Duplicate IP groups", k["dup_ip_groups"]),
-            ("Hosts sharing an IP", k["dup_ip_hosts"]), ("Duplicate hostname groups", k["dup_hn_groups"]),
+            ("Offline > 30 days", k["offline_gt30d"]), ("Auto-removed (offline, removed by Falcon)", k["auto_removed"]),
+            ("Duplicate agent groups", k["dup_ip_groups"]), ("Duplicate agents", k["dup_ip_hosts"]),
+            ("Routing conflict groups", k["routing_conflict_groups"]), ("Agents in routing conflicts", k["routing_conflict_hosts"]),
             ("Outdated sensor (older than N-2)", k["outdated_sensor"]), ("Reduced functionality mode", k["rfm"]),
             ("Contained", k["contained"]), ("Unmapped agents (no LOB)", k["not_in_inventory"]),
         ]]
@@ -162,17 +163,21 @@ def executive_report():
         msp_cols = [("lob", "LOB"), ("msp", "MSP")] + cov_cols
 
         def hosts(params):
-            if params.get("outdated") == "1":
+            if params.get("outdated") == "1" or params.get("sensor_level"):
                 queries.prepare_outdated_temp(c)
             frm, where, prm, order = queries.build_host_query(params, s)
             return db.rows(c, f"SELECT {queries.HOST_LIST_COLS} FROM {frm} {where} {order} LIMIT 50000", prm)
 
         hc = queries.HOST_EXPORT_COLUMNS
+        dup_cols = [("connection_ip", "Connection IP"), ("local_ip", "Local IP"), ("group_size", "Agents"), ("hostname", "Hostname"),
+                    ("aid", "Agent ID"), ("console_state", "Console"), ("online_state", "Online"), ("first_seen", "First Seen"),
+                    ("last_seen", "Last Seen"), ("os_version", "OS")]
         dups = []
-        g = queries.duplicate_groups(c, s, "ip", "", False, 100000, 0)
-        for grp in g["rows"]:
-            for m in queries.duplicate_members(c, "ip", grp["value"]):
-                dups.append({"group": grp["value"], "group_size": grp["n"], **m})
+        rcs = []
+        for kind, out in (("duplicate", dups), ("routing", rcs)):
+            for grp in queries.duplicate_groups(c, s, kind, "", False, 100000, 0)["rows"]:
+                for m in queries.duplicate_members(c, grp["connection_ip"], grp["local_ip"]):
+                    out.append({"group_size": grp["n"], **m})
         inv_issues = db.rows(c, """SELECT l.name lob, ic.* FROM inventory_current ic JOIN lobs l ON l.id=ic.lob_id
             WHERE ic.applicable=1 AND ic.edr_state<>'Online' ORDER BY l.name, ic.msp, ic.coverage_status""")
         inv_cols = [("lob", "LOB"), ("msp", "MSP"), ("coverage_status", "EDR Status"), ("ip", "IP"), ("node_name", "Node Name"), ("node_type", "Node Type"), ("live", "Live"),
@@ -190,9 +195,8 @@ def executive_report():
             ("New installs 30d", hc, hosts({"state": "all", "first_from": queries.iso_ago(days=30), "sort": "first_seen"})),
             ("Reinstalls 30d", hc, hosts({"state": "all", "reinstall": "1", "first_from": queries.iso_ago(days=30), "sort": "first_seen"})),
             ("Removed 30d", hc, hosts({"state": "removed", "removed_from": queries.iso_ago(days=30), "sort": "removed_at"})),
-            ("Duplicate IPs", [("group", "IP"), ("group_size", "Agents"), ("hostname", "Hostname"), ("aid", "Agent ID"),
-                               ("console_state", "Console"), ("online_state", "Online"), ("first_seen", "First Seen"),
-                               ("last_seen", "Last Seen"), ("os_version", "OS")], dups),
+            ("Duplicate Agents", dup_cols, dups),
+            ("Routing Conflicts", dup_cols, rcs),
             ("Not in Inventory", hc, hosts({"unlisted": "1"})),
             ("Unmapped Agents", hc, hosts({"unmapped": "1"})),
             ("Outdated Sensor", hc, hosts({"outdated": "1"})),

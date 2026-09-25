@@ -128,15 +128,21 @@ def map_host(d):
 
 
 def compute_devices(c, settings):
-    """Agents in the console that share a usable IP are one device. The online (else most recently seen)
-    agent is the device's primary; only primaries are counted in online / offline totals."""
+    """Active agents that share BOTH a usable connection IP and local IP are the same machine.
+    - at most one of them online  -> duplicate agents: merged into one device, the online (else most recently seen)
+      agent is the primary; only primaries are counted in online / offline totals.
+    - two or more online          -> routing conflict: different live machines, every agent stays its own device."""
     excl = exclusion_patterns(settings)
     groups = {}
-    for r in c.execute("SELECT aid, local_ip, online_state, last_seen FROM hosts WHERE console_state='active'"):
-        key = f"ip:{r['local_ip']}" if not ip_excluded(r["local_ip"], excl) else f"aid:{r['aid']}"
+    for r in c.execute("SELECT aid, connection_ip, local_ip, online_state, last_seen FROM hosts WHERE console_state='active'"):
+        cip, lip = (r["connection_ip"] or "").strip(), (r["local_ip"] or "").strip()
+        key = f"ip:{cip}|{lip}" if not (ip_excluded(cip, excl) or ip_excluded(lip, excl)) else f"aid:{r['aid']}"
         groups.setdefault(key, []).append(r)
     updates = []
     for key, members in groups.items():
+        if sum(1 for m in members if m["online_state"] == "online") >= 2:
+            updates += [(f"aid:{m['aid']}", 1, m["aid"]) for m in members]
+            continue
         members.sort(key=lambda m: (m["online_state"] == "online", m["last_seen"] or ""), reverse=True)
         for i, m in enumerate(members):
             updates.append((key, 1 if i == 0 else 0, m["aid"]))
@@ -388,24 +394,22 @@ def store_nic_history(hist, checked_aids):
         c.executemany("UPDATE hosts SET nic_checked_at=? WHERE aid=?", [(now, a) for a in checked_aids])
 
 
-def detect_reinstalls(c, settings):
-    """A host is a reinstall when an OLDER agent ID (different AID) had the same IP and/or hostname.
-
-    Confidence: ip+hostname (strong) > hostname > ip. Excluded IPs never count as evidence.
-    """
+def detect_reinstalls(c, settings, emit_events=True):
+    """A host is a reinstall when an OLDER agent ID (different AID) had the same connection IP - its current one or
+    any connection IP recorded in earlier syncs. Connection IP is the only evidence; excluded IPs never count."""
     excl = exclusion_patterns(settings)
-    hosts = db.rows(c, "SELECT aid, hostname_norm, local_ip, first_seen, last_seen, console_state, is_reinstall, reinstall_of FROM hosts")
-    by_ip, by_hn = {}, {}
-    for r in c.execute("SELECT aid, ip FROM ip_history WHERE kind='local'"):
+    hosts = db.rows(c, """SELECT aid, hostname_norm, connection_ip, first_seen, last_seen, console_state, is_reinstall, reinstall_of
+                          FROM hosts""")
+    by_ip = {}
+    for r in c.execute("SELECT aid, ip FROM ip_history WHERE kind='connection'"):
         if not ip_excluded(r["ip"], excl):
             by_ip.setdefault(r["ip"], set()).add(r["aid"])
     info = {}
     for h in hosts:
         info[h["aid"]] = h
-        if h["local_ip"] and not ip_excluded(h["local_ip"], excl):
-            by_ip.setdefault(h["local_ip"], set()).add(h["aid"])
-        if h["hostname_norm"]:
-            by_hn.setdefault(h["hostname_norm"], set()).add(h["aid"])
+        ip = (h["connection_ip"] or "").strip()
+        if not ip_excluded(ip, excl):
+            by_ip.setdefault(ip, set()).add(h["aid"])
 
     ip_of = {}
     for ip, aids in by_ip.items():
@@ -418,21 +422,16 @@ def detect_reinstalls(c, settings):
         cands = {}
         for ip in ip_of.get(aid, ()):
             for o in by_ip.get(ip, ()):
-                if o != aid and (info[o]["first_seen"] or "") < fs:
-                    cands.setdefault(o, set()).add("ip")
-        if h["hostname_norm"]:
-            for o in by_hn.get(h["hostname_norm"], ()):
-                if o != aid and (info[o]["first_seen"] or "") < fs:
-                    cands.setdefault(o, set()).add("hostname")
+                if o != aid and o in info and (info[o]["first_seen"] or "") < fs:
+                    cands.setdefault(o, set()).add(ip)
         if cands:
-            prev = [{"aid": o, "match": "+".join(sorted(m, reverse=True)), "hostname": info[o]["hostname_norm"],
-                     "ip": info[o]["local_ip"], "first_seen": info[o]["first_seen"], "last_seen": info[o]["last_seen"],
-                     "state": info[o]["console_state"]} for o, m in cands.items()]
+            prev = [{"aid": o, "match": "connection_ip", "shared_ip": ", ".join(sorted(ips)), "hostname": info[o]["hostname_norm"],
+                     "ip": info[o]["connection_ip"], "first_seen": info[o]["first_seen"], "last_seen": info[o]["last_seen"],
+                     "state": info[o]["console_state"]} for o, ips in cands.items()]
             prev.sort(key=lambda p: p["first_seen"] or "", reverse=True)
-            kinds = {p["match"] for p in prev}
-            reason = "ip+hostname" if "ip+hostname" in kinds else ("hostname" if "hostname" in kinds else "ip")
+            reason = "connection_ip"
             payload = json.dumps(prev[:20])
-            if not h["is_reinstall"]:
+            if not h["is_reinstall"] and emit_events:
                 new_events.append((aid, now, "reinstall", json.dumps({"reason": reason, "previous": [p["aid"] for p in prev[:5]]})))
             if not h["is_reinstall"] or h["reinstall_of"] != payload:
                 updates.append((1, payload, reason, aid))

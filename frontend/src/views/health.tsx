@@ -18,7 +18,7 @@ export default function Health() {
   const days = meta?.settings.auto_remove_days || "90";
   return (
     <div>
-      <PageHeader title="Offline & stale" sub={`Devices that stopped checking in, agents that left the console (deleted, auto-removed after ${days} days, or hidden), and sensors that report online but have not been seen recently. Agents sharing an IP are counted once.`} />
+      <PageHeader title="Offline & stale" sub={`Devices that stopped checking in, agents that left the console (deleted, auto-removed after ${days} days, or hidden), and sensors that report online but have not been seen recently. Duplicate agents are counted once.`} />
       <Tabs value={tab} onChange={(t) => replaceAll({ tab: t })} tabs={[
         { id: "offline", label: "Offline", count: k.offline },
         { id: "removed", label: "Removed & hidden", count: k.removed + k.hidden },

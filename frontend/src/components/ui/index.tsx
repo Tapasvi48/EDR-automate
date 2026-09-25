@@ -4,7 +4,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { Loader2, Search, X } from "lucide-react";
 import Link from "next/link";
 import { cn } from "@/lib/utils";
-import { fmtN } from "@/lib/format";
+import { fmtBytes, fmtN, fmtSecs } from "@/lib/format";
 
 /* ---------------- Button ---------------- */
 type BtnProps = React.ButtonHTMLAttributes<HTMLButtonElement> & {
@@ -283,6 +283,43 @@ export function KV({ items }: { items: [string, React.ReactNode][] }) {
           <div className="font-medium break-words">{v === "" || v === null || v === undefined ? <span className="text-muted">–</span> : v}</div>
         </div>
       ))}
+    </div>
+  );
+}
+
+/* ---------------- Progress ---------------- */
+/** Long-running task: determinate bar with bytes / speed / ETA when `loaded`+`total` are known, otherwise an
+ *  indeterminate bar. Elapsed time always ticks so the user can see work is still going. */
+export function ProgressPanel({ label, detail, loaded, total, startedAt, className }: {
+  label: React.ReactNode; detail?: React.ReactNode; loaded?: number; total?: number; startedAt: number; className?: string;
+}) {
+  const [now, setNow] = React.useState(Date.now());
+  React.useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 250);
+    return () => clearInterval(t);
+  }, []);
+  const elapsed = (now - startedAt) / 1000;
+  const known = !!total && loaded !== undefined;
+  const frac = known ? Math.min(1, loaded! / total!) : 0;
+  const speed = known && elapsed > 0.3 ? loaded! / elapsed : 0;
+  const eta = speed ? (total! - loaded!) / speed : null;
+  return (
+    <div className={cn("rounded-xl border border-border bg-surface-2 px-4 py-3", className)} role="status" aria-live="polite">
+      <div className="flex items-center gap-2 text-[13px] font-medium">
+        <Loader2 className="size-4 animate-spin text-accent" />
+        <span className="min-w-0 flex-1 truncate">{label}</span>
+        {known && <span className="tabular text-accent-fg">{Math.round(frac * 100)}%</span>}
+      </div>
+      <div className={cn("relative mt-2 h-2 overflow-hidden rounded-full bg-surface-3", !known && "loadbar")}>
+        {known && <div className="h-full rounded-full bg-accent transition-[width] duration-200" style={{ width: `${frac * 100}%` }} />}
+      </div>
+      <div className="mt-1.5 flex flex-wrap gap-x-3 text-[11.5px] text-muted tabular">
+        {known && <span>{fmtBytes(loaded!)} of {fmtBytes(total!)}</span>}
+        {speed > 0 && frac < 1 && <span>{fmtBytes(speed)}/s</span>}
+        {eta !== null && frac < 1 && <span>~{fmtSecs(eta)} left</span>}
+        {detail && <span>{detail}</span>}
+        <span className="ml-auto">{fmtSecs(elapsed)} elapsed</span>
+      </div>
     </div>
   );
 }

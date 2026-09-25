@@ -31,3 +31,23 @@ export function downloadExcel(path: string, params?: Params) {
   a.click();
   a.remove();
 }
+
+export type UploadProgress = { loaded: number; total: number; startedAt: number };
+
+/** POST a FormData with upload progress events (fetch has none). */
+export function apiUpload<T = any>(path: string, body: FormData, onProgress: (p: UploadProgress) => void): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const startedAt = Date.now();
+    xhr.open("POST", path);
+    xhr.upload.onprogress = (e) => e.lengthComputable && onProgress({ loaded: e.loaded, total: e.total, startedAt });
+    xhr.onload = () => {
+      let j: any = null;
+      try { j = JSON.parse(xhr.responseText); } catch {}
+      if (xhr.status >= 200 && xhr.status < 300) resolve(j);
+      else reject(new ApiError(j && typeof j.detail === "string" ? j.detail : `${xhr.status} ${xhr.statusText}`));
+    };
+    xhr.onerror = () => reject(new ApiError("Network error during upload"));
+    xhr.send(body);
+  });
+}

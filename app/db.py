@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS hosts (
     raw TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_hosts_ip ON hosts(local_ip);
+CREATE INDEX IF NOT EXISTS ix_hosts_connip ON hosts(connection_ip);
 CREATE INDEX IF NOT EXISTS ix_hosts_ipnum ON hosts(local_ip_num);
 CREATE INDEX IF NOT EXISTS ix_hosts_hn ON hosts(hostname_norm);
 CREATE INDEX IF NOT EXISTS ix_hosts_state ON hosts(console_state, online_state);
@@ -158,9 +159,23 @@ CREATE TABLE IF NOT EXISTS inventory_versions (
     mapping TEXT,
     row_count INTEGER, added INTEGER, removed INTEGER, modified INTEGER, unchanged INTEGER,
     restored_from INTEGER,
+    type_id INTEGER,                -- NULL = main LOB inventory, else lob_types.id
     scope_msp TEXT,                 -- set when the upload replaced only one MSP's rows
-    warnings TEXT,
-    UNIQUE (lob_id, version_no)
+    warnings TEXT
+);
+-- version numbers run per inventory stream: the main inventory and each type have their own v1, v2, ...
+CREATE UNIQUE INDEX IF NOT EXISTS ux_versions_stream ON inventory_versions(lob_id, COALESCE(type_id, 0), version_no);
+
+-- Inventory types of a LOB (e.g. Servers, Network, Databases). Each type has its own inventory file and its own
+-- version history; the LOB's current inventory is the main inventory plus the current version of every type.
+CREATE TABLE IF NOT EXISTS lob_types (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    lob_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    current_version_id INTEGER,
+    created_at TEXT,
+    UNIQUE (lob_id, name COLLATE NOCASE)
 );
 
 -- Managed service providers inside a LOB
@@ -205,6 +220,7 @@ CREATE TABLE IF NOT EXISTS inventory_rows (
     edr_feasible TEXT, edr_installed TEXT, remarks TEXT,
     extra TEXT,
     row_hash TEXT,
+    file_dups INTEGER DEFAULT 0,    -- extra rows in the uploaded file with the same key (merged into this one)
     PRIMARY KEY (version_id, item_key)
 );
 
@@ -243,6 +259,10 @@ CREATE TABLE IF NOT EXISTS inventory_current (
     cs_os TEXT,
     edr_actual TEXT,                -- Online | Offline | Inactive | Removed | Not Found
     verification TEXT,              -- Verified | Claimed - Not Found | Installed - Marked No | ...
+    file_dups INTEGER DEFAULT 0,    -- extra rows in the uploaded file with the same key
+    dup_ip INTEGER DEFAULT 0,       -- rows in this LOB sharing the IP (>1 = duplicate)
+    dup_name INTEGER DEFAULT 0,     -- rows in this LOB sharing the node name (>1 = duplicate)
+    type_id INTEGER,                -- inventory type the row belongs to (NULL = main inventory)
     PRIMARY KEY (lob_id, item_key)
 );
 CREATE INDEX IF NOT EXISTS ix_inv_aid ON inventory_current(matched_aid);
@@ -261,6 +281,12 @@ MIGRATIONS = [
     ("inventory_versions", "scope_msp", "TEXT"),
     ("hosts", "device_key", "TEXT"),
     ("hosts", "is_primary", "INTEGER NOT NULL DEFAULT 1"),
+    ("inventory_rows", "file_dups", "INTEGER DEFAULT 0"),
+    ("inventory_versions", "type_id", "INTEGER"),
+    ("inventory_current", "type_id", "INTEGER"),
+    ("inventory_current", "file_dups", "INTEGER DEFAULT 0"),
+    ("inventory_current", "dup_ip", "INTEGER DEFAULT 0"),
+    ("inventory_current", "dup_name", "INTEGER DEFAULT 0"),
 ]
 
 
@@ -324,7 +350,19 @@ def init_db():
             exists = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
             if exists and col not in {r[1] for r in c.execute(f"PRAGMA table_info({table})")}:
                 c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+        # older databases numbered versions per LOB (UNIQUE lob_id, version_no); rebuild the table so each
+        # inventory type can have its own version numbers
+        old = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='inventory_versions'").fetchone()
+        rebuild = bool(old and "UNIQUE (lob_id, version_no)" in old[0])
+        if rebuild:
+            c.execute("ALTER TABLE inventory_versions RENAME TO _inventory_versions_old")
         c.executescript(SCHEMA)
+        if rebuild:
+            cols = [r[1] for r in c.execute("PRAGMA table_info(_inventory_versions_old)")]
+            new_cols = {r[1] for r in c.execute("PRAGMA table_info(inventory_versions)")}
+            keep = ", ".join(x for x in cols if x in new_cols)
+            c.execute(f"INSERT INTO inventory_versions({keep}) SELECT {keep} FROM _inventory_versions_old")
+            c.execute("DROP TABLE _inventory_versions_old")
         for k, v in config.DEFAULT_SETTINGS.items():
             c.execute("INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)", (k, v))
         c.execute("""INSERT OR IGNORE INTO templates(name, description, key_field, mapping, created_at, updated_at)

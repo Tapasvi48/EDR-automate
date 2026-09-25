@@ -24,10 +24,22 @@ def excl_sql(col, settings):
     return " AND ".join(parts), params
 
 
+def _pair_groups(settings, having):
+    ex1, p1 = excl_sql("connection_ip", settings)
+    ex2, p2 = excl_sql("local_ip", settings)
+    return (f"""SELECT connection_ip cip, local_ip lip, COUNT(*) dup_count FROM hosts
+                WHERE console_state='active' AND COALESCE(connection_ip,'')<>'' AND COALESCE(local_ip,'')<>'' AND {ex1} AND {ex2}
+                GROUP BY connection_ip, local_ip HAVING COUNT(*) > 1 AND {having}"""), p1 + p2
+
+
 def dup_ip_subquery(settings):
-    ex, p = excl_sql("local_ip", settings)
-    return (f"SELECT local_ip ip, COUNT(*) dup_count FROM hosts WHERE console_state='active' AND {ex} "
-            f"GROUP BY local_ip HAVING COUNT(*) > 1"), p
+    """Duplicate agents: active agents with the same connection IP AND local IP, at most one of them online."""
+    return _pair_groups(settings, "SUM(online_state='online') <= 1")
+
+
+def routing_conflict_subquery(settings):
+    """Routing conflict: two or more ONLINE agents with the same connection IP AND local IP."""
+    return _pair_groups(settings, "SUM(online_state='online') >= 2")
 
 
 INV_JOIN = """LEFT JOIN (
@@ -46,25 +58,25 @@ INV_JOIN = """LEFT JOIN (
 
 NODE_TYPE_SQL = "COALESCE(NULLIF(inv.inv_node_type, ''), h.product_type_desc)"
 
-HOST_LIST_COLS = """h.aid, h.hostname, h.local_ip, h.external_ip, h.mac_address, h.platform_name, h.os_version, h.os_build,
+HOST_LIST_COLS = """h.aid, h.hostname, h.local_ip, h.connection_ip, h.external_ip, h.mac_address, h.platform_name, h.os_version, h.os_build,
     h.product_type_desc, h.chassis_type_desc, h.machine_domain, h.site_name, h.ou, h.agent_version, h.containment_status, h.rfm,
     h.system_manufacturer, h.system_product_name, h.serial_number, h.last_login_user, h.tags, h.groups,
     h.first_seen, h.last_seen, h.online_state, h.console_state, h.removed_at, h.removal_type,
-    h.is_reinstall, h.reinstall_reason, COALESCE(d.dup_count, 0) dup_count,
+    h.is_reinstall, h.reinstall_reason, COALESCE(d.dup_count, 0) dup_count, COALESCE(rc.dup_count, 0) rc_count,
     hm.inv_lobs, hm.inv_msps, hm.tag_only, COALESCE(NULLIF(inv.inv_node_type, ''), h.product_type_desc) node_type,
     inv.inv_node_name, inv.inv_node_type, inv.inv_domain, inv.inv_live, inv.inv_os,
     inv.inv_edr_feasible, inv.inv_edr_installed, inv.inv_remarks, inv.inv_verification"""
 
 HOST_EXPORT_COLUMNS = [
-    ("hostname", "Hostname"), ("aid", "Agent ID"), ("local_ip", "Local IP"), ("external_ip", "External IP"),
+    ("hostname", "Hostname"), ("aid", "Agent ID"), ("local_ip", "Local IP"), ("connection_ip", "Connection IP"), ("external_ip", "External IP"),
     ("mac_address", "MAC"), ("console_state", "Console State"), ("online_state", "Online State"),
     ("first_seen", "First Seen (UTC)"), ("last_seen", "Last Seen (UTC)"), ("platform_name", "Platform"),
     ("os_version", "OS"), ("os_build", "OS Build"), ("product_type_desc", "Type"), ("chassis_type_desc", "Chassis"),
     ("machine_domain", "Domain"), ("site_name", "Site"), ("ou", "OU"), ("agent_version", "Sensor Version"),
     ("containment_status", "Containment"), ("rfm", "RFM"), ("system_manufacturer", "Manufacturer"),
     ("system_product_name", "Model"), ("serial_number", "Serial"), ("last_login_user", "Last Login User"),
-    ("tags", "Tags"), ("groups", "Host Groups"), ("dup_count", "Hosts sharing IP"), ("is_reinstall", "Reinstall"),
-    ("reinstall_reason", "Reinstall Match"), ("removed_at", "Removed At"), ("removal_type", "Removal Type"),
+    ("tags", "Tags"), ("groups", "Host Groups"), ("dup_count", "Duplicate Agents (same connection + local IP)"), ("rc_count", "Routing Conflict (online agents on same IPs)"), ("is_reinstall", "Reinstall"),
+    ("removed_at", "Removed At"), ("removal_type", "Removal Type"),
     ("inv_lobs", "LOB"), ("inv_msps", "MSP"), ("node_type", "Node Type"), ("inv_node_name", "Inv Node Name"), ("inv_node_type", "Inv Node Type"),
     ("inv_domain", "Inv Domain"), ("inv_live", "Inv Live/Non Live"), ("inv_os", "Inv OS"),
     ("inv_edr_feasible", "Inv EDR Feasible"), ("inv_edr_installed", "Inv EDR Installed"),
@@ -88,8 +100,10 @@ def _like(v):
 def build_host_query(p: dict, settings):
     """p = request query params. Returns (from_sql, where_sql, params, order_sql)."""
     dsql, dparams = dup_ip_subquery(settings)
-    frm = f"hosts h LEFT JOIN ({dsql}) d ON d.ip = h.local_ip AND h.console_state='active' {INV_JOIN}"
-    params = list(dparams)
+    rsql, rparams = routing_conflict_subquery(settings)
+    frm = (f"hosts h LEFT JOIN ({dsql}) d ON d.cip = h.connection_ip AND d.lip = h.local_ip AND h.console_state='active' "
+           f"LEFT JOIN ({rsql}) rc ON rc.cip = h.connection_ip AND rc.lip = h.local_ip AND h.console_state='active' {INV_JOIN}")
+    params = list(dparams) + list(rparams)
     w = []
     state = p.get("state") or "active"
     if state == "gone":
@@ -156,6 +170,8 @@ def build_host_query(p: dict, settings):
         params.append(p["reinstall_reason"])
     if p.get("duplicate") == "1":
         w.append("d.dup_count > 1")
+    if p.get("routing_conflict") == "1":
+        w.append("rc.dup_count > 1")
     if p.get("rfm") == "1":
         w.append("LOWER(h.rfm) = 'yes'")
     if p.get("contained") == "1":
@@ -195,7 +211,10 @@ def build_host_query(p: dict, settings):
             w.append(f"{col} {op} ?")
             params.append(v)
     if p.get("outdated") == "1":
-        w.append("h.agent_version IN (SELECT v FROM _outdated)")
+        w.append(f"{SENSOR_LEVEL_SQL} = 'older'")
+    if p.get("sensor_level") in SENSOR_LEVELS:
+        w.append(f"{SENSOR_LEVEL_SQL} = ?")
+        params.append(p["sensor_level"])
     if p.get("ip_range"):
         lo, hi = cidr_range(p["ip_range"])
         if lo is not None:
@@ -211,22 +230,49 @@ def version_key(v):
     return tuple(int(x) if x.isdigit() else 0 for x in re.split(r"[.\-]", v or "0"))
 
 
-def outdated_versions(c, keep=3):
-    """Sensor versions older than the newest `keep` versions per platform (N-2 policy)."""
-    out = []
-    by_plat = {}
+SENSOR_LEVELS = ["N", "N-1", "N-2", "older"]
+
+
+def sensor_release(v):
+    """Falcon sensor release = major.minor: 7.40.19206.0 and 7.40.19301.0 are both release 7.40."""
+    parts = re.split(r"[.\-]", (v or "").strip())
+    return ".".join(parts[:2]) if len(parts) >= 2 else (v or "")
+
+
+def sensor_levels(c):
+    """(platform, version, level, release) for every sensor version in the console. Levels are counted by release
+    number (major.minor), per platform: the newest release is N, the release number before it N-1, then N-2;
+    everything older is 'older' (outdated)."""
+    out, by_plat = [], {}
     for r in c.execute("SELECT DISTINCT platform_name, agent_version FROM hosts WHERE console_state='active' AND agent_version<>''"):
-        by_plat.setdefault(r["platform_name"], set()).add(r["agent_version"])
+        by_plat.setdefault(r["platform_name"] or "", set()).add(r["agent_version"])
     for plat, vers in by_plat.items():
-        vs = sorted(vers, key=version_key, reverse=True)
-        out += [(plat, v) for v in vs[keep:]]
+        newest = max((version_key(sensor_release(v)) for v in vers), default=(0, 0))
+
+        def level(rel):
+            # N-k by release number: with 7.40 newest, 7.39 is N-1 and 7.38 is N-2 even when those releases
+            # are not installed anywhere; another major version is always 'older'
+            k = version_key(rel)
+            if len(k) < 2 or len(newest) < 2 or k[0] != newest[0]:
+                return "older"
+            return SENSOR_LEVELS[min(max(newest[1] - k[1], 0), 3)]
+
+        out += [(plat, v, level(sensor_release(v)), sensor_release(v)) for v in vers]
     return out
 
 
+def outdated_versions(c):
+    return [(p, v) for p, v, lvl, _ in sensor_levels(c) if lvl == "older"]
+
+
 def prepare_outdated_temp(c):
-    c.execute("CREATE TEMP TABLE IF NOT EXISTS _outdated (v TEXT)")
-    c.execute("DELETE FROM _outdated")
-    c.executemany("INSERT INTO _outdated(v) VALUES (?)", [(v,) for _, v in outdated_versions(c)])
+    # created once per connection and refilled (DROP would block while another statement on it is still open)
+    c.execute("CREATE TEMP TABLE IF NOT EXISTS _sensor_rel (platform TEXT, v TEXT, lvl TEXT, rel TEXT)")
+    c.execute("DELETE FROM _sensor_rel")
+    c.executemany("INSERT INTO _sensor_rel(platform, v, lvl, rel) VALUES (?,?,?,?)", sensor_levels(c))
+
+
+SENSOR_LEVEL_SQL = """(SELECT s.lvl FROM _sensor_rel s WHERE s.platform = COALESCE(h.platform_name,'') AND s.v = h.agent_version)"""
 
 
 def cidr_range(text):
@@ -252,6 +298,7 @@ def dashboard(c, settings):
         SUM(console_state='active' AND is_primary=1 AND online_state='online' AND last_seen < ?) stale_online,
         SUM(console_state='hidden') hidden,
         SUM(console_state='removed') removed,
+        SUM(console_state='removed' AND removal_type='auto_inactive') auto_removed,
         SUM(console_state='removed' AND removed_at >= ?) removed_7d,
         SUM(console_state='removed' AND removed_at >= ? AND removal_type='auto_inactive') auto_removed_7d,
         SUM(console_state='removed' AND removed_at >= ? AND removal_type='deleted') deleted_7d,
@@ -286,8 +333,8 @@ def dashboard(c, settings):
 
     dsql, dp = dup_ip_subquery(settings)
     dup = db.one(c, f"SELECT COUNT(*) groups, COALESCE(SUM(dup_count),0) hosts FROM ({dsql})", dp)
-    dup_hn = db.one(c, """SELECT COUNT(*) groups, COALESCE(SUM(n),0) hosts FROM (SELECT hostname_norm, COUNT(*) n FROM hosts
-                         WHERE console_state='active' AND hostname_norm<>'' GROUP BY hostname_norm HAVING COUNT(*)>1)""")
+    rsql, rp = routing_conflict_subquery(settings)
+    rc = db.one(c, f"SELECT COUNT(*) groups, COALESCE(SUM(dup_count),0) hosts FROM ({rsql})", rp)
 
     def breakdown(col, limit=12, where="console_state='active'"):
         return db.rows(c, f"""SELECT COALESCE(NULLIF({col},''),'(blank)') label, COUNT(*) n,
@@ -307,7 +354,7 @@ def dashboard(c, settings):
 
     outdated = outdated_versions(c)
     prepare_outdated_temp(c)
-    outdated_n = c.execute("SELECT COUNT(*) FROM hosts WHERE console_state='active' AND is_primary=1 AND agent_version IN (SELECT v FROM _outdated)").fetchone()[0]
+    outdated_n = c.execute(f"SELECT COUNT(*) FROM hosts h WHERE console_state='active' AND is_primary=1 AND {SENSOR_LEVEL_SQL}='older'").fetchone()[0]
     not_in_inv = c.execute("""SELECT COUNT(*) FROM hosts h WHERE h.console_state='active' AND h.is_primary=1
         AND NOT EXISTS (SELECT 1 FROM host_map hm WHERE hm.aid=h.aid)""").fetchone()[0]
 
@@ -315,7 +362,8 @@ def dashboard(c, settings):
     last_sync = db.one(c, "SELECT * FROM sync_runs WHERE status='ok' ORDER BY id DESC LIMIT 1")
     return {
         "kpi": {**k, "dup_ip_groups": dup["groups"], "dup_ip_hosts": dup["hosts"],
-                "dup_hn_groups": dup_hn["groups"], "dup_hn_hosts": dup_hn["hosts"],
+                "routing_conflict_groups": rc["groups"], "routing_conflict_hosts": rc["hosts"],
+
                 "outdated_sensor": outdated_n, "not_in_inventory": not_in_inv},
         "stale_buckets": stale,
         "stale_hours": stale_h,
@@ -368,11 +416,11 @@ def _unlisted(c, by):
 
 
 def _edr_dups(c, settings, by):
-    """Installed inventory nodes whose Falcon IP is shared by several active agents."""
+    """Installed inventory nodes whose Falcon agent has duplicate agents (same connection + local IP)."""
     dsql, dp = dup_ip_subquery(settings)
     grp = "ic.lob_id" if by == "lob" else "ic.lob_id, ic.msp_id"
-    return {tuple(r[:-1]): r[-1] for r in c.execute(f"""SELECT {grp}, COUNT(DISTINCT h.local_ip) FROM inventory_current ic
-        JOIN hosts h ON h.aid=ic.matched_aid JOIN ({dsql}) d ON d.ip=h.local_ip
+    return {tuple(r[:-1]): r[-1] for r in c.execute(f"""SELECT {grp}, COUNT(DISTINCT h.connection_ip || '|' || h.local_ip) FROM inventory_current ic
+        JOIN hosts h ON h.aid=ic.matched_aid JOIN ({dsql}) d ON d.cip=h.connection_ip AND d.lip=h.local_ip
         WHERE ic.edr_state IN ('Online','Offline') GROUP BY {grp}""", dp)}
 
 
@@ -439,12 +487,13 @@ def cross_msp_duplicates(c, lob_id):
 def overview(c, settings):
     d = dashboard(c, settings)
     prepare_outdated_temp(c)
-    outdated = {r[0] for r in c.execute("SELECT v FROM _outdated")}
-    sensors = db.rows(c, """SELECT agent_version label, COUNT(*) n, SUM(online_state='online') online FROM hosts
-        WHERE console_state='active' AND is_primary=1 AND agent_version<>'' GROUP BY 1""")
-    sensors.sort(key=lambda r: version_key(r["label"]), reverse=True)
-    for r in sensors:
-        r["outdated"] = r["label"] in outdated
+    lv = {r["lvl"]: r for r in db.rows(c, """SELECT s.lvl, COUNT(*) n, SUM(h.online_state='online') online,
+        GROUP_CONCAT(DISTINCT s.rel) versions FROM hosts h
+        JOIN _sensor_rel s ON s.platform = COALESCE(h.platform_name,'') AND s.v = h.agent_version
+        WHERE h.console_state='active' AND h.is_primary=1 AND h.agent_version<>'' GROUP BY 1""")}
+    sensors = [{"level": l, "n": (lv.get(l) or {}).get("n") or 0, "online": (lv.get(l) or {}).get("online") or 0,
+                "versions": sorted(((lv.get(l) or {}).get("versions") or "").split(",") if lv.get(l) else [], key=version_key, reverse=True)}
+               for l in SENSOR_LEVELS]
     os_rows = db.rows(c, """SELECT COALESCE(NULLIF(os_version,''),'(blank)') label, COUNT(*) n, SUM(online_state='online') online
         FROM hosts WHERE console_state='active' AND is_primary=1 GROUP BY 1 ORDER BY n DESC LIMIT 12""")
     node_types = db.rows(c, """SELECT COALESCE(NULLIF(node_type,''),'(blank)') label, COUNT(*) nodes, SUM(applicable=1) applicable,
@@ -510,32 +559,32 @@ def ip_search(c, q):
     return out
 
 
-# ------------------------------------------------------------------ duplicates
-def duplicate_groups(c, settings, by="ip", q="", include_removed=False, limit=500, offset=0):
+# ------------------------------------------------------------------ duplicates / routing conflicts
+def duplicate_groups(c, settings, kind="duplicate", q="", include_removed=False, limit=500, offset=0):
+    """Agents grouped by (connection IP, local IP). kind='duplicate': at most one online agent in the group;
+    kind='routing': two or more online agents. Removed / hidden agents are only listed when asked for."""
     states = "('active','hidden','removed')" if include_removed else "('active')"
-    if by == "hostname":
-        col, extra, params = "hostname_norm", "hostname_norm <> ''", []
-    elif by == "serial":
-        col, extra, params = "serial_number", "serial_number <> '' AND LOWER(serial_number) NOT IN ('none','to be filled by o.e.m.','default string','0')", []
-    else:
-        col = "local_ip"
-        extra, params = excl_sql("local_ip", settings)
-    where = f"console_state IN {states} AND {extra}"
+    ex1, p1 = excl_sql("connection_ip", settings)
+    ex2, p2 = excl_sql("local_ip", settings)
+    params = p1 + p2
+    where = f"console_state IN {states} AND COALESCE(connection_ip,'')<>'' AND COALESCE(local_ip,'')<>'' AND {ex1} AND {ex2}"
     if q:
-        where += f" AND {col} LIKE ?"
-        params = params + [q.lower() + "%" if by == "hostname" else q + "%"]
-    total = c.execute(f"SELECT COUNT(*) FROM (SELECT {col} FROM hosts WHERE {where} GROUP BY {col} HAVING COUNT(*)>1)", params).fetchone()[0]
-    groups = db.rows(c, f"""SELECT {col} value, COUNT(*) n, SUM(console_state='active') active,
-            SUM(online_state='online') online, MIN(first_seen) oldest_first_seen, MAX(first_seen) newest_first_seen,
-            MAX(last_seen) latest_last_seen, GROUP_CONCAT(DISTINCT hostname) hostnames, GROUP_CONCAT(DISTINCT local_ip) ips
-            FROM hosts WHERE {where} GROUP BY {col} HAVING COUNT(*)>1
-            ORDER BY n DESC, latest_last_seen DESC LIMIT ? OFFSET ?""", params + [limit, offset])
-    return {"total": total, "rows": groups, "by": by}
+        where += " AND (connection_ip LIKE ? OR local_ip LIKE ?)"
+        params = params + [q + "%", q + "%"]
+    having = ("SUM(console_state='active' AND online_state='online') >= 2" if kind == "routing"
+              else "SUM(console_state='active' AND online_state='online') <= 1 AND SUM(console_state='active') >= 1")
+    base = f"FROM hosts WHERE {where} GROUP BY connection_ip, local_ip HAVING COUNT(*) > 1 AND {having}"
+    total = c.execute(f"SELECT COUNT(*) FROM (SELECT 1 {base})", params).fetchone()[0]
+    groups = db.rows(c, f"""SELECT connection_ip || ' / ' || local_ip value, connection_ip, local_ip, COUNT(*) n,
+            SUM(console_state='active') active, SUM(online_state='online') online, MIN(first_seen) oldest_first_seen,
+            MAX(first_seen) newest_first_seen, MAX(last_seen) latest_last_seen, GROUP_CONCAT(DISTINCT hostname) hostnames
+            {base} ORDER BY n DESC, latest_last_seen DESC LIMIT ? OFFSET ?""", params + [limit, offset])
+    return {"total": total, "rows": groups, "kind": kind}
 
 
-def duplicate_members(c, by, value, include_removed=False):
-    col = {"hostname": "hostname_norm", "serial": "serial_number"}.get(by, "local_ip")
+def duplicate_members(c, connection_ip, local_ip, include_removed=False):
     states = "('active','hidden','removed')" if include_removed else "('active')"
-    return db.rows(c, f"""SELECT aid, hostname, local_ip, mac_address, platform_name, os_version, agent_version, console_state,
-            online_state, first_seen, last_seen, serial_number, is_reinstall, removal_type, removed_at, last_login_user
-            FROM hosts WHERE {col} = ? AND console_state IN {states} ORDER BY last_seen DESC""", (value,))
+    return db.rows(c, f"""SELECT aid, hostname, connection_ip, local_ip, mac_address, platform_name, os_version, agent_version,
+            console_state, online_state, first_seen, last_seen, serial_number, is_reinstall, removal_type, removed_at, last_login_user
+            FROM hosts WHERE connection_ip = ? AND local_ip = ? AND console_state IN {states}
+            ORDER BY online_state='online' DESC, last_seen DESC""", (connection_ip, local_ip))

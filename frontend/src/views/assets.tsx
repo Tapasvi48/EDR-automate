@@ -15,13 +15,13 @@ export default function Assets() {
   const k = data?.kpi;
   const only = (patch: Record<string, string>) => set({ ...Object.fromEntries(TILE_KEYS.map((x) => [x, undefined])), ...patch });
   const none = !TILE_KEYS.some((x) => state[x]);
-  // one row per device: agents sharing an IP are merged (unless you explicitly look at duplicates)
+  // one row per device: agents sharing a connection IP are merged (unless you explicitly look at duplicates)
   const fixed: Record<string, string> = state.duplicate === "1" ? { state: "active" } : { state: "active", dedupe: "1" };
   return (
     <div>
       <PageHeader
         title="All assets"
-        sub={<>Every device currently in the CrowdStrike console. Agents that share an IP are counted once{k && k.agents > k.active ? ` (${fmtN(k.agents - k.active)} duplicate agents merged — see Duplicates)` : ""}. Removed and hidden agents are under Offline &amp; stale.</>}
+        sub={<>Every device currently in the CrowdStrike console. Duplicate agents (same connection + local IP, at most one online) are counted once{k && k.agents > k.active ? ` (${fmtN(k.agents - k.active)} duplicate agents merged — see Duplicates)` : ""}. Removed and hidden agents are under Offline &amp; stale.</>}
       />
       <NotConnected />
       {k && (

@@ -34,7 +34,7 @@ export function hostColumns(): Column[] {
     { key: "last_login_user", label: "Last user", hidden: true, sort: false },
     { key: "tags", label: "Falcon tags", hidden: true, sort: false },
     { key: "groups", label: "Host groups", hidden: true, sort: false },
-    { key: "dup_count", label: "Agents on IP", num: true, hidden: true, render: (r) => (r.dup_count > 1 ? r.dup_count : "") },
+    { key: "dup_count", label: "Duplicate agents", num: true, hidden: true, render: (r) => (r.dup_count > 1 ? r.dup_count : "") },
     { key: "console_state", label: "Console", hidden: true, render: (r) => (r.console_state === "active" ? "Active" : <Badge tone="crit">{r.console_state}</Badge>) },
     { key: "removed_at", label: "Removed", hidden: true, render: (r) => (r.removed_at ? <span>{fmtDt(r.removed_at)} <Badge>{removalLabel(r.removal_type)}</Badge></span> : "") },
     { key: "inv_live", label: "Live / Non Live", hidden: true, render: (r) => (r.inv_node_name ? <Live v={r.inv_live} /> : null) },
@@ -49,7 +49,8 @@ export function hostColumns(): Column[] {
 type SetFn = (patch: Record<string, string | number | undefined>, opts?: { resetPage?: boolean }) => void;
 
 const FLAGS: [string, string][] = [
-  ["duplicate", "Duplicate IP agents"],
+  ["duplicate", "Duplicate agents"],
+  ["routing_conflict", "Routing conflict"],
   ["rfm", "Reduced functionality (RFM)"],
   ["unmapped", "Unmapped — no LOB"],
   ["unlisted", "Not in inventory"],
@@ -57,7 +58,7 @@ const FLAGS: [string, string][] = [
   ["outdated", "Outdated sensor"],
   ["contained", "Contained"],
 ];
-const MORE_KEYS = ["platform", "domain", "site", "chassis", "ip_range", "reinstall_reason"];
+const MORE_KEYS = ["platform", "domain", "site", "chassis", "ip_range", "sensor_level"];
 
 export function HostFilters({ state, set, extra, removalFilter }: { state: Record<string, string>; set: SetFn; extra?: React.ReactNode; removalFilter?: boolean }) {
   const { data: m } = useMeta();
@@ -91,8 +92,8 @@ export function HostFilters({ state, set, extra, removalFilter }: { state: Recor
               <Field label="Domain"><Select className="max-w-none" value={state.domain} onChange={(v) => set({ domain: v })} placeholder="All" options={m?.domains || []} /></Field>
               <Field label="Site"><Select className="max-w-none" value={state.site} onChange={(v) => set({ site: v })} placeholder="All" options={m?.sites || []} /></Field>
               <Field label="Chassis"><Select className="max-w-none" value={state.chassis} onChange={(v) => set({ chassis: v })} placeholder="All" options={m?.chassis || []} /></Field>
+              <Field label="Sensor release level (per platform)"><Select className="max-w-none" value={state.sensor_level} onChange={(v) => set({ sensor_level: v })} placeholder="All" options={[["N", "N · latest"], ["N-1", "N-1"], ["N-2", "N-2"], ["older", "Older than N-2"]]} /></Field>
               <Field label="IP range (CIDR)"><Input defaultValue={state.ip_range || ""} placeholder="10.10.0.0/16" onBlur={(e) => set({ ip_range: e.target.value })} onKeyDown={(e) => e.key === "Enter" && set({ ip_range: (e.target as HTMLInputElement).value })} /></Field>
-              <Field label="Reinstall match"><Select className="max-w-none" value={state.reinstall_reason} onChange={(v) => set({ reinstall_reason: v })} placeholder="Any" options={[["ip+hostname", "Same IP + hostname"], ["hostname", "Same hostname"], ["ip", "Same IP only"]]} /></Field>
             </div>
             {moreCount > 0 && <Button size="sm" variant="ghost" className="mt-3" onClick={() => set(Object.fromEntries(MORE_KEYS.map((k) => [k, undefined])))}><X /> Clear these</Button>}
           </Popover.Content>

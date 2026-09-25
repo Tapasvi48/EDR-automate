@@ -6,7 +6,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Command } from "cmdk";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
-  Activity, AlertTriangle, Building2, Copy, FileSpreadsheet, FileText, Globe, LayoutDashboard, ListChecks, Menu, Monitor,
+  Activity, AlertTriangle, Building2, Copy, Network, FileSpreadsheet, FileText, Globe, LayoutDashboard, ListChecks, Menu, Monitor,
   Moon, PackagePlus, PlugZap, RefreshCw, Search, Settings, ShieldCheck, Sun, Target, WifiOff,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -28,6 +28,7 @@ const NAV: { section?: string; items: { href: string; label: string; icon: React
   { section: "Hygiene", items: [
     { href: "/health/", label: "Offline & stale", icon: WifiOff },
     { href: "/duplicates/", label: "Duplicates", icon: Copy },
+    { href: "/routing/", label: "Routing conflicts", icon: Network },
     { href: "/installs/", label: "New installs", icon: PackagePlus },
     { href: "/activity/", label: "Activity log", icon: Activity },
   ] },

@@ -63,8 +63,7 @@ export default function Coverage() {
       </div>
 
       <div className="mt-4">
-        <InventoryTable lobId={0} showLob lobs={meta?.lobs} state={state} set={set} reset={() => replaceAll({})}
-          facets={{ coverage_status: data.status }} />
+        <InventoryTable lobId={0} showLob lobs={meta?.lobs} state={state} set={set} reset={() => replaceAll({})} />
       </div>
     </div>
   );

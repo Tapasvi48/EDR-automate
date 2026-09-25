@@ -232,8 +232,8 @@ function Detection() {
         <div className="flex items-end pb-1">
           <Checkbox checked={f.fetch_nic_history === "1"} onChange={(v) => setF({ ...f, fetch_nic_history: v ? "1" : "0" })} label="Fetch NIC / IP history for new and IP-changed hosts" />
         </div>
-        <Field label="Shared IPs — never treated as duplicates" className="md:col-span-2 xl:col-span-4"
-          hint="Comma separated, * for prefixes (NAT pools, VPN ranges, loopback). Agents on these IPs are always counted as separate devices.">
+        <Field label="Shared IPs — never treated as duplicates or routing conflicts" className="md:col-span-2 xl:col-span-4"
+          hint="Comma separated, * for prefixes (NAT pools, VPN ranges, loopback). Applies to connection IP and local IP. Agents on these IPs are always counted as separate devices.">
           <textarea rows={2} className="rounded-lg border border-border-strong bg-surface p-2.5 font-mono text-[12.5px]" value={f.dup_ip_exclude} onChange={(e) => setF({ ...f, dup_ip_exclude: e.target.value })} />
         </Field>
       </div>

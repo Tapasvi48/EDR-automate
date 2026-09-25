@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import config, db, falcon, inventory, queries, sync
 from .exporter import xlsx_response
@@ -21,7 +22,10 @@ log = logging.getLogger("app")
 async def lifespan(app):
     db.init_db()
     with db.get_conn() as c:
-        sync.compute_devices(c, db.get_settings(c))  # columns may be new after an upgrade
+        settings = db.get_settings(c)
+        sync.compute_devices(c, settings)  # columns / matching rules may be new after an upgrade
+        sync.detect_reinstalls(c, settings, emit_events=False)
+        inventory.tag_duplicates(c)
     sync.start_scheduler()
     yield
 
@@ -229,7 +233,7 @@ def overview():
 # ------------------------------------------------------------------ hosts
 def _host_query(c, p):
     settings = db.get_settings(c)
-    if p.get("outdated") == "1":
+    if p.get("outdated") == "1" or p.get("sensor_level"):
         queries.prepare_outdated_temp(c)
     return queries.build_host_query(p, settings)
 
@@ -271,15 +275,17 @@ def host_detail(aid: str):
         for e in events:
             e["details"] = db.jloads(e["details"], {})
         same_ip = []
-        if h["local_ip"] and not sync.ip_excluded(h["local_ip"], sync.exclusion_patterns(settings)):
-            same_ip = db.rows(c, """SELECT aid, hostname, local_ip, console_state, online_state, first_seen, last_seen, platform_name
-                                   FROM hosts WHERE local_ip=? AND aid<>? ORDER BY last_seen DESC""", (h["local_ip"], aid))
+        excl = sync.exclusion_patterns(settings)
+        if h["connection_ip"] and h["local_ip"] and not (sync.ip_excluded(h["connection_ip"], excl) or sync.ip_excluded(h["local_ip"], excl)):
+            same_ip = db.rows(c, """SELECT aid, hostname, local_ip, connection_ip, console_state, online_state, first_seen, last_seen,
+                                   platform_name FROM hosts WHERE connection_ip=? AND local_ip=? AND aid<>? ORDER BY last_seen DESC""",
+                              (h["connection_ip"], h["local_ip"], aid))
         same_hn = db.rows(c, """SELECT aid, hostname, local_ip, console_state, online_state, first_seen, last_seen, platform_name
                                FROM hosts WHERE hostname_norm=? AND hostname_norm<>'' AND aid<>? ORDER BY last_seen DESC""",
                           (h["hostname_norm"], aid))
         # later AIDs that replaced this one
-        replaced_by = [r for r in db.rows(c, "SELECT aid, hostname, local_ip, first_seen, reinstall_of FROM hosts WHERE is_reinstall=1 AND first_seen > ? AND (local_ip=? OR hostname_norm=?)",
-                                          (h["first_seen"] or "", h["local_ip"], h["hostname_norm"]))
+        replaced_by = [r for r in db.rows(c, "SELECT aid, hostname, local_ip, connection_ip, first_seen, reinstall_of FROM hosts WHERE is_reinstall=1 AND first_seen > ?",
+                                          (h["first_seen"] or "",))
                        if aid in (r.pop("reinstall_of") or "")]
         inv = db.rows(c, """SELECT l.name lob, l.id lob_id, ic.* FROM inventory_current ic JOIN lobs l ON l.id=ic.lob_id
                             WHERE ic.matched_aid=?""", (aid,))
@@ -319,30 +325,31 @@ def search_ip_export(q: str = ""):
 
 
 @app.get("/api/duplicates")
-def duplicates(by: str = "ip", q: str = "", include_removed: int = 0, page: int = 1, size: int = 100):
+def duplicates(kind: str = "duplicate", q: str = "", include_removed: int = 0, page: int = 1, size: int = 100):
     with db.get_conn() as c:
-        return queries.duplicate_groups(c, db.get_settings(c), by, q, bool(include_removed), size, (page - 1) * size)
+        return queries.duplicate_groups(c, db.get_settings(c), kind, q, bool(include_removed), size, (page - 1) * size)
 
 
 @app.get("/api/duplicates/members")
-def duplicate_members(by: str, value: str, include_removed: int = 0):
+def duplicate_members(connection_ip: str, local_ip: str, include_removed: int = 0):
     with db.get_conn() as c:
-        return {"rows": queries.duplicate_members(c, by, value, bool(include_removed))}
+        return {"rows": queries.duplicate_members(c, connection_ip, local_ip, bool(include_removed))}
 
 
 @app.get("/api/duplicates/export")
-def duplicates_export(by: str = "ip", q: str = "", include_removed: int = 0):
+def duplicates_export(kind: str = "duplicate", q: str = "", include_removed: int = 0):
     with db.get_conn() as c:
-        g = queries.duplicate_groups(c, db.get_settings(c), by, q, bool(include_removed), 100000, 0)
+        g = queries.duplicate_groups(c, db.get_settings(c), kind, q, bool(include_removed), 100000, 0)
         members = []
         for grp in g["rows"]:
-            for m in queries.duplicate_members(c, by, grp["value"], bool(include_removed)):
-                members.append({"group": grp["value"], "group_size": grp["n"], **m})
-    cols = [("group", "Duplicate " + by), ("group_size", "Group Size"), ("hostname", "Hostname"), ("aid", "Agent ID"),
-            ("local_ip", "Local IP"), ("console_state", "Console State"), ("online_state", "Online"), ("first_seen", "First Seen"),
+            for m in queries.duplicate_members(c, grp["connection_ip"], grp["local_ip"], bool(include_removed)):
+                members.append({"group_size": grp["n"], **m})
+    cols = [("connection_ip", "Connection IP"), ("local_ip", "Local IP"), ("group_size", "Group Size"), ("hostname", "Hostname"),
+            ("aid", "Agent ID"), ("console_state", "Console State"), ("online_state", "Online"), ("first_seen", "First Seen"),
             ("last_seen", "Last Seen"), ("platform_name", "Platform"), ("os_version", "OS"), ("agent_version", "Sensor"),
             ("serial_number", "Serial"), ("mac_address", "MAC")]
-    return xlsx_response([("Duplicates", cols, members)], f"duplicates_by_{by}")
+    name = "routing_conflicts" if kind == "routing" else "duplicate_agents"
+    return xlsx_response([("Routing conflicts" if kind == "routing" else "Duplicate agents", cols, members)], name)
 
 
 EVENT_COLS = [("ts", "Time (UTC)"), ("event", "Event"), ("hostname", "Hostname"), ("aid", "Agent ID"), ("local_ip", "IP"),
@@ -448,7 +455,7 @@ def delete_lob(lob_id: int):
     with db.get_conn() as c:
         vids = [r[0] for r in c.execute("SELECT id FROM inventory_versions WHERE lob_id=?", (lob_id,))]
         c.executemany("DELETE FROM inventory_rows WHERE version_id=?", [(v,) for v in vids])
-        for t in ("inventory_changes", "inventory_current", "inventory_versions", "msps", "agent_tags"):
+        for t in ("inventory_changes", "inventory_current", "inventory_versions", "msps", "agent_tags", "lob_types"):
             c.execute(f"DELETE FROM {t} WHERE lob_id=?", (lob_id,))
         c.execute("DELETE FROM lobs WHERE id=?", (lob_id,))
         inventory.rebuild_host_map(c)
@@ -474,7 +481,75 @@ def lob_detail(lob_id: int):
             SUM(applicable=1 AND edr_state NOT IN ('Online','Offline')) pending
             FROM inventory_current WHERE lob_id=? GROUP BY 1 ORDER BY nodes DESC""", (lob_id,))
         current = db.one(c, "SELECT * FROM inventory_versions WHERE id=?", (lob["current_version_id"],)) if lob["current_version_id"] else None
-    return {"lob": lob, "summary": summary, "facets": facets, "current_version": current, "msps": msps, "node_types": node_types}
+        d = db.one(c, """SELECT COUNT(DISTINCT CASE WHEN ic.dup_ip>1 THEN ic.ip END) dup_ips,
+            COUNT(DISTINCT CASE WHEN EXISTS (SELECT 1 FROM inventory_current x WHERE x.ip=ic.ip AND x.lob_id<>ic.lob_id) THEN ic.ip END) cross_lob_ips
+            FROM inventory_current ic WHERE ic.lob_id=? AND COALESCE(ic.ip,'')<>''""", (lob_id,))
+        summary = {**summary, "dup_ips": d["dup_ips"] or 0, "cross_lob_ips": d["cross_lob_ips"] or 0}
+        types = _lob_types(c, lob_id)
+    return {"lob": lob, "summary": summary, "facets": facets, "current_version": current, "msps": msps, "node_types": node_types,
+            "types": types}
+
+
+def _lob_types(c, lob_id):
+    return db.rows(c, """SELECT t.id, t.name, t.description, t.created_at, v.version_no current_version, v.uploaded_at, v.uploaded_by,
+        v.filename, (SELECT COUNT(*) FROM inventory_current ic WHERE ic.lob_id=t.lob_id AND ic.type_id=t.id) nodes,
+        (SELECT COUNT(*) FROM inventory_versions x WHERE x.type_id=t.id) versions
+        FROM lob_types t LEFT JOIN inventory_versions v ON v.id=t.current_version_id WHERE t.lob_id=? ORDER BY t.name""", (lob_id,))
+
+
+@app.get("/api/lobs/{lob_id}/types")
+def lob_types(lob_id: int):
+    with db.get_conn() as c:
+        return {"rows": _lob_types(c, lob_id)}
+
+
+@app.post("/api/lobs/{lob_id}/types")
+def create_lob_type(lob_id: int, data: dict = Body(...)):
+    name = (data.get("name") or "").strip()
+    if not name:
+        raise ValueError("Type name is required")
+    with db.get_conn() as c:
+        if not db.one(c, "SELECT id FROM lobs WHERE id=?", (lob_id,)):
+            raise HTTPException(404, "LOB not found")
+        if db.one(c, "SELECT id FROM lob_types WHERE lob_id=? AND name=? COLLATE NOCASE", (lob_id, name)):
+            raise ValueError(f"Type '{name}' already exists in this LOB")
+        tid = c.execute("INSERT INTO lob_types(lob_id, name, description, created_at) VALUES (?,?,?,?)",
+                        (lob_id, name, data.get("description", ""), db.now_iso())).lastrowid
+    return {"id": tid, "name": name}
+
+
+@app.put("/api/types/{type_id}")
+def update_lob_type(type_id: int, data: dict = Body(...)):
+    name = (data.get("name") or "").strip()
+    if not name:
+        raise ValueError("Type name is required")
+    with db.get_conn() as c:
+        t = db.one(c, "SELECT * FROM lob_types WHERE id=?", (type_id,))
+        if not t:
+            raise HTTPException(404, "Type not found")
+        c.execute("UPDATE lob_types SET name=?, description=? WHERE id=?", (name, data.get("description", ""), type_id))
+        # the type name is the node type of its rows
+        c.execute("UPDATE inventory_current SET node_type=? WHERE type_id=?", (name, type_id))
+    return {"ok": True}
+
+
+@app.delete("/api/types/{type_id}")
+def delete_lob_type(type_id: int):
+    """Deletes the type with its whole version history and its rows in the current inventory."""
+    with db.get_conn() as c:
+        t = db.one(c, "SELECT * FROM lob_types WHERE id=?", (type_id,))
+        if not t:
+            raise HTTPException(404, "Type not found")
+        vids = [r[0] for r in c.execute("SELECT id FROM inventory_versions WHERE type_id=?", (type_id,))]
+        for v in vids:
+            c.execute("DELETE FROM inventory_rows WHERE version_id=?", (v,))
+            c.execute("DELETE FROM inventory_changes WHERE version_id=?", (v,))
+        c.execute("DELETE FROM inventory_versions WHERE type_id=?", (type_id,))
+        c.execute("DELETE FROM inventory_current WHERE type_id=?", (type_id,))
+        c.execute("DELETE FROM lob_types WHERE id=?", (type_id,))
+        inventory.tag_duplicates(c, t["lob_id"])
+        inventory.rebuild_host_map(c)
+    return {"ok": True}
 
 
 # ------------------------------------------------------------------ MSPs
@@ -594,12 +669,13 @@ INV_STATUS_COLS = [("coverage_status", "EDR Status"), ("change_tag", "Change Tag
                    ("last_changed_version_no", "Last Changed in Version"), ("edr_actual", "EDR Actual Status"),
                    ("verification", "Verification"), ("match_method", "Match Method"), ("cs_hostname", "Falcon Hostname"),
                    ("cs_last_seen", "Falcon Last Seen"), ("cs_agent_version", "Sensor Version"), ("cs_os", "Falcon OS"),
-                   ("matched_aid", "Matched Agent ID"), ("match_count", "Active AIDs Matched")]
+                   ("matched_aid", "Matched Agent ID"), ("match_count", "Active AIDs Matched"),
+                   ("file_dups", "Duplicate Rows in File"), ("dup_ip", "Rows Sharing IP"), ("dup_name", "Rows Sharing Node Name")]
 INV_SORTS = {"ip": "ic.ip", "node_name": "ic.node_name COLLATE NOCASE", "node_type": "ic.node_type", "domain": "ic.domain",
              "live": "ic.live", "os": "ic.os", "edr_feasible": "ic.edr_feasible", "edr_installed": "ic.edr_installed",
              "verification": "ic.verification", "edr_actual": "ic.edr_actual", "change_tag": "ic.change_tag",
              "cs_last_seen": "ic.cs_last_seen", "lob": "l.name", "remarks": "ic.remarks", "msp": "ic.msp COLLATE NOCASE",
-             "coverage_status": "ic.coverage_status"}
+             "coverage_status": "ic.coverage_status", "dup": "(ic.file_dups>0) + (ic.dup_ip>1) + (ic.dup_name>1)"}
 
 
 def _inventory_query(p, lob_id):
@@ -632,6 +708,12 @@ def _inventory_query(p, lob_id):
     filt = ["node_type", "domain", "live", "os", "edr_feasible", "edr_installed"]
     if not version_id:
         filt += ["verification", "edr_actual", "change_tag", "match_method", "coverage_status", "edr_state"]
+        if p.get("type"):
+            if p["type"] == "main":
+                w.append("ic.type_id IS NULL")
+            else:
+                w.append("ic.type_id=?")
+                params.append(int(p["type"]))
         if p.get("msp"):
             if p["msp"] == "none":
                 w.append("ic.msp_id IS NULL")
@@ -648,7 +730,16 @@ def _inventory_query(p, lob_id):
             w.append("ic.edr_installed='Yes' AND ic.applicable=1 AND ic.edr_state NOT IN ('Online','Offline')")
         if p.get("marked_no") == "1":
             w.append("ic.edr_installed='No' AND ic.edr_state IN ('Online','Offline')")
-        if p.get("cross_msp_dup") == "1":
+        dup = p.get("dup")
+        if dup == "any":
+            w.append("(ic.file_dups>0 OR ic.dup_ip>1 OR ic.dup_name>1)")
+        elif dup == "ip":
+            w.append("ic.dup_ip>1")
+        elif dup == "name":
+            w.append("ic.dup_name>1")
+        elif dup == "cross_lob":
+            w.append("""COALESCE(ic.ip,'')<>'' AND EXISTS (SELECT 1 FROM inventory_current x WHERE x.ip=ic.ip AND x.lob_id<>ic.lob_id)""")
+        if p.get("cross_msp_dup") == "1" or dup == "cross_msp":
             w.append("""EXISTS (SELECT 1 FROM inventory_current x WHERE x.lob_id=ic.lob_id AND x.ip=ic.ip AND COALESCE(x.ip,'')<>''
                         AND COALESCE(x.msp_id,0)<>COALESCE(ic.msp_id,0))""")
     for f in filt:
@@ -666,16 +757,41 @@ def _inventory_query(p, lob_id):
     if p.get("lob") and not lob_id:
         w.append("l.id=?")
         params.append(int(p["lob"]))
+    if p.get("dup") == "file":
+        w.append("ic.file_dups>0")
     if p.get("applicable") == "1" or p.get("in_scope") == "1":
         w.append("COALESCE(ic.live,'')<>'Non Live' AND COALESCE(ic.edr_feasible,'')<>'No'")
     if p.get("mismatch") == "1" and not version_id:
         w.append("ic.verification IN ('Claimed - Not Found','Claimed - Removed from Console','Installed - Marked No','Installed - Marked Not Feasible')")
     sort = INV_SORTS.get(p.get("sort") or "", "ic.rowid")
-    if version_id and sort.startswith(("ic.verification", "ic.edr_actual", "ic.change_tag", "ic.cs_")):
+    if version_id and sort.startswith(("(ic.file_dups", "ic.verification", "ic.edr_actual", "ic.change_tag", "ic.cs_")):
         sort = "ic.rowid"
     direction = "DESC" if (p.get("dir") or "asc").lower() == "desc" else "ASC"
     where = ("WHERE " + " AND ".join(w)) if w else ""
     return cols, frm, where, params, f"ORDER BY {sort} {direction}"
+
+
+@app.get("/api/inventory/facets")
+def inventory_facets(lob: int = 0, msp: str = ""):
+    """Value counts for the inventory filter dropdowns (current inventory, one LOB or all)."""
+    w, params = [], []
+    if lob:
+        w.append("lob_id=?")
+        params.append(lob)
+    if msp:
+        w.append("msp_id IS NULL" if msp == "none" else "msp_id=?")
+        params += [] if msp == "none" else [int(msp)]
+    where = ("WHERE " + " AND ".join(w)) if w else ""
+    with db.get_conn() as c:
+        def dist(col):
+            return db.rows(c, f"SELECT COALESCE(NULLIF({col},''),'(blank)') label, COUNT(*) n FROM inventory_current {where} "
+                              "GROUP BY 1 ORDER BY n DESC", params)
+        out = {k: dist(k) for k in ("coverage_status", "live", "edr_feasible", "edr_installed", "node_type", "domain", "os")}
+        d = db.one(c, f"""SELECT COUNT(*) total, SUM(file_dups>0 OR dup_ip>1 OR dup_name>1) any_dup, SUM(file_dups>0) file_dup,
+                          SUM(dup_ip>1) ip_dup, SUM(dup_name>1) name_dup FROM inventory_current {where}""", params)
+    out["dup"] = {k: d[k] or 0 for k in ("any_dup", "file_dup", "ip_dup", "name_dup")}
+    out["total"] = d["total"]
+    return out
 
 
 @app.get("/api/lobs/{lob_id}/inventory")
@@ -712,8 +828,11 @@ def lob_inventory_export(lob_id: int, request: Request):
 @app.get("/api/lobs/{lob_id}/versions")
 def lob_versions(lob_id: int):
     with db.get_conn() as c:
-        rows = db.rows(c, """SELECT v.*, t.name template_name FROM inventory_versions v LEFT JOIN templates t ON t.id=v.template_id
-                             WHERE v.lob_id=? ORDER BY v.version_no DESC""", (lob_id,))
+        rows = db.rows(c, """SELECT v.*, t.name template_name, lt.name type_name,
+                             (v.id = COALESCE(lt.current_version_id, l.current_version_id)) is_current
+                             FROM inventory_versions v JOIN lobs l ON l.id=v.lob_id LEFT JOIN templates t ON t.id=v.template_id
+                             LEFT JOIN lob_types lt ON lt.id=v.type_id
+                             WHERE v.lob_id=? ORDER BY v.uploaded_at DESC, v.id DESC""", (lob_id,))
     for r in rows:
         r["warnings"] = db.jloads(r["warnings"], [])
         r["mapping"] = db.jloads(r["mapping"], {})
@@ -737,13 +856,14 @@ def _changes(c, lob_id, version_id, p, limit=None, offset=0):
     where = " AND ".join(w)
     total = c.execute(f"SELECT COUNT(*) FROM inventory_changes ch WHERE {where}", params).fetchone()[0]
     lim = f"LIMIT {int(limit)} OFFSET {int(offset)}" if limit else ""
-    rows = db.rows(c, f"""SELECT ch.*, v.version_no, v.uploaded_at,
+    rows = db.rows(c, f"""SELECT ch.*, v.version_no, v.uploaded_at, lt.name type_name,
             COALESCE(r.node_name, pr.node_name) node_name, COALESCE(r.ip, pr.ip) ip
             FROM inventory_changes ch JOIN inventory_versions v ON v.id=ch.version_id
+            LEFT JOIN lob_types lt ON lt.id=v.type_id
             LEFT JOIN inventory_rows r ON r.version_id=ch.version_id AND r.item_key=ch.item_key
             LEFT JOIN inventory_rows pr ON ch.change_type='removed' AND pr.item_key=ch.item_key AND pr.version_id=(
-                SELECT MAX(v2.id) FROM inventory_versions v2 WHERE v2.lob_id=ch.lob_id AND v2.id < ch.version_id)
-            WHERE {where} ORDER BY v.version_no DESC, ch.change_type, ch.item_key {lim}""", params)
+                SELECT MAX(v2.id) FROM inventory_versions v2 WHERE v2.lob_id=ch.lob_id AND v2.type_id IS v.type_id AND v2.id < ch.version_id)
+            WHERE {where} ORDER BY v.uploaded_at DESC, v.id DESC, ch.change_type, ch.item_key {lim}""", params)
     fl = dict(config.INVENTORY_FIELDS)
     for r in rows:
         r["field_label"] = fl.get(r["field"], r["field"])
@@ -834,7 +954,7 @@ def reparse(token: str, data: dict = Body(default={})):
 def upload_preview(lob_id: int, data: dict = Body(...)):
     with db.get_conn() as c:
         return inventory.preview_upload(c, lob_id, data["token"], data.get("mapping") or {}, data.get("key_field") or "ip",
-                                        data.get("sheet"), data.get("header_row"), _scope_name(c, lob_id, data))
+                                        data.get("sheet"), data.get("header_row"), _scope_name(c, lob_id, data), data.get("type_id"))
 
 
 def _scope_name(c, lob_id, data):
@@ -858,7 +978,7 @@ def upload_commit(lob_id: int, data: dict = Body(...)):
         if not lob:
             raise HTTPException(404, "LOB not found")
         scope = _scope_name(c, lob_id, data)
-        _, items, warnings = inventory.scoped_items(c, lob, parsed, mapping, key_field, scope)
+        _, items, warnings = inventory.scoped_items(c, lob, parsed, mapping, key_field, scope, data.get("type_id"))
         if not items:
             raise ValueError("No usable rows found with this mapping")
         template_id = data.get("template_id")
@@ -867,7 +987,8 @@ def upload_commit(lob_id: int, data: dict = Body(...)):
                                              "sheet_name": parsed["sheet"], "header_row": parsed["header_row"]})
         res = inventory.commit_version(c, lob_id, items, filename=parsed["filename"], note=data.get("note", ""),
                                        uploaded_by=data.get("uploaded_by", ""), template_id=template_id,
-                                       key_field=key_field, mapping=mapping, warnings=warnings, scope_msp=scope)
+                                       key_field=key_field, mapping=mapping, warnings=warnings, scope_msp=scope,
+                                       type_id=data.get("type_id"))
         if data.get("set_default_template") and template_id:
             c.execute("UPDATE lobs SET default_template_id=? WHERE id=?", (template_id, lob_id))
     return {**res, "warnings": warnings}
@@ -945,9 +1066,35 @@ def download_template(tid: int):
 app.include_router(extra_router)
 
 FRONTEND = config.BASE_DIR / "frontend" / "out"
+
+
+class NextStaticFiles(StaticFiles):
+    """Static export server. Next 16 writes RSC segment files as `__next.<seg>/__PAGE__.txt`
+    but the client requests `__next.<seg>.__PAGE__.txt`; map the dotted name to the folder layout."""
+
+    async def get_response(self, path, scope):
+        try:
+            resp = await super().get_response(path, scope)
+            if resp.status_code != 404:
+                return resp
+        except StarletteHTTPException as e:
+            if e.status_code != 404:
+                raise
+            resp = None
+        head, _, name = path.replace("\\", "/").rpartition("/")
+        if name.startswith("__next.") and name.endswith(".txt"):
+            parts = name[len("__next."):-len(".txt")].split(".")
+            if len(parts) > 1:
+                alt = "/".join(filter(None, [head, "__next." + parts[0], *parts[1:-1], parts[-1] + ".txt"]))
+                return await super().get_response(alt, scope)
+        if resp is None:
+            raise StarletteHTTPException(status_code=404)
+        return resp
+
+
 if FRONTEND.exists():
     # Next.js static export (npm run build in ./frontend)
-    app.mount("/", StaticFiles(directory=FRONTEND, html=True), name="ui")
+    app.mount("/", NextStaticFiles(directory=FRONTEND, html=True), name="ui")
 else:
     @app.get("/")
     def no_ui():
