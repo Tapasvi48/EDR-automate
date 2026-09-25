@@ -1,0 +1,9 @@
+.venv
+data
+.env
+.claude
+**/__pycache__
+frontend/node_modules
+frontend/.next
+frontend/out
+*.log

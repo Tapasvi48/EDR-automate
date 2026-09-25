@@ -1,0 +1,18 @@
+services:
+  edr-dashboard:
+    image: ${EDR_IMAGE:-edr-asset-console:latest}
+    build: .
+    container_name: edr-asset-console
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    volumes:
+      - edr-data:/data            # database, API credentials, uploaded inventories
+    environment:
+      # Protect the dashboard with a login (strongly recommended when not bound to localhost)
+      APP_USERNAME: ${APP_USERNAME:-}
+      APP_PASSWORD: ${APP_PASSWORD:-}
+      TZ: ${TZ:-UTC}
+
+volumes:
+  edr-data:
