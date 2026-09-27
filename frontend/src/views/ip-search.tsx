@@ -105,7 +105,7 @@ function Profile({ r }: { r: any }) {
           value={s.edr_status === "Not Installed" ? "Not installed" : s.edr_status}
           sub={a ? <>{s.edr_detail && s.edr_detail !== "in console" && <b className="text-warn-fg">{s.edr_detail} · </b>}{a.aid ? <HostLink aid={a.aid}>{a.hostname}</HostLink> : a.hostname} · sensor {a.agent_version || "–"} · seen {fmtRel(a.last_seen)}{s.active_agents > 1 ? ` · ${s.active_agents} active agents` : ""}</> : "No agent has ever reported this asset"} />
         <Verdict tone={s.in_inventory ? "info" : "neutral"} icon={<ShieldCheck className="size-5" />} label="Owner (LOB · MSP)"
-          value={s.lobs.length ? s.lobs.join(", ") : "No LOB"} sub={s.in_inventory ? <>MSP {s.msps.join(", ") || "unassigned"} · inventory says EDR {s.inventory_claim.join("/") || "–"}</> : "Not in any LOB inventory"} />
+          value={s.lobs.length ? s.lobs.join(", ") : "Not in inventory"} sub={s.in_inventory ? <>MSP {s.msps.join(", ") || "unassigned"} · inventory says EDR {s.inventory_claim.join("/") || "–"}</> : "Not in inventory"} />
         <Verdict tone={v.Critical ? "crit" : v.High ? "warn" : r.scans.length ? "good" : "neutral"} icon={<ShieldAlert className="size-5" />} label="Open vulnerabilities"
           value={<SevCounts c={v.Critical} h={v.High} m={v.Medium} l={v.Low} />} sub={`${fmtN(v.fixed)} fixed · ${fmtN(v.Info)} info`} />
         <Verdict tone={s.last_scan ? "info" : "neutral"} icon={<Search className="size-5" />} label="Last vulnerability scan"
@@ -159,7 +159,7 @@ function Profile({ r }: { r: any }) {
           { key: "last_seen", label: "Last seen", render: (x: any) => <When ts={x.last_seen} /> },
           { key: "aid", label: "Agent ID", render: (x: any) => <Mono>{x.aid}</Mono> },
         ]} />}
-        {tab === "inventory" && <SimpleTable rows={r.inventory} empty="Not in any LOB inventory" columns={[
+        {tab === "inventory" && <SimpleTable rows={r.inventory} empty="Not in inventory" columns={[
           { key: "lob", label: "LOB", render: (x: any) => <Link className="font-semibold hover:underline" href={`/lob/?id=${x.lob_id}&tab=inventory&q=${encodeURIComponent(x.ip || x.node_name)}`}>{x.lob}</Link> },
           { key: "msp", label: "MSP", render: (x: any) => x.msp || <span className="text-muted">Unassigned</span> },
           { key: "ip", label: "IP", render: (x: any) => <Mono>{x.ip}</Mono> }, { key: "node_name", label: "Node name" },

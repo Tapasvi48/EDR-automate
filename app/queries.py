@@ -190,9 +190,10 @@ def build_host_query(p: dict, settings):
     if p.get("niam") in ("0", "1"):
         w.append(("" if p["niam"] == "1" else "NOT ") + "EXISTS (SELECT 1 FROM niam_nodes n WHERE n.present=1 AND n.ip=h.local_ip AND h.local_ip<>'')")
     if p.get("inventory") == "none" or p.get("unmapped") == "1":
-        w.append("hm.aid IS NULL")
+        # not in inventory: no LOB inventory row matches the agent (an agent tag alone does not put it in an inventory)
+        w.append("NOT EXISTS (SELECT 1 FROM host_map x WHERE x.aid=h.aid AND x.source='inventory')")
     elif p.get("inventory") == "any":
-        w.append("hm.aid IS NOT NULL")
+        w.append("EXISTS (SELECT 1 FROM host_map x WHERE x.aid=h.aid AND x.source='inventory')")
     if p.get("lob"):
         w.append("EXISTS (SELECT 1 FROM host_map x WHERE x.aid=h.aid AND x.lob_id=?)")
         params.append(int(p["lob"]))
@@ -378,7 +379,7 @@ def dashboard(c, settings):
     prepare_outdated_temp(c)
     outdated_n = c.execute(f"SELECT COUNT(*) FROM hosts h WHERE console_state='active' AND is_primary=1 AND {SENSOR_LEVEL_SQL}='older'").fetchone()[0]
     not_in_inv = c.execute("""SELECT COUNT(*) FROM hosts h WHERE h.console_state='active' AND h.is_primary=1
-        AND NOT EXISTS (SELECT 1 FROM host_map hm WHERE hm.aid=h.aid)""").fetchone()[0]
+        AND NOT EXISTS (SELECT 1 FROM host_map hm WHERE hm.aid=h.aid AND hm.source='inventory')""").fetchone()[0]
 
     lobs = lob_summaries(c, settings)
     last_sync = db.one(c, "SELECT * FROM sync_runs WHERE status='ok' ORDER BY id DESC LIMIT 1")
@@ -572,9 +573,11 @@ def overview(c, settings):
         SUM(applicable=1 AND edr_state IN ('Online','Offline')) installed, SUM(applicable=1 AND edr_state='Offline') offline,
         SUM(applicable=1 AND edr_state NOT IN ('Online','Offline')) pending
         FROM inventory_current GROUP BY 1 ORDER BY nodes DESC LIMIT 12""")
-    unmapped = c.execute("""SELECT COUNT(*) FROM hosts h WHERE h.console_state='active' AND h.is_primary=1
-        AND NOT EXISTS (SELECT 1 FROM host_map hm WHERE hm.aid=h.aid)""").fetchone()[0]
-    d["kpi"]["unmapped"] = unmapped
+    ni = db.one(c, """SELECT COUNT(*) n, SUM(online_state='online') online FROM hosts h WHERE h.console_state='active'
+        AND h.is_primary=1 AND NOT EXISTS (SELECT 1 FROM host_map hm WHERE hm.aid=h.aid AND hm.source='inventory')""")
+    d["kpi"]["unmapped"] = ni["n"] or 0            # agents in the console that no LOB inventory row matches
+    d["kpi"]["online_not_inv"] = ni["online"] or 0
+    d["kpi"]["offline_not_inv"] = (ni["n"] or 0) - (ni["online"] or 0)
     d["kpi"]["agents"] = c.execute("SELECT COUNT(*) FROM hosts WHERE console_state='active'").fetchone()[0]
     from .vulns import summary as vuln_summary
     vs = vuln_summary(c)

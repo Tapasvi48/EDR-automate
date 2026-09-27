@@ -78,7 +78,7 @@ const PILL: Record<string, string> = {
   match_method: "Matched by", edr_state: "Agent state", applicable: "EDR applicable only", installed: "Installed", pending: "Not installed or removed",
   claimed_missing: "Inventory says Yes · no agent", marked_no: "Inventory says No · agent running", installed_na: "Not applicable · agent running",
   cross_msp_dup: "IP in more than one MSP", in_scope: "Applicable only", mismatch: "Inventory claim mismatch",
-  niam: "In NIAM", scanned: "Scanned", gap: "Coverage gap",
+  niam: "NIAM integrated", scanned: "Scanned", gap: "Coverage gap",
 };
 const MORE_KEYS = ["live", "feasible", "os_source", "edr_feasible", "edr_installed", "domain", "dup", "change_tag", "applicable", "claimed_missing", "marked_no",
   "installed", "pending", "installed_na", "cross_msp_dup", "verification", "edr_actual", "match_method", "edr_state", "in_scope", "mismatch", "niam", "scanned", "gap"];
@@ -109,7 +109,7 @@ export function InventoryTable({ lobId, state, set, reset, versions, showLob, lo
     if (k === "change_tag") return v === "new" ? "New in latest version" : v === "modified" ? "Modified in latest version" : v;
     if (k === "niam" || k === "scanned") return v === "1" ? "Yes" : "No";
     if (k === "applicable" && v === "0") return "No (not feasible or legacy OS)";
-    if (k === "gap") return ({ edr: "EDR not installed", niam: "Not in NIAM", scan: "Never scanned", any: "Any gap" } as any)[v] || v;
+    if (k === "gap") return ({ edr: "EDR not installed", niam: "Not integrated", scan: "Never scanned", any: "Any gap" } as any)[v] || v;
     return v.split("|").join(", ");
   };
   const clearAll = () => set(Object.fromEntries(Object.keys(PILL).map((k) => [k, undefined])));

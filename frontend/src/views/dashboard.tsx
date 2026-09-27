@@ -8,7 +8,7 @@ import { fmtN, fmtRel, pct } from "@/lib/format";
 import { cn, qs } from "@/lib/utils";
 import { Button, Card, CardHeader, Loading, PageHeader } from "@/components/ui";
 import { StackBar } from "@/components/charts";
-import { Hero, Line2, Split } from "@/components/summary-cards";
+import { Drill, Hero, Line2, Split } from "@/components/summary-cards";
 import { NotConnected } from "@/components/sync-progress";
 
 const H = (p: Record<string, any>) => "/assets/" + qs(p);
@@ -41,7 +41,7 @@ const Num = ({ n, href, color }: { n: number; href?: string; color?: string }) =
   n ? (href ? <Link href={href} className="font-medium hover:underline" style={{ color }}>{fmtN(n)}</Link> : <span style={{ color }}>{fmtN(n)}</span>) : <span className="text-muted">0</span>;
 
 /** EDR coverage per LOB: applicable nodes and where they stand */
-function LobCoverage({ rows, total, notInAnyLob }: { rows: any[]; total: Record<string, number>; notInAnyLob: number }) {
+function LobCoverage({ rows, total, reg }: { rows: any[]; total: Record<string, number>; reg: Record<string, number> }) {
   const [split, setSplit] = React.useState(false);
   if (!rows.length) return <div className="px-4 pb-6 text-center text-muted">No LOBs yet — <Link href="/lobs/" className="text-accent-fg hover:underline">create one</Link> and upload its inventory.</div>;
   const all = [...rows, { ...total, id: 0, name: "All LOBs", coverage: total.applicable ? Math.round((1000 * total.installed) / total.applicable) / 10 : null }];
@@ -66,7 +66,7 @@ function LobCoverage({ rows, total, notInAnyLob }: { rows: any[]; total: Record<
             : <Th right title="Offline in the console, or the agent left the console (removed / old EDR import)">Offline</Th>}
           <Th right title="Applicable nodes with no agent in the live console (never installed, or its agent was removed)">Not installed</Th>
           <Th right title="Feasibility not decided yet: the OS is unknown or not in the support catalog">To be decided</Th>
-          <Th right title="EDR installed, but the node is not in any uploaded LOB inventory">Not in inventory</Th>
+          <Th right title="Agents tagged to this LOB (agent tags) that its inventory does not list">Tagged, not in inventory</Th>
         </tr></thead>
         <tbody>
           {all.map((r) => {
@@ -95,24 +95,49 @@ function LobCoverage({ rows, total, notInAnyLob }: { rows: any[]; total: Record<
               </tr>
             );
           })}
-          {notInAnyLob > 0 && (
-            <tr className="bg-surface-2">
-              <td className="whitespace-nowrap py-2.5 pl-4 pr-3 text-violet-fg" colSpan={split ? 9 : 7}>EDR installed but in no LOB inventory at all (tagged to a LOB, or in no LOB)</td>
-              <td className="pl-3 pr-4 text-right tabular"><Num n={notInAnyLob} href="/assets/?unlisted=1" color="var(--violet)" /></td>
-            </tr>
-          )}
+          <OwnerUnknownEdr reg={reg} split={split} />
         </tbody>
       </table>
     </div>
   );
 }
 
-function NiamByLob({ rows, notInInv }: { rows: any[]; notInInv: number }) {
+/** Assets no inventory claims: CrowdStrike shows them online / offline; without an agent (VA scan / NIAM only) they
+ *  count as not installed - their EDR feasibility is unknown, so they are not part of any coverage %. */
+function OwnerUnknownEdr({ reg, split }: { reg: Record<string, number>; split: boolean }) {
+  const on = reg.not_inv_online || 0, off = reg.not_inv_offline || 0, none = reg.not_inv_no_edr || 0, tot = reg.not_in_inventory || 0;
+  if (!tot) return null;
+  const R = "/inventory/?missing=inventory";
+  const offParts: Record<string, number> = { offline_console: reg.not_inv_offline_console || 0, removed_console: reg.not_inv_removed_console || 0,
+    removed_import: reg.not_inv_removed_import || 0 };
+  return (
+    <tr className="border-t-2 border-border bg-violet-soft/40">
+      <td className="whitespace-nowrap py-2.5 pl-4 pr-3"><span className="font-semibold text-violet-fg">Owner unknown</span>
+        <div className="text-[11.5px] text-muted">{fmtN(tot)} assets not in any inventory</div></td>
+      <td className="px-3 text-right tabular" title="EDR is installed, so they are feasible"><Num n={on + off} href={`${R}&edr_applicable=1`} /></td>
+      <td className="px-3 text-right tabular"><Num n={on + off} href={`${R}&edr_applicable=1`} /></td>
+      <td className="px-3"><div className="flex min-w-[200px] items-center gap-3">
+        <Bar of={tot} parts={split
+          ? [{ label: "Online", n: on, color: "var(--good)" }, ...OFFLINE_PARTS.map((p) => ({ label: p.label, n: offParts[p.k], color: p.color })), { label: "Not installed", n: none, color: "var(--crit)" }]
+          : [{ label: "Online", n: on, color: "var(--good)" }, { label: "Offline", n: off, color: "var(--warn)" }, { label: "Not installed", n: none, color: "var(--crit)" }]} />
+        <b className="w-12 text-right tabular text-muted" title="No coverage %: owner and feasibility unknown">–</b></div></td>
+      <td className="px-3 text-right tabular"><Num n={on} href={`${R}&edr_status=Online`} /></td>
+      {split
+        ? OFFLINE_PARTS.map((p) => <td key={p.k} className="px-3 text-right tabular"><Num n={offParts[p.k]} href={`${R}&edr_status=Offline`} color={p.color} /></td>)
+        : <td className="px-3 text-right tabular"><Num n={off} href={`${R}&edr_status=Offline`} color="var(--warn)" /></td>}
+      <td className="px-3 text-right tabular" title="Found only by a VA scan or the NIAM dump: no agent"><Num n={none} href="/inventory/?feasibility=Unidentified" color="var(--crit)" /></td>
+      <td className="px-3 text-right tabular" title="Feasibility unknown: no inventory row and no agent"><Num n={none} href="/inventory/?feasibility=Unidentified" color="var(--warn)" /></td>
+      <td className="pl-3 pr-4 text-right tabular text-muted">–</td>
+    </tr>
+  );
+}
+
+function NiamByLob({ rows, reg }: { rows: any[]; reg: Record<string, number> }) {
   return (
     <div className="overflow-auto scroll-thin">
       <table className="w-full text-[13px]">
         <thead className="border-b border-border bg-surface-2"><tr>
-          <Th>LOB</Th><Th right>Inventory nodes</Th><Th right>In NIAM</Th><Th right>Not in NIAM</Th><Th>NIAM coverage</Th>
+          <Th>LOB</Th><Th right>Inventory nodes</Th><Th right>NIAM integrated</Th><Th right>Not integrated</Th><Th>NIAM coverage</Th>
         </tr></thead>
         <tbody>
           {rows.map((r) => (
@@ -122,14 +147,25 @@ function NiamByLob({ rows, notInInv }: { rows: any[]; notInInv: number }) {
               <td className="px-3 text-right tabular"><Num n={r.in_niam} href={`/lob/?id=${r.id}&tab=inventory&niam=1`} color="var(--good)" /></td>
               <td className="px-3 text-right tabular"><Num n={r.not_in_niam} href={`/lob/?id=${r.id}&tab=inventory&niam=0`} color="var(--crit)" /></td>
               <td className="pl-3 pr-4"><div className="flex min-w-[200px] items-center gap-3">
-                <Bar of={r.nodes} parts={[{ label: "In NIAM", n: r.in_niam, color: "var(--good)" }, { label: "Not in NIAM", n: r.not_in_niam, color: "var(--crit)" }]} />
+                <Bar of={r.nodes} parts={[{ label: "NIAM integrated", n: r.in_niam, color: "var(--good)" }, { label: "Not integrated", n: r.not_in_niam, color: "var(--crit)" }]} />
                 <b className="w-12 text-right tabular">{r.niam_coverage === null ? "–" : `${r.niam_coverage}%`}</b></div></td>
             </tr>
           ))}
-          <tr className="bg-surface-2">
-            <td className="whitespace-nowrap py-2.5 pl-4 pr-3 text-violet-fg" colSpan={4}>NIAM nodes that are in no LOB inventory</td>
-            <td className="pl-3 pr-4 text-right tabular"><Num n={notInInv} href="/integrations/?in_inventory=0" color="var(--violet)" /></td>
-          </tr>
+          {(reg.not_in_inventory || 0) > 0 && (() => {
+            const tot = reg.not_in_inventory || 0, yes = reg.not_inv_niam || 0, no = reg.not_inv_not_niam || 0;
+            return (
+              <tr className="border-t-2 border-border bg-violet-soft/40">
+                <td className="whitespace-nowrap py-2.5 pl-4 pr-3"><span className="font-semibold text-violet-fg">Owner unknown</span>
+                  <div className="text-[11.5px] text-muted">not in any inventory (CrowdStrike, VA scan or NIAM)</div></td>
+                <td className="px-3 text-right tabular">{fmtN(tot)}</td>
+                <td className="px-3 text-right tabular"><Num n={yes} href="/inventory/?missing=inventory&has=niam" color="var(--good)" /></td>
+                <td className="px-3 text-right tabular"><Num n={no} href="/inventory/?missing=inventory|niam" color="var(--crit)" /></td>
+                <td className="pl-3 pr-4"><div className="flex min-w-[200px] items-center gap-3">
+                  <Bar of={tot} parts={[{ label: "NIAM integrated", n: yes, color: "var(--good)" }, { label: "Not integrated", n: no, color: "var(--crit)" }]} />
+                  <b className="w-12 text-right tabular">{tot ? `${Math.round((1000 * yes) / tot) / 10}%` : "–"}</b></div></td>
+              </tr>
+            );
+          })()}
         </tbody>
       </table>
     </div>
@@ -168,7 +204,7 @@ function VulnByLob({ rows, notInInv }: { rows: any[]; notInInv: number }) {
       ))}
       {notInInv > 0 && (
         <div className="rounded-xl border border-dashed border-border bg-surface-2/20 p-4">
-          <div className="text-[14px] font-semibold text-violet-fg">Scanned, in no LOB inventory</div>
+          <div className="text-[14px] font-semibold text-violet-fg">Scanned, not in inventory</div>
           <div className="mt-2 text-[12.5px] text-fg-2">
             <Link href="/vulnerabilities/?vtab=hosts&in_inventory=0" className="flex justify-between hover:text-fg">
               <span>Hosts with an open finding</span><b className="tabular text-violet-fg">{fmtN(notInInv)}</b>
@@ -295,7 +331,7 @@ export default function Overview() {
       <NotConnected />
       <PageHeader
         title="Overview"
-        sub={d.last_sync ? `Last sync ${fmtRel(d.last_sync.finished_at)} · EDR coverage counts only Live & EDR-feasible inventory nodes` : "No successful sync yet"}
+        sub={d.last_sync ? `Last sync ${fmtRel(d.last_sync.finished_at)} · EDR coverage counts EDR-applicable inventory nodes (decided by OS and node type)` : "No successful sync yet"}
         actions={<Button variant="primary" onClick={() => downloadExcel("/api/reports/executive")}><FileSpreadsheet /> Executive report</Button>}
       />
 
@@ -305,23 +341,33 @@ export default function Overview() {
           <Split parts={[{ label: "Online", n: lobT.online, color: "var(--good)", href: "/inventory/?coverage_status=Online" },
             { label: "Offline", n: lobT.offline, color: "var(--warn)", href: "/inventory/?coverage_status=Offline" },
             { label: "Not installed", n: lobT.pending, color: "var(--crit)", href: "/inventory/?pending=1" }]} />
-          <Line2 items={[
-            ["Total hosts (CrowdStrike)", k.active + rd.devices, "/assets/"],
-            ["Online", k.online, "/assets/?status=online"],
-            ["Offline", k.offline + rd.devices, "/assets/?status=offline"],
-            ["  · offline in the console", k.offline, "/assets/?status=offline"],
-            [`  · removed from console (tracked by sync)`, rd.from_console, "/edr-history/?view=console"],
-            ["  · from the uploaded old EDR sheet", rd.import_only, "/edr-history/?view=import"],
-            ["Feasibility to be decided", lobT.to_be_decided, "/inventory/?coverage_status=To+Be+Decided"],
-            ["Not in inventory (EDR installed)", reg?.not_inv_edr, "/assets/?unlisted=1"],
+          <Drill rows={[
+            { label: "Total hosts (CrowdStrike)", n: k.active + rd.devices, href: "/assets/" },
+            { label: "Online", n: k.online, href: "/assets/?status=online", color: "var(--good)", parts: [
+              { label: "In inventory", n: k.online - (k.online_not_inv || 0), href: "/assets/?status=online&inventory=any" },
+              { label: "Not in inventory", n: k.online_not_inv || 0, href: "/assets/?status=online&unmapped=1" },
+            ] },
+            { label: "Offline", n: k.offline + rd.devices, href: "/assets/?status=offline", color: "var(--warn)", parts: [
+              { label: "Offline in the console", n: k.offline, href: "/assets/?status=offline" },
+              { label: "EDR history · removed from console (tracked by sync)", n: rd.from_console, href: "/edr-history/?view=console",
+                hint: "Agents that left the console (auto-removed after the inactivity window, or deleted), one per device" },
+              { label: "EDR history · old EDR sheet only", n: rd.import_only, href: "/edr-history/?view=import",
+                hint: "Devices known only from the uploaded old EDR inventory, one per device" },
+            ] },
+            { label: "Feasibility to be decided", n: (lobT.to_be_decided || 0) + (reg.unidentified || 0), href: "/feasibility/?feasible=To+be+decided", color: "var(--violet)", parts: [
+              { label: "In inventory", n: lobT.to_be_decided || 0, href: "/feasibility/?feasible=To+be+decided",
+                hint: "Inventory nodes whose node type has no agent anywhere yet: mark the node type on the EDR feasibility page" },
+              { label: "Not in inventory", n: reg.unidentified || 0, href: "/inventory/?feasibility=Unidentified",
+                hint: "Found only by a VA scan or the NIAM dump (no inventory row, no EDR): feasibility unknown" },
+            ] },
           ]} />
         </Hero>
         <Hero title="NIAM coverage" href="/inventory/?gap=niam" value={n.nodes ? (lobT.nodes ? `${pct(lobT.in_niam, lobT.nodes)}%` : "–") : "No data"}
-          sub={n.nodes ? `${fmtN(lobT.in_niam)} of ${fmtN(lobT.nodes)} LOB inventory nodes are in the NIAM dump` : "upload a NIAM dump to see which inventory nodes are in NIAM"}>
+          sub={n.nodes ? `${fmtN(lobT.in_niam)} of ${fmtN(lobT.nodes)} LOB inventory nodes are NIAM integrated` : "upload a NIAM dump to see which inventory nodes are in NIAM"}>
           {n.nodes ? <>
-            <Split parts={[{ label: "In NIAM", n: lobT.in_niam, color: "var(--good)", href: "/inventory/?niam=1" },
-              { label: "Not in NIAM", n: lobT.not_in_niam, color: "var(--crit)", href: "/inventory/?gap=niam" }]} />
-            <Line2 items={[["Nodes in the latest NIAM dump", n.nodes, "/integrations/"], ["NIAM nodes in no LOB inventory", n.not_in_inventory, "/integrations/?in_inventory=0"]]} />
+            <Split parts={[{ label: "NIAM integrated", n: lobT.in_niam, color: "var(--good)", href: "/inventory/?niam=1" },
+              { label: "Not integrated", n: lobT.not_in_niam, color: "var(--crit)", href: "/inventory/?gap=niam" }]} />
+            <Line2 items={[["Nodes in the latest NIAM dump", n.nodes, "/integrations/"], ["NIAM nodes not in inventory", n.not_in_inventory, "/integrations/?in_inventory=0"]]} />
           </> : <Link href="/upload/" className="text-[13px] text-accent-fg hover:underline">Upload NIAM dump →</Link>}
         </Hero>
         <Hero title="Vulnerabilities" href="/vulnerabilities/" value={hasVulns ? fmtN(v.severity.crit + v.severity.high) : "No data"}
@@ -341,18 +387,18 @@ export default function Overview() {
 
       <Card className="mt-4">
         <CardHeader title="EDR coverage by LOB"
-          hint="EDR applicable = Live & EDR-feasible nodes · Offline can be split into its three causes · To be decided = OS unknown or not in the support catalog · Not in inventory = EDR installed but not in the uploaded LOB inventory" />
-        <LobCoverage rows={d.lobs} total={lobT} notInAnyLob={reg.not_inv_edr || 0} />
+          hint="EDR applicable = EDR-feasible nodes (OS and node type) · Offline can be split into its three causes · To be decided = OS unknown or not in the support catalog · Not in inventory = EDR installed but not in the uploaded LOB inventory" />
+        <LobCoverage rows={d.lobs} total={lobT} reg={reg} />
       </Card>
 
       <Card className="mt-4">
         <CardHeader title="NIAM coverage by LOB" hint={n.nodes ? "LOB inventory nodes whose IP is in the latest NIAM dump" : "no NIAM dump uploaded"}
           right={<Link className="text-xs text-accent-fg hover:underline" href="/integrations/">Open NIAM</Link>} />
-        {n.nodes ? <NiamByLob rows={d.lobs} notInInv={n.not_in_inventory} /> : <div className="px-4 pb-5 text-[13px] text-muted">NIAM integration: <b>No</b> — <Link href="/integrations/" className="text-accent-fg hover:underline">upload a NIAM dump</Link>.</div>}
+        {n.nodes ? <NiamByLob rows={d.lobs} reg={reg} /> : <div className="px-4 pb-5 text-[13px] text-muted">NIAM integration: <b>No</b> — <Link href="/integrations/" className="text-accent-fg hover:underline">upload a NIAM dump</Link>.</div>}
       </Card>
 
       <Card className="mt-4">
-        <CardHeader title="Vulnerabilities by LOB" hint={hasVulns ? `${fmtN(v.assets.scanned)} scanned hosts · last scan ${fmtRel(v.assets.last_scan)} · hosts a scan found that no LOB inventory claims are listed separately` : "no scans uploaded"}
+        <CardHeader title="Vulnerabilities by LOB" hint={hasVulns ? `${fmtN(v.assets.scanned)} scanned hosts · last scan ${fmtRel(v.assets.last_scan)} · scanned hosts not in inventory are listed separately` : "no scans uploaded"}
           right={<Link className="text-xs text-accent-fg hover:underline" href="/vulnerabilities/">Open vulnerabilities</Link>} />
         {hasVulns ? <VulnByLob rows={v.by_lob} notInInv={v.assets.not_in_inventory} /> : <div className="px-4 pb-5 text-[13px] text-muted">No vulnerability scans yet — <Link href="/upload/" className="text-accent-fg hover:underline">upload one</Link>.</div>}
       </Card>

@@ -368,10 +368,10 @@ def backfill_scorecards(c, rng):
 
 
 def seed_feasibility_rules(c):
-    """Node-type rule for the sample data (the OS side comes from the OS support catalog) and sensor builds tagged
-    N / N-1 / N-2 the way the Sensor update policies API returns them."""
-    c.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('feasibility_rules', ?)", (json.dumps({
-        "os": [], "node_type": ["Firewall"], "domain": [], "use_inventory_column": False}),))
+    """No feasibility marks (everything decided automatically from the OS catalog and where agents are installed) and
+    sensor builds tagged N / N-1 / N-2 the way the Sensor update policies API returns them."""
+    c.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('feasibility_marks', ?)", (json.dumps({
+        "lob": {}, "domain": {}, "node_type": {}, "os": {}}),))
     now = db.now_iso()
     rows = []
     for plat in ("windows", "linux", "mac"):

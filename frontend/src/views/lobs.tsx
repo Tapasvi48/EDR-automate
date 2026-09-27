@@ -82,7 +82,7 @@ export default function Lobs() {
           <Kpi label="LOBs" value={rows.length} foot={`${fmtN(meta?.msps.length || 0)} MSPs`} />
           <Kpi label="Inventory nodes" value={t.nodes} tone="info" href="/inventory/" />
           <Kpi label="EDR coverage" value={t.applicable ? `${pct(t.installed, t.applicable)}%` : "–"} tone="good" foot={`${fmtN(t.installed)} of ${fmtN(t.applicable)} EDR applicable`} href="/inventory/?gap=edr" />
-          <Kpi label="NIAM coverage" value={t.nodes ? `${pct(t.in_niam, t.nodes)}%` : "–"} tone="info" foot={`${fmtN(t.in_niam)} of ${fmtN(t.nodes)} nodes in NIAM`} href="/inventory/?gap=niam" />
+          <Kpi label="NIAM coverage" value={t.nodes ? `${pct(t.in_niam, t.nodes)}%` : "–"} tone="info" foot={`${fmtN(t.in_niam)} of ${fmtN(t.nodes)} nodes NIAM integrated`} href="/inventory/?gap=niam" />
           <Kpi label="Scan coverage" value={t.live_nodes ? `${pct(t.scanned_live, t.live_nodes)}%` : "–"} tone="violet" foot={`${fmtN(t.scanned_live)} of ${fmtN(t.live_nodes)} live nodes scanned`} href="/inventory/?gap=scan" />
           <Kpi label="Open crit + high" value={vulnTot} tone="crit" foot="vulnerabilities" href="/vulnerabilities/" />
         </KpiGrid>
@@ -112,8 +112,8 @@ export default function Lobs() {
               <div className="mt-4 space-y-3">
                 <Metric label="EDR coverage" pctv={l.coverage} sub={`${fmtN(l.installed)} of ${fmtN(l.applicable)} EDR applicable`}
                   parts={[{ label: "Online", n: l.online, color: "var(--good)" }, { label: "Offline", n: l.offline, color: "var(--warn)" }, { label: "Not installed", n: l.pending, color: "var(--crit)" }]} />
-                <Metric label="NIAM coverage" pctv={l.niam_coverage} sub={`${fmtN(l.in_niam)} of ${fmtN(l.nodes)} nodes in NIAM`}
-                  parts={[{ label: "In NIAM", n: l.in_niam, color: "var(--good)" }, { label: "Not in NIAM", n: l.not_in_niam, color: "var(--crit)" }]} />
+                <Metric label="NIAM coverage" pctv={l.niam_coverage} sub={`${fmtN(l.in_niam)} of ${fmtN(l.nodes)} nodes NIAM integrated`}
+                  parts={[{ label: "NIAM integrated", n: l.in_niam, color: "var(--good)" }, { label: "Not integrated", n: l.not_in_niam, color: "var(--crit)" }]} />
                 <Metric label="Scan coverage" pctv={l.scan_coverage} sub={`${fmtN(l.scanned_live)} of ${fmtN(l.live_nodes)} live nodes scanned`}
                   parts={[{ label: "Scanned", n: l.scanned_live, color: "var(--s1)" }, { label: "Never scanned", n: l.never_scanned, color: "var(--border-strong)" }]} />
               </div>

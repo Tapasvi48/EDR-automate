@@ -105,7 +105,7 @@ export const FeasibleBadge = ({ v, reason }: { v?: string; reason?: string }) =>
     : v === "Unidentified" ? <Badge tone="violet" title={reason}>Unidentified</Badge> : <span className="text-muted">–</span>;
 /** OS support status from the OS support catalog (what the N-2 or newer sensors run on). */
 export const OsSupportBadge = ({ v }: { v?: string }) =>
-  v === "Supported" ? <Badge tone="good">Supported</Badge> : v === "Legacy" ? <Badge tone="serious">Legacy</Badge>
+  v === "Supported" ? <Badge tone="good">Supported</Badge> : v === "Legacy" ? <Badge tone="serious" title="Only older CrowdStrike sensor releases run on it: still feasible">Old sensors only</Badge>
     : v === "Not supported" ? <Badge tone="crit">Not supported</Badge> : <span className="text-muted">Not in catalog</span>;
 const LEVEL_TONE: Record<string, Tone> = { N: "good", "N-1": "good", "N-2": "warn", older: "crit" };
 /** Sensor version with its level against the published N / N-1 / N-2 builds. */

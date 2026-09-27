@@ -36,9 +36,9 @@ export function ExposureBadge({ r }: { r: any }) {
 
 /** labels for filters that arrive from links on other pages (coverage gaps, Overview, LOB pages) */
 const LINK_KEYS: Record<string, (v: string) => string> = {
-  gap: (v) => ({ edr: "EDR not installed", niam: "Not in NIAM", scan: "Never scanned" } as any)[v] || v,
+  gap: (v) => ({ edr: "EDR not installed", niam: "Not integrated", scan: "Never scanned" } as any)[v] || v,
   pending: () => "EDR not installed", coverage_status: (v) => `EDR ${v.toLowerCase()} (inventory)`, applicable: () => "EDR applicable",
-  installed: () => "EDR installed", niam: (v) => (v === "1" ? "In NIAM" : "Not in NIAM"), scanned: (v) => (v === "1" ? "Scanned" : "Never scanned"),
+  installed: () => "EDR installed", niam: (v) => (v === "1" ? "NIAM integrated" : "Not integrated"), scanned: (v) => (v === "1" ? "Scanned" : "Never scanned"),
   offline_kind: (v) => ({ console: "Offline in the console", removed: "Removed from console", import: "Old EDR import" } as any)[v] || v,
   exposure_src: (v) => `Exposed via ${v}`, edr_applicable: () => "EDR applicable (incl. EDR-only assets)",
   os_source: (v) => (v === "none" ? "OS unknown" : `OS from ${({ edr: "CrowdStrike", inventory: "inventory", scan: "VA scan" } as any)[v] || v}`),
@@ -96,7 +96,7 @@ export function RegistryTable({ state, set, reset, fixed, storageKey = "registry
               options={msps.map((x) => ({ value: x.id, label: state.lob ? x.name : `${x.name} · ${lobName(x.lob_id)}` }))} />
             <FilterSelect label="Node type" value={state.node_type} onChange={(v) => set({ node_type: v })} any="All" options={meta?.node_types || []} />
             <FilterSelect label="EDR feasible" value={state.feasibility} onChange={(v) => set({ feasibility: v })} any="Any"
-              options={[["Yes", "Feasible"], ["No", `Not feasible${count("not_feasible")}`], ["To be decided", `To be decided${count("to_be_decided")}`], ["Legacy", `Legacy OS${count("legacy")}`], ["Unidentified", `Unidentified${count("unidentified")}`]]} />
+              options={[["Yes", "Feasible"], ["No", `Not feasible${count("not_feasible")}`], ["To be decided", `To be decided${count("to_be_decided")}`], ["Unidentified", `Unidentified${count("unidentified")}`]]} />
             <FilterSelect label="CrowdStrike" value={state.edr_status} onChange={(v) => set({ edr_status: v })} any="Any" options={[["Online", "Online"], ["Offline", "Offline (incl. EDR history)"], ["Not Installed", "No agent"]]} />
             <FilterSelect label="Vulnerabilities" value={state.vulns} onChange={(v) => set({ vulns: v })} any="Any"
               options={[["crit_high", "Critical / high open"], ["any", "Any open finding"], ["none", "Scanned, nothing open"]]} />

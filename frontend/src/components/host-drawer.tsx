@@ -123,7 +123,7 @@ function HostSheet({ aid, onClose, onBack, canBack }: { aid: string; onClose: ()
                     : <span key="n" className="flex items-center gap-2"><Badge tone="neutral">No</Badge><span className="text-xs text-muted">{h.local_ip ? `${h.local_ip} is not in the latest NIAM dump` : "no local IP"}</span></span>],
                   ["LOB inventory", d.inventory.length
                     ? <button key="i" className="text-accent-fg hover:underline" onClick={() => setTab("inventory")}>{d.inventory.map((i: any) => `${i.lob}${i.msp ? " · " + i.msp : ""}`).join(", ")} — show all details</button>
-                    : <span key="i" className="text-muted">Not in any LOB inventory</span>],
+                    : <span key="i" className="text-muted">Not in inventory</span>],
                 ]} />
               </Card>
             </div>

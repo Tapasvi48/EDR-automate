@@ -135,28 +135,15 @@ fewer than half of the previously active hosts, so an API or scope problem can't
 
 For the VA scan, Nessus plugin **11936 "OS Identification"** gives a line such as `Remote operating system : Microsoft Windows Server 2019 Standard`. When several guesses are listed, the first is used. An optional "Operating System" column in the scan export is used if the plugin is absent. Keep severity None/Info rows in the export so plugin 11936 is included.
 
-**EDR feasibility** is decided by the console, not taken from the inventory sheet. It depends only on the OS and node type; Live / Non Live does not matter. Each node gets one of three values: **Feasible**, **Legacy** or **Not feasible**.
+**EDR feasibility** is decided by the console, not taken from the inventory sheet; Live / Non Live does not matter. Each node is Feasible, Not feasible or To be decided, in this order (page: **CrowdStrike → EDR feasibility**):
+1. **Node:** a manual decision on one node.
+2. **LOB / Domain:** a whole LOB or domain marked not feasible.
+3. **Sheet:** the feasibility sheet. Download it (Node Type × OS pairs with node counts, agents installed and the suggested value, plus LOB and Domain sheets), set Feasible Yes/No, and upload it. Only rows that differ from the automatic decision are stored.
+4. **Agent:** a CrowdStrike agent installed (online or offline) makes the node feasible.
+5. **OS:** feasible when any CrowdStrike sensor release runs on it, old sensors included (the page shows the last sensor version for those). Not feasible only when no sensor supports it and no agent anywhere runs on it. OS marks on the page override this.
+6. **Node type:** feasible when an agent is installed on at least one node of that type, in any LOB. A type with no agent yet is **To be decided** until you mark it.
 
-The OS is checked against what the supported CrowdStrike sensors run on.
-
-**Sensor builds**
-- Every sync fetches the N / N-1 / N-2 builds per platform, and the supported Linux kernel list, from the Sensor update policies API.
-- The API client needs the **Sensor update policies: Read** scope. The page also has a Refresh button.
-- A sensor older than N-2 is end of support. The sensor level shown on CrowdStrike assets uses these builds.
-
-**OS support catalog** (Supported / Legacy / Not supported)
-- CrowdStrike publishes the full supported-OS matrix only in its support portal. So the catalog starts from a built-in list, with Linux taken from CrowdStrike's kernel data when it has been fetched.
-- Edit any status on **CrowdStrike → EDR feasibility**; your edits win.
-- Matching ignores vendor wording ("Red Hat Enterprise Linux 8.8" = "RHEL 8"), and the longest match wins.
-
-**Result per node**
-- **Legacy OS:** Legacy, whether or not an agent is installed.
-- **Not supported OS:** not feasible (Legacy if an agent is somehow installed).
-- **Supported or unknown OS with an agent:** feasible.
-- **Otherwise:** node type / domain rules can make it not feasible.
-- **Manual decision:** set per node or for all filtered nodes, and beats everything.
-
-**EDR applicable** = feasible, or Legacy with an agent installed. A Legacy node without an agent is left out of coverage and shows the EDR status "Legacy OS".
+EDR applicable = Feasible. The OS support catalog, the N / N-1 / N-2 sensor builds and the "last sensor" per old OS are on the same page. They are fetched from the Sensor update policies API on each sync (the API client needs the **Sensor update policies: Read** scope), and you can edit them.
 
 Assets in no inventory:
 - If CrowdStrike has them, they are feasible and count in the applicable total on All inventory.

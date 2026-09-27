@@ -285,8 +285,8 @@ function LobSummary({ id, s, goTab, days }: { id: number; s: any; goTab: (t: str
       </Hero>
       <Hero title="NIAM coverage" href={inv("niam=0")} value={s.niam_coverage === null ? "–" : `${s.niam_coverage}%`}
         sub={`${fmtN(s.in_niam)} of ${fmtN(s.nodes)} inventory nodes are in the NIAM dump`}>
-        <Split parts={[{ label: "In NIAM", n: s.in_niam, color: "var(--good)", href: inv("niam=1") },
-          { label: "Not in NIAM", n: s.not_in_niam, color: "var(--crit)", href: inv("niam=0") }]} />
+        <Split parts={[{ label: "NIAM integrated", n: s.in_niam, color: "var(--good)", href: inv("niam=1") },
+          { label: "Not integrated", n: s.not_in_niam, color: "var(--crit)", href: inv("niam=0") }]} />
       </Hero>
       <Hero title="Vulnerabilities" href={`/lob/?id=${id}&tab=vulns`} value={scanned ? fmtN(v.severity.crit + v.severity.high) : "No data"}
         sub={scanned ? `open critical + high · ${fmtN(s.scanned_live)} of ${fmtN(s.live_nodes)} live nodes scanned` : "no scan uploaded for this LOB"}>

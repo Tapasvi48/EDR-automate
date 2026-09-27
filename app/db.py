@@ -389,6 +389,20 @@ CREATE TABLE IF NOT EXISTS linux_support (
     PRIMARY KEY (distro, version)
 );
 
+-- Feasibility sheet decisions: Node Type + OS pairs you set to Yes / No (only where it differs from the automatic decision)
+CREATE TABLE IF NOT EXISTS feasibility_sheet (
+    node_type TEXT NOT NULL, os_key TEXT NOT NULL, node_type_label TEXT, os_label TEXT, feasible TEXT NOT NULL, remarks TEXT, set_at TEXT,
+    PRIMARY KEY (node_type, os_key)
+);
+
+-- Feasibility sheet decisions per LOB (lob_id 0 = every LOB): Node Type + OS pairs set to Yes / No where they differ
+-- from the automatic decision
+CREATE TABLE IF NOT EXISTS feasibility_pairs (
+    lob_id INTEGER NOT NULL DEFAULT 0, node_type TEXT NOT NULL, os_key TEXT NOT NULL, node_type_label TEXT, os_label TEXT,
+    feasible TEXT NOT NULL, remarks TEXT, set_at TEXT,
+    PRIMARY KEY (lob_id, node_type, os_key)
+);
+
 -- Manual EDR feasibility decisions for inventory nodes (win over the feasibility rules)
 CREATE TABLE IF NOT EXISTS feasibility_overrides (
     lob_id INTEGER NOT NULL, item_key TEXT NOT NULL, feasible TEXT NOT NULL, note TEXT, set_at TEXT,
@@ -675,6 +689,10 @@ def init_db():
             keep = ", ".join(x for x in cols if x in new_cols)
             c.execute(f"INSERT INTO inventory_versions({keep}) SELECT {keep} FROM _inventory_versions_old")
             c.execute("DROP TABLE _inventory_versions_old")
+        if c.execute("SELECT 1 FROM feasibility_sheet LIMIT 1").fetchone():  # first sheet format: decisions for every LOB
+            c.execute("""INSERT OR IGNORE INTO feasibility_pairs(lob_id, node_type, os_key, node_type_label, os_label, feasible, remarks, set_at)
+                         SELECT 0, node_type, os_key, node_type_label, os_label, feasible, remarks, set_at FROM feasibility_sheet""")
+            c.execute("DELETE FROM feasibility_sheet")
         for k, v in config.DEFAULT_SETTINGS.items():
             c.execute("INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)", (k, v))
         if not c.execute("SELECT 1 FROM settings WHERE key='ip_canon_v1'").fetchone():

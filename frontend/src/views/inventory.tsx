@@ -20,10 +20,10 @@ export default function Inventory() {
           <Kpi label="EDR installed" value={s.applicable ? `${pct(s.installed, s.applicable)}%` : "–"} tone="good"
             foot={`${fmtN(s.installed)} of ${fmtN(s.applicable)} applicable${s.applicable_not_inv ? ` · incl. ${fmtN(s.applicable_not_inv)} EDR-only` : ""}`}
             active={on("edr_applicable", "1")} onClick={() => replaceAll({ edr_applicable: "1" })} />
-          <Kpi label="In NIAM" value={s.total ? `${pct(s.niam, s.total)}%` : "–"} foot={`${fmtN(s.niam)} of ${fmtN(s.total)} · ${fmtN(s.not_in_niam)} missing`} active={on("missing", "niam")} onClick={() => replaceAll({ missing: "niam" })} />
+          <Kpi label="NIAM integrated" value={s.total ? `${pct(s.niam, s.total)}%` : "–"} foot={`${fmtN(s.niam)} of ${fmtN(s.total)} · ${fmtN(s.not_in_niam)} missing`} active={on("missing", "niam")} onClick={() => replaceAll({ missing: "niam" })} />
           <Kpi label="VA scanned" value={s.total ? `${pct(s.scan, s.total)}%` : "–"} foot={`${fmtN(s.scan)} of ${fmtN(s.total)} assets`} active={on("missing", "scan")} onClick={() => replaceAll({ missing: "scan" })} />
           <Kpi label="Unidentified" value={s.unidentified} tone="violet" foot="no inventory, no EDR · not in applicable" active={on("feasibility", "Unidentified")} onClick={() => replaceAll({ feasibility: "Unidentified" })} />
-          <Kpi label="Not EDR feasible" value={s.not_feasible} foot={`OS or node type · ${fmtN(s.legacy)} more on legacy OS`} active={on("feasibility", "No")} onClick={() => replaceAll({ feasibility: "No" })} />
+          <Kpi label="Not EDR feasible" value={s.not_feasible} foot={`OS, node type, LOB or domain${s.to_be_decided ? ` · ${fmtN(s.to_be_decided)} to be decided` : ""}`} active={on("feasibility", "No")} onClick={() => replaceAll({ feasibility: "No" })} />
           <Kpi label="Internet exposed" value={s.exposed} tone="crit" active={on("exposed", "1")} onClick={() => replaceAll({ exposed: "1" })} />
         </KpiGrid>
       )}

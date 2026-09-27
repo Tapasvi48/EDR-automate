@@ -28,7 +28,7 @@ export default function Coverage() {
   const gaps = [
     { k: "edr", icon: ShieldCheck, title: "EDR", gap: t.pending, of: t.applicable, have: t.installed, haveLabel: "Installed (online + offline)", missLabel: "Not installed",
       sub: "EDR-applicable nodes (Live & feasible) with no CrowdStrike agent" },
-    { k: "niam", icon: Radio, title: "NIAM", gap: t.not_in_niam, of: t.nodes, have: t.in_niam, haveLabel: "In NIAM", missLabel: "Not in NIAM",
+    { k: "niam", icon: Radio, title: "NIAM", gap: t.not_in_niam, of: t.nodes, have: t.in_niam, haveLabel: "NIAM integrated", missLabel: "Not integrated",
       sub: "Inventory nodes whose IP is not in the latest NIAM dump" },
     { k: "scan", icon: ScanSearch, title: "Vulnerability scan", gap: t.never_scanned, of: t.live_nodes, have: t.scanned_live, haveLabel: "Scanned", missLabel: "Never scanned",
       sub: "Live nodes whose IP has never appeared in an uploaded scan" },
@@ -55,7 +55,7 @@ export default function Coverage() {
       </div>
 
       <Card className="mt-4">
-        <CardHeader title="Assets in no LOB inventory" hint="found by CrowdStrike, a VA scan or the NIAM dump, but in no uploaded inventory · EDR applicability is unknown for these; NIAM applies to all" />
+        <CardHeader title="Assets not in inventory" hint="found by CrowdStrike, a VA scan or the NIAM dump, but in no uploaded inventory · EDR applicability is unknown for these; NIAM applies to all" />
         <div className="grid gap-3 px-4 pb-4 sm:grid-cols-2 xl:grid-cols-5">
           {[
             ["Not in any inventory", reg?.not_in_inventory, "/inventory/?missing=inventory", "var(--violet)", "total, one per IP"],

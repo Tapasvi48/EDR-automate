@@ -446,7 +446,7 @@ PRESENT = ("Online", "Offline", "Inactive")
 INSTALLED_STATES = ("Online", "Offline")
 # edr_actual (detailed) -> edr_state (what the dashboards count)
 # bumped when matching / state rules change so stored results are recomputed on startup
-MATCH_REV = "12"
+MATCH_REV = "14"
 # EDR has two states: Online, or Offline - offline in the console, or an agent that has left the console (removed by the
 # inactivity policy, deleted, hidden, or known only from an old EDR inventory upload). Only a node with no agent at all is
 # "Not Installed". edr_actual keeps the detail.
@@ -528,16 +528,16 @@ def refresh_matches(c, lob_id=None):
                             FROM inventory_current {where}""", params)
     from . import feasibility
     from .vulns import scan_os
-    decide, va_os = feasibility.decider(c), scan_os(c)
+    va_os = scan_os(c)
     updates = []
+    # feasibility needs the whole picture (a node type is feasible when an agent sits on any node of that type), so matching
+    # runs first and every node is decided afterwards
+    pending = []
 
     def decided(it, state, edr_os):
-        os_, os_src = feasibility.resolve_os(edr_os, it["os"], va_os.get(ip))
-        installed = state in INSTALLED_STATES
-        feasible, why, os_status = decide(it["lob_id"], it["item_key"], installed=installed, os_=os_,
-                                          node_type=it["node_type"], domain=it["domain"], inv_feasible=it["edr_feasible"])
-        applicable = 1 if feasibility.is_applicable(feasible, installed) else 0
-        return applicable, coverage_status(feasible, state), feasible, why, os_, os_src, os_status
+        os_, os_src = feasibility.resolve_os(edr_os, it["os"], va_os.get((it["ip"] or "").strip()))
+        pending.append((it, state, os_, os_src))
+        return len(pending) - 1
 
     for it in items:
         ip, hn = (it["ip"] or "").strip(), db.norm_hostname(it["node_name"])
@@ -575,13 +575,28 @@ def refresh_matches(c, lob_id=None):
             updates.append((best, method, active_cnt, h["hostname"], h["console_state"], h["online_state"], h["last_seen"],
                             h["agent_version"], h["os_version"], actual,
                             _verify(it["edr_feasible"], it["edr_installed"], "Not Found" if weak else actual),
-                            state, *decided(it, state, None if weak else h["os_version"]),
+                            state, decided(it, state, None if weak else h["os_version"]),
                             it["lob_id"], it["item_key"]))
         else:
             updates.append((None, None, 0, None, None, None, None, None, None, "Not Found",
                             _verify(it["edr_feasible"], it["edr_installed"], "Not Found"),
-                            "Not Installed", *decided(it, "Not Installed", None),
+                            "Not Installed", decided(it, "Not Installed", None),
                             it["lob_id"], it["item_key"]))
+    from .sensor_support import classifier
+    cls = classifier(c)
+    ev_items = [(it["node_type"], os_, state in INSTALLED_STATES) for it, state, os_, _ in pending]
+    if lob_id:  # nodes of the other LOBs count as evidence too
+        ev_items += [(r["node_type"], r["os_resolved"], r["edr_state"] in INSTALLED_STATES) for r in
+                     c.execute("SELECT node_type, os_resolved, edr_state FROM inventory_current WHERE lob_id<>?", (lob_id,))]
+    decide = feasibility.decider(c, feasibility.build_evidence(c, cls, ev_items))
+    results = []
+    for it, state, os_, os_src in pending:
+        installed = state in INSTALLED_STATES
+        feasible, why, os_status = decide(it["lob_id"], it["item_key"], installed=installed, os_=os_,
+                                          node_type=it["node_type"], domain=it["domain"], inv_feasible=it["edr_feasible"])
+        results.append((1 if feasibility.is_applicable(feasible, installed) else 0, coverage_status(feasible, state),
+                        feasible, why, os_, os_src, os_status))
+    updates = [(*u[:12], *results[u[12]], *u[13:]) for u in updates]
     c.executemany(
         """UPDATE inventory_current SET matched_aid=?, match_method=?, match_count=?, cs_hostname=?, cs_console_state=?,
            cs_online_state=?, cs_last_seen=?, cs_agent_version=?, cs_os=?, edr_actual=?, verification=?,

@@ -53,7 +53,7 @@ export function CoverageTable({ rows, mode, showLob = true, maxHeight, actions, 
             <th className={cn(th, "text-right")} title={`Offline in the console, the agent left the console (offline > ${days || 90} days, or an old EDR upload), or a legacy sensor`}>Offline</th>
             <th className={cn(th, "text-right")} title="Applicable nodes with no agent at all">Not installed</th>
             <th className={cn(th, "text-right")} title="Feasibility not decided yet: the OS is unknown or not in the support catalog">To be decided</th>
-            <th className={cn(th, sep, "text-left")} title="Inventory nodes whose IP is in the latest NIAM dump">In NIAM</th>
+            <th className={cn(th, sep, "text-left")} title="Inventory nodes whose IP is in the latest NIAM dump">NIAM integrated</th>
             <th className={cn(th, sep, "text-left")} title="Live nodes whose IP appears in an uploaded scan">Scanned</th>
             <th className={cn(th, sep, "text-right")} title="EDR installed, but the node is not in the uploaded LOB inventory (tagged agents are not counted twice)">Not in inventory</th>
             {actions && <th className={th} />}
@@ -87,7 +87,7 @@ export function CoverageTable({ rows, mode, showLob = true, maxHeight, actions, 
                 <Num n={r.to_be_decided} href={inv(r, "&coverage_status=To+Be+Decided")} cls="text-warn-fg" />
               </td>
               <td className={cn(td, sep)}>
-                <Coverage n={r.in_niam || 0} of={r.nodes || 0} missHref={inv(r, "&niam=0")} missLabel="not in NIAM" />
+                <Coverage n={r.in_niam || 0} of={r.nodes || 0} missHref={inv(r, "&niam=0")} missLabel="not integrated" />
               </td>
               <td className={cn(td, sep)}>
                 <Coverage n={r.scanned_live || 0} of={r.live_nodes || 0} missHref={inv(r, "&scanned=0")} missLabel="never scanned" />

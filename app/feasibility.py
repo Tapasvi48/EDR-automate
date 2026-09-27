@@ -1,127 +1,193 @@
-"""EDR feasibility: decided by the console, not taken from the inventory sheet. It depends only on the node's OS and
-node type / domain (Live / Non Live does not matter).
+"""EDR feasibility: decided by the console, not taken from the inventory sheet. Live / Non Live does not matter.
 
-Result per inventory node: Yes (feasible) | No (not feasible) | Legacy | To be decided.
-  1. a manual decision set on the EDR feasibility page wins
-  2. the OS, looked up in the OS support catalog (sensor_support.py: what the supported sensors run on):
-       Legacy OS         -> Legacy: only end-of-life sensor versions ever ran on it (that package is no longer
-                            maintained and the current cloud certificates do not cover it)
-       Not supported OS  -> No; Legacy if an agent is somehow installed
-       an "OS contains" rule you added on the page counts as Not supported
-  3. an agent installed on a supported OS -> Yes
-  4. rules you added: OS / node type / domain marked as feasible -> Yes, marked as not feasible -> No
-  5. optionally the inventory's own "EDR Feasible" column (off by default: it is often wrong)
-  6. OS Supported -> Yes
-  7. OS unknown, or known but not in the support catalog -> To be decided (needs a decision: the catalog cannot say
-     whether any sensor can run on it)
-EDR applicable = Yes, or Legacy with an agent installed (the agent runs, on an old sensor). A Legacy node without an agent
-is not applicable: no current sensor can be installed. "To be decided" is not applicable until it is decided, and is
-reported separately so the pending count stays visible. Assets in no inventory: feasible when CrowdStrike has them,
-otherwise "Unidentified" (VA scan / NIAM only) and left out of the applicable count.
+Result per inventory node: Yes (feasible) | No (not feasible) | To be decided.
+  1. a manual decision on one node (EDR feasibility page, node table) wins
+  2. a whole LOB or domain marked not feasible -> No
+  3. the feasibility sheet: a Yes / No you set for a Node Type + OS pair (download, edit, upload)
+  4. a CrowdStrike agent installed on the node (online or offline) -> Yes
+  5. OS: marked on the page (Yes / No); otherwise feasible when any CrowdStrike sensor release ever ran on it - an OS only
+     old sensors support is still feasible, the page shows the last sensor version that supported it. Not feasible only
+     when no sensor supports it at all (network OS, AIX, Solaris...) and no agent anywhere runs on it.
+  6. Node type: marked on the page (Yes / No); otherwise feasible when an agent (online or offline) is installed on at
+     least one node of that type - in any LOB. A node type with no agent anywhere is "To be decided" until you mark it.
+     A node with a blank node type is decided by its OS alone (unknown OS -> To be decided).
+EDR applicable = Yes. "To be decided" is not applicable and is reported separately. Assets in no inventory: feasible when
+CrowdStrike has them, otherwise "Unidentified" (VA scan / NIAM only) and left out of the applicable count.
 
 The OS is resolved per node: CrowdStrike (the agent reports it), else the inventory OS column, else the VA scan (Nessus
-plugin 11936 "OS Identification", or an Operating System column)."""
+plugin 11936 "OS Identification", or an Operating System column). OS values are grouped by their catalog entry
+("Microsoft Windows Server 2019 Standard" -> "Windows Server 2019") for marks, evidence and the sheet."""
+import io
 import json
 
-from fastapi import APIRouter, Body, HTTPException, Request
+from fastapi import APIRouter, Body, File, HTTPException, Request, UploadFile
 
 from . import db
 from .exporter import xlsx_response
 
 router = APIRouter()
 
-KEY = "feasibility_rules"
-DEFAULT = {"os": [], "node_type": [], "domain": [], "os_yes": [], "node_type_yes": [], "domain_yes": [],
-           "use_inventory_column": False}
-# rules the page lets you edit: "*" = mark not feasible, "*_yes" = mark feasible
-RULE_KEYS = ("os", "node_type", "domain", "os_yes", "node_type_yes", "domain_yes")
+KEY = "feasibility_rules"          # legacy rule lists (read once and turned into marks)
+MARKS = "feasibility_marks"        # {"lob": {id: "No"}, "domain": {..}, "node_type": {..: "Yes"|"No"}, "os": {..}}
+DIMS = ("lob", "domain", "node_type", "os")
 TO_DECIDE = "To be decided"
-VALID = ("Yes", "No", "Legacy", TO_DECIDE)
+VALID = ("Yes", "No", TO_DECIDE)
 
 
-def get_rules(c):
-    r = c.execute("SELECT value FROM settings WHERE key=?", (KEY,)).fetchone()
-    rules = dict(DEFAULT)
-    rules.update(db.jloads(r["value"], {}) if r else {})
-    return rules
+def _k(v):
+    return " ".join(str(v or "").split()).lower()
 
 
-def _clean(vals):
-    out = []
-    for v in vals or []:
-        v = " ".join(str(v or "").split())
-        if v and v.lower() not in [x.lower() for x in out]:
-            out.append(v)
-    return out
+def get_marks(c):
+    r = c.execute("SELECT value FROM settings WHERE key=?", (MARKS,)).fetchone()
+    if r:
+        m = db.jloads(r["value"], {})
+    else:  # first run after the old rule lists: carry them over
+        old = db.jloads((c.execute("SELECT value FROM settings WHERE key=?", (KEY,)).fetchone() or {"value": "{}"})["value"], {})
+        m = {d: {} for d in DIMS}
+        for d in ("node_type", "domain", "os"):
+            for v in old.get(d) or []:
+                m[d][_k(v)] = "No"
+            for v in old.get(d + "_yes") or []:
+                m[d][_k(v)] = "Yes"
+    return {d: dict(m.get(d) or {}) for d in DIMS}
+
+
+def save_marks(c, m):
+    c.execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", (MARKS, json.dumps(m)))
+
+
+def get_rules(c):  # kept for callers of the old API
+    return get_marks(c)
 
 
 def overrides(c):
     return {(r["lob_id"], r["item_key"]): r for r in db.rows(c, "SELECT * FROM feasibility_overrides")}
 
 
-class Decider:
-    def __init__(self, rules, ovr, classify):
-        self.os = [(v, v.lower()) for v in rules.get("os") or []]
-        self.os_yes = [(v, v.lower()) for v in rules.get("os_yes") or []]
-        self.nt = {v.lower(): v for v in rules.get("node_type") or []}
-        self.nt_yes = {v.lower(): v for v in rules.get("node_type_yes") or []}
-        self.dom = {v.lower(): v for v in rules.get("domain") or []}
-        self.dom_yes = {v.lower(): v for v in rules.get("domain_yes") or []}
-        self.use_inv = bool(rules.get("use_inventory_column"))
-        self.ovr = ovr
-        self.classify = classify
+def sheet_decisions(c):
+    """{(lob_id, node type, OS group): decision}; lob_id 0 = a sheet downloaded for every LOB."""
+    return {(r["lob_id"], r["node_type"], r["os_key"]): r for r in db.rows(c, "SELECT * FROM feasibility_pairs")}
 
-    def __call__(self, lob_id, item_key, *, installed, os_, node_type, domain, inv_feasible):
-        """-> (feasible Yes | No | Legacy | To be decided, reason, OS support status or None)"""
-        e = self.classify(os_)
+
+def os_group(classify, os_):
+    """(key, label, catalog entry): OS values grouped by their catalog entry, else by the OS text itself."""
+    if not (os_ or "").strip():
+        return "", "", None
+    e = classify(os_)
+    label = e["pattern"] if e else " ".join(os_.split())
+    return _k(label), label, e
+
+
+class Evidence:
+    """Where CrowdStrike is actually installed: node types (inventory) and OS groups (inventory + every agent)."""
+
+    def __init__(self):
+        self.nt, self.os = {}, {}
+
+    def add_node(self, node_type, os_key, installed):
+        if installed:
+            if _k(node_type):
+                self.nt[_k(node_type)] = self.nt.get(_k(node_type), 0) + 1
+            if os_key:
+                self.os[os_key] = self.os.get(os_key, 0) + 1
+
+    def add_agent_os(self, os_key):
+        if os_key:
+            self.os[os_key] = self.os.get(os_key, 0) + 1
+
+
+class Decider:
+    def __init__(self, marks, ovr, sheet, classify, evidence=None):
+        self.m, self.ovr, self.sheet, self.classify = marks, ovr, sheet, classify
+        self.ev = evidence or Evidence()
+
+    def os_verdict(self, os_key, label, e):
+        """OS on its own: (Yes | No | None = no opinion, reason)."""
+        mk = self.m["os"].get(os_key)
+        if mk:
+            return mk, f"OS marked {'feasible' if mk == 'Yes' else 'not feasible'}: {label}"
+        if e and e["status"] == "Not supported":
+            if self.ev.os.get(os_key):
+                return "Yes", f"OS {label}: no listed sensor, but an agent runs on it"
+            return "No", f"OS not supported by any CrowdStrike sensor: {label}"
+        if e and e["status"] == "Legacy":
+            last = e.get("last_sensor")
+            return "Yes", f"OS {label}: old sensors only" + (f" (last sensor {last})" if last else "")
+        if e:
+            return "Yes", f"OS supported: {label}"
+        n = self.ev.os.get(os_key)
+        if n:
+            return "Yes", f"OS {label}: an agent runs on {n} host{'s' if n > 1 else ''}"
+        return None, ""
+
+    def nt_verdict(self, node_type):
+        nt = _k(node_type)
+        if not nt:
+            return None, ""
+        mk = self.m["node_type"].get(nt)
+        if mk:
+            return mk, f"Node type marked {'feasible' if mk == 'Yes' else 'not feasible'}: {node_type}"
+        n = self.ev.nt.get(nt)
+        if n:
+            return "Yes", f"Node type {node_type}: EDR on {n} node{'s' if n > 1 else ''}"
+        return TO_DECIDE, f"Node type {node_type}: no agent on any node of this type yet"
+
+    def pair(self, node_type, os_):
+        """Verdict for a Node Type + OS pair, ignoring the node-level steps (used by the sheet)."""
+        os_key, label, e = os_group(self.classify, os_)
+        o, why_o = self.os_verdict(os_key, label, e)
+        if o == "No":
+            return "No", why_o
+        n, why_n = self.nt_verdict(node_type)
+        if n == "No":
+            return "No", why_n
+        if n == TO_DECIDE:
+            return TO_DECIDE, why_n
+        if n is None and o is None:
+            return TO_DECIDE, "No node type and OS unknown"
+        return "Yes", " · ".join(x for x in (why_n, why_o) if x)
+
+    def __call__(self, lob_id, item_key, *, installed, os_, node_type, domain, inv_feasible=None):
+        """-> (Yes | No | To be decided, reason, OS support status or None)"""
+        os_key, label, e = os_group(self.classify, os_)
         status = e["status"] if e else None
-        osl = (os_ or "").lower()
-        rule = next((v for v, vl in self.os if vl in osl), None)
-        if rule and status != "Legacy":
-            status = "Not supported"
         o = self.ovr.get((lob_id, item_key))
         if o:
             return o["feasible"], "Set manually" + (f": {o['note']}" if o.get("note") else ""), status
-        label = f"OS rule: {rule}" if rule else (f"{e['pattern']}" if e else "")
-        if status == "Legacy":
-            return "Legacy", (f"Legacy OS: {label or os_} · only end-of-life sensors ran on it (that package is no longer "
-                              "maintained and the current cloud certificates do not cover it)"
-                              + (" · agent installed" if installed else " · no current sensor runs on it")), status
-        if status == "Not supported":
-            if installed:
-                return "Legacy", f"OS not supported: {label} · agent installed anyway", status
-            return "No", (label if rule else f"OS not supported by CrowdStrike: {label}"), status
+        if self.m["lob"].get(str(lob_id)) == "No":
+            return "No", "LOB marked not feasible", status
+        d = _k(domain)
+        if d and self.m["domain"].get(d) == "No":
+            return "No", f"Domain marked not feasible: {domain}", status
+        sh = self.sheet.get((int(lob_id or 0), _k(node_type), os_key)) or self.sheet.get((0, _k(node_type), os_key))
+        if sh:
+            return sh["feasible"], (f"Feasibility sheet{' (this LOB)' if sh['lob_id'] else ''}: "
+                                    f"{node_type or '(blank)'} + {label or '(unknown OS)'}"), status
         if installed:
             return "Yes", "EDR installed", status
-        nt = (node_type or "").strip().lower()
-        d = (domain or "").strip().lower()
-        yes = next((v for v, vl in self.os_yes if vl in osl), None)
-        if yes:
-            return "Yes", f"OS rule (feasible): {yes}", status
-        if nt and nt in self.nt_yes:
-            return "Yes", f"Node type rule (feasible): {self.nt_yes[nt]}", status
-        if d and d in self.dom_yes:
-            return "Yes", f"Domain rule (feasible): {self.dom_yes[d]}", status
-        if nt and nt in self.nt:
-            return "No", f"Node type rule: {self.nt[nt]}", status
-        if d and d in self.dom:
-            return "No", f"Domain rule: {self.dom[d]}", status
-        if self.use_inv and inv_feasible == "No":
-            return "No", "Inventory sheet says No", status
-        if status == "Supported":
-            return "Yes", f"OS supported: {e['pattern']}", status
-        if os_:
-            return TO_DECIDE, f"OS not in the support catalog ({os_}) · Feasibility to be decided", status
-        return TO_DECIDE, "OS unknown (no agent, no inventory OS column, no VA scan) · Feasibility to be decided", status
+        f, why = self.pair(node_type, os_)
+        return f, why, status
 
 
-def is_applicable(feasible, installed):
-    return feasible == "Yes" or (feasible == "Legacy" and installed)
+def is_applicable(feasible, installed=False):
+    return feasible == "Yes"
 
 
-def decider(c):
+def decider(c, evidence=None):
     from .sensor_support import classifier
-    return Decider(get_rules(c), overrides(c), classifier(c))
+    return Decider(get_marks(c), overrides(c), sheet_decisions(c), classifier(c), evidence)
+
+
+def build_evidence(c, classify, items):
+    """items: [(node_type, os, installed)] for the inventory nodes being decided; agents in CrowdStrike add OS evidence."""
+    ev = Evidence()
+    for nt, os_, inst in items:
+        ev.add_node(nt, os_group(classify, os_)[0], inst)
+    for r in c.execute("""SELECT os_version FROM hosts WHERE COALESCE(os_version,'')<>'' AND
+                          (console_state='active' OR (console_state='removed' AND gone_primary=1))"""):
+        ev.add_agent_os(os_group(classify, r["os_version"])[0])
+    return ev
 
 
 def resolve_os(edr_os, inv_os, scan):
@@ -138,67 +204,291 @@ def resolve_os(edr_os, inv_os, scan):
 # ------------------------------------------------------------------ API
 def _summary(c):
     s = db.one(c, """SELECT COUNT(*) nodes, SUM(feasible='Yes') feasible, SUM(feasible='No') not_feasible,
-        SUM(feasible='Legacy') legacy, SUM(feasible='Legacy' AND edr_state IN ('Online','Offline')) legacy_installed,
-        SUM(feasible='To be decided') to_be_decided,
+        SUM(feasible='To be decided') to_be_decided, SUM(applicable=1) applicable,
         SUM(os_support='Supported') os_supported, SUM(os_support='Legacy') os_legacy, SUM(os_support='Not supported') os_unsupported,
-        SUM(applicable=1) applicable,
-        SUM(feasible='No' AND (feasible_reason LIKE 'OS rule%' OR feasible_reason LIKE 'OS not supported%')) by_os, SUM(feasible_reason LIKE 'Node type rule:%') by_node_type,
-        SUM(feasible_reason LIKE 'Domain rule:%') by_domain, SUM(feasible_reason LIKE 'Set manually%') manual,
-        SUM(feasible_reason LIKE 'Node type rule (feasible)%') by_node_type_yes, SUM(feasible_reason LIKE 'Domain rule (feasible)%') by_domain_yes,
-        SUM(feasible_reason LIKE 'OS rule (feasible)%') by_os_yes, SUM(feasible_reason LIKE '%OS not in the support%') os_not_in_catalog,
-        SUM(feasible_reason='EDR installed') by_edr, SUM(feasible_reason LIKE 'Inventory sheet%') by_sheet,
+        SUM(feasible='Yes' AND os_support='Legacy') feasible_legacy_os,
+        SUM(feasible='No' AND feasible_reason LIKE '%OS%') by_os, SUM(feasible='No' AND feasible_reason LIKE 'Node type%') by_node_type,
+        SUM(feasible='No' AND feasible_reason LIKE 'Domain%') by_domain, SUM(feasible='No' AND feasible_reason LIKE 'LOB%') by_lob,
+        SUM(feasible_reason LIKE 'Set manually%') manual, SUM(feasible_reason LIKE 'Feasibility sheet%') by_sheet,
+        SUM(feasible_reason='EDR installed') by_edr,
         SUM(COALESCE(os_resolved,'')='') os_unknown, SUM(os_source='edr') os_edr, SUM(os_source='inventory') os_inventory,
         SUM(os_source='scan') os_scan,
         SUM(edr_feasible IN ('Yes','No') AND edr_feasible<>feasible) sheet_differs FROM inventory_current""")
     return {k: v or 0 for k, v in s.items()}
 
 
-def _facets(c):
-    def dist(col):
-        return db.rows(c, f"""SELECT {col} value, COUNT(*) nodes, SUM(feasible='No') not_feasible,
-            SUM(feasible='To be decided') to_be_decided, SUM(feasible='Yes') feasible,
-            SUM(edr_state IN ('Online','Offline')) installed FROM inventory_current
-            WHERE COALESCE({col},'')<>'' GROUP BY {col} COLLATE NOCASE ORDER BY nodes DESC LIMIT 400""")
-    return {"os": dist("os_resolved"), "node_type": dist("node_type"), "domain": dist("domain")}
+def _agg(rows, key):
+    out = {}
+    for r in rows:
+        k = key(r)
+        a = out.setdefault(k[0], {"key": k[0], "value": k[1], "nodes": 0, "installed": 0, "feasible": 0, "not_feasible": 0, "to_be_decided": 0})
+        a["nodes"] += 1
+        a["installed"] += r["edr_state"] in ("Online", "Offline")
+        a["feasible"] += r["feasible"] == "Yes"
+        a["not_feasible"] += r["feasible"] == "No"
+        a["to_be_decided"] += r["feasible"] == TO_DECIDE
+    return sorted(out.values(), key=lambda a: -a["nodes"])
+
+
+def dimensions(c):
+    """Node types, OS groups, LOBs and domains with their node counts, EDR evidence, verdict and your mark."""
+    from .sensor_support import classifier, n2_min
+    cls = classifier(c)
+    d = decider(c)
+    rows = db.rows(c, """SELECT ic.lob_id, l.name lob, ic.node_type, ic.domain, ic.os_resolved, ic.edr_state, ic.feasible
+                         FROM inventory_current ic JOIN lobs l ON l.id=ic.lob_id""")
+    ev = build_evidence(c, cls, [(r["node_type"], r["os_resolved"], r["edr_state"] in ("Online", "Offline")) for r in rows])
+    d.ev = ev
+    m = d.m
+    nts = _agg(rows, lambda r: (_k(r["node_type"]), (r["node_type"] or "").strip() or "(blank)"))
+    for a in nts:  # auto = what the node type would be without your mark
+        a["mark"] = m["node_type"].get(a["key"])
+        saved = m["node_type"]
+        m["node_type"] = {k: v for k, v in saved.items() if k != a["key"]}
+        a["auto"], a["why"] = d.nt_verdict(a["value"]) if a["key"] else (None, "blank node type: decided by the OS")
+        m["node_type"] = saved
+    oss = _agg(rows, lambda r: os_group(cls, r["os_resolved"])[:2] if (r["os_resolved"] or "").strip() else ("", "(unknown)"))
+    for a in oss:
+        e = cls(a["value"]) if a["key"] else None
+        a["status"], a["last_sensor"], a["platform"] = (e or {}).get("status"), (e or {}).get("last_sensor"), (e or {}).get("platform")
+        a["agents"] = ev.os.get(a["key"], 0)
+        a["mark"] = m["os"].get(a["key"])
+        saved = m["os"]
+        m["os"] = {k: v for k, v in saved.items() if k != a["key"]}
+        a["auto"], a["why"] = d.os_verdict(a["key"], a["value"], e) if a["key"] else (None, "no OS from the agent, inventory or VA scan")
+        m["os"] = saved
+    lobs = _agg(rows, lambda r: (str(r["lob_id"]), r["lob"]))
+    for a in lobs:
+        a["mark"] = m["lob"].get(a["key"])
+    doms = _agg(rows, lambda r: (_k(r["domain"]), (r["domain"] or "").strip() or "(blank)"))
+    for a in doms:
+        a["mark"] = m["domain"].get(a["key"]) if a["key"] else None
+    return {"node_type": nts, "os": oss, "lob": lobs, "domain": doms, "n2": {k: ".".join(map(str, v)) for k, v in n2_min(c).items()},
+            "sheet": db.one(c, "SELECT COUNT(*) n, MAX(set_at) at FROM feasibility_pairs")}
 
 
 @router.get("/api/feasibility")
 def feasibility_get():
     with db.get_conn() as c:
-        return {"rules": get_rules(c), "summary": _summary(c), "facets": _facets(c),
+        return {"summary": _summary(c), "marks": get_marks(c), "dims": dimensions(c),
                 "lobs": db.rows(c, "SELECT id, name FROM lobs ORDER BY name COLLATE NOCASE")}
 
 
-@router.post("/api/feasibility/preview")
-def feasibility_preview(data: dict = Body(...)):
-    """What the draft rules would change, before saving."""
-    rules = {**DEFAULT, **{k: _clean(data.get(k)) for k in RULE_KEYS},
-             "use_inventory_column": bool(data.get("use_inventory_column"))}
+@router.put("/api/feasibility/mark")
+def feasibility_mark(data: dict = Body(...)):
+    """Mark a whole node type / OS / LOB / domain: {dim, key, feasible: Yes | No | null (automatic)}."""
+    dim, key, val = data.get("dim"), data.get("key"), data.get("feasible")
+    if dim not in DIMS or not str(key or "").strip():
+        raise HTTPException(400, "dim must be lob, domain, node_type or os, with a key")
+    if val not in ("Yes", "No", None) or (dim in ("lob", "domain") and val == "Yes"):
+        raise HTTPException(400, "feasible must be Yes, No or null (LOB / domain: No or null)")
     with db.get_conn() as c:
-        from .sensor_support import classifier
-        d = Decider(rules, overrides(c), classifier(c))
-        to_no = to_yes = feasible = to_decide = 0
-        for r in c.execute("""SELECT lob_id, item_key, os_resolved, node_type, domain, edr_feasible, edr_state, feasible
-                              FROM inventory_current"""):
-            f, _, _ = d(r["lob_id"], r["item_key"], installed=r["edr_state"] in ("Online", "Offline"), os_=r["os_resolved"],
-                     node_type=r["node_type"], domain=r["domain"], inv_feasible=r["edr_feasible"])
-            feasible += f == "Yes"
-            to_decide += f == TO_DECIDE
-            to_no += f != "Yes" and r["feasible"] == "Yes"
-            to_yes += f == "Yes" and r["feasible"] != "Yes"
-    return {"feasible": feasible, "to_not_feasible": to_no, "to_feasible": to_yes, "to_be_decided": to_decide}
-    return {"feasible": feasible, "to_not_feasible": to_no, "to_feasible": to_yes}
-
-
-@router.put("/api/feasibility/rules")
-def feasibility_save(data: dict = Body(...)):
-    rules = {k: _clean(data.get(k)) for k in RULE_KEYS}
-    rules["use_inventory_column"] = bool(data.get("use_inventory_column"))
-    with db.get_conn() as c:
-        c.execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", (KEY, json.dumps(rules)))
+        before = _summary(c)
+        m = get_marks(c)
+        key = str(key) if dim == "lob" else _k(key)
+        if val:
+            m[dim][key] = val
+        else:
+            m[dim].pop(key, None)
+        save_marks(c, m)
         from .inventory import refresh_matches
         refresh_matches(c)
-        return {"rules": rules, "summary": _summary(c)}
+        after = _summary(c)
+    return {"ok": True, "summary": after, "delta": {k: after[k] - before[k] for k in ("feasible", "not_feasible", "to_be_decided")}}
+
+
+# ------------------------------------------------------------------ feasibility sheet (download, edit, upload)
+# Feasible and Suggested come right after Node Type and OS so the sheet can be worked left to right. The LOB column says
+# which LOB a row's decision applies to ("All LOBs" when the sheet was downloaded for every LOB).
+SHEET_PAIRS = [("node_type", "Node Type"), ("os", "OS"), ("feasible", "Feasible (Yes/No)"), ("suggested", "Suggested"),
+               ("os_support", "OS Support"), ("last_sensor", "Last Sensor Version"), ("why", "Why"), ("lob", "LOB"),
+               ("nodes", "Nodes"), ("installed", "With EDR (online or offline)"), ("types", "Inventory Types"), ("remarks", "Remarks")]
+SHEET_SCOPE = [("value", "{dim}"), ("feasible", "Feasible (Yes/No)"), ("nodes", "Nodes"), ("installed", "With EDR (online or offline)"),
+               ("remarks", "Remarks")]
+GUIDE = [("step", "How to use"), ("text", "")]
+ALL_LOBS = "All LOBs"
+
+
+def _scope_rows(c, lob=None, inv_type=None, node_type=None):
+    w, params = [], []
+    if lob:
+        w.append("ic.lob_id=?")
+        params.append(int(lob))
+    if inv_type == "main":
+        w.append("ic.type_id IS NULL")
+    elif inv_type:
+        w.append("ic.type_id=?")
+        params.append(int(inv_type))
+    if node_type:
+        w.append("LOWER(TRIM(COALESCE(ic.node_type,'')))=?")
+        params.append("" if node_type == "(blank)" else _k(node_type))
+    where = ("WHERE " + " AND ".join(w)) if w else ""
+    return db.rows(c, f"""SELECT ic.lob_id, l.name lob, ic.node_type, ic.domain, ic.os_resolved, ic.edr_state,
+        COALESCE(t.name, 'Main') inv_type FROM inventory_current ic JOIN lobs l ON l.id=ic.lob_id
+        LEFT JOIN lob_types t ON t.id=ic.type_id {where}""", params)
+
+
+def _decider_with_evidence(c):
+    from .sensor_support import classifier
+    cls = classifier(c)
+    d = decider(c)
+    inv = db.rows(c, "SELECT node_type, os_resolved, edr_state FROM inventory_current")
+    d.ev = build_evidence(c, cls, [(r["node_type"], r["os_resolved"], r["edr_state"] in ("Online", "Offline")) for r in inv])
+    return cls, d
+
+
+@router.get("/api/feasibility/sheet")
+def feasibility_sheet_download(lob: int = 0, type: str = "", node_type: str = ""):
+    """The whole estate, or one LOB, one inventory type and / or one node type at a time."""
+    with db.get_conn() as c:
+        cls, d = _decider_with_evidence(c)
+        rows = _scope_rows(c, lob or None, type or None, node_type or None)
+        lob_name = db.one(c, "SELECT name FROM lobs WHERE id=?", (lob,))["name"] if lob else None
+        type_name = ("Main" if type == "main" else (db.one(c, "SELECT name FROM lob_types WHERE id=?", (int(type),)) or {}).get("name")) if type else None
+        pairs = {}
+        for r in rows:
+            ok, label, e = os_group(cls, r["os_resolved"])
+            p = pairs.setdefault((_k(r["node_type"]), ok), {"node_type": (r["node_type"] or "").strip(), "os": label, "e": e,
+                                                             "nodes": 0, "installed": 0, "types": set()})
+            p["nodes"] += 1
+            p["installed"] += r["edr_state"] in ("Online", "Offline")
+            p["types"].add(r["inv_type"])
+        out = []
+        for (ntk, ok), p in sorted(pairs.items(), key=lambda kv: (kv[1]["node_type"].lower(), -kv[1]["nodes"])):
+            auto, why = ("Yes", "EDR installed on nodes of this pair") if p["installed"] else d.pair(p["node_type"], p["os"])
+            sh = d.sheet.get((lob or 0, ntk, ok))
+            out.append({"node_type": p["node_type"] or "(blank)", "os": p["os"] or "(unknown)", "nodes": p["nodes"],
+                        "installed": p["installed"], "types": ", ".join(sorted(p["types"])), "lob": lob_name or ALL_LOBS,
+                        "os_support": {"Legacy": "Old sensors only", "Not supported": "No sensor", "Supported": "Supported"}.get((p["e"] or {}).get("status"), ""),
+                        "last_sensor": (p["e"] or {}).get("last_sensor") or "",
+                        "suggested": auto, "why": why, "feasible": sh["feasible"] if sh else ("" if auto == TO_DECIDE else auto),
+                        "remarks": (sh or {}).get("remarks") or ""})
+        m = get_marks(c)
+        lob_rows, dom_rows = {}, {}
+        for r in rows:
+            a = lob_rows.setdefault(r["lob_id"], {"value": r["lob"], "key": str(r["lob_id"]), "nodes": 0, "installed": 0})
+            a["nodes"] += 1
+            a["installed"] += r["edr_state"] in ("Online", "Offline")
+            if (r["domain"] or "").strip():
+                b = dom_rows.setdefault(_k(r["domain"]), {"value": r["domain"].strip(), "key": _k(r["domain"]), "nodes": 0, "installed": 0})
+                b["nodes"] += 1
+                b["installed"] += r["edr_state"] in ("Online", "Offline")
+
+    def scope(dim, title, items):
+        return (title, [(k, l.format(dim=title)) for k, l in SHEET_SCOPE],
+                [{**a, "feasible": "No" if m[dim].get(a["key"]) == "No" else "Yes", "remarks": ""}
+                 for a in sorted(items.values(), key=lambda a: -a["nodes"])])
+    scope_txt = " · ".join(x for x in (f"LOB: {lob_name}" if lob_name else "All LOBs", f"Inventory type: {type_name}" if type_name else "",
+                                       f"Node type: {node_type}" if node_type else "") if x)
+    guide = [{"step": s, "text": t} for s, t in [
+        ("Scope", scope_txt),
+        ("1", "Sheet 'Node Type x OS': one row per Node Type + OS pair in this scope. 'Suggested' is what the console decides on its own."),
+        ("2", "Set 'Feasible (Yes/No)'. Leave it equal to Suggested (or empty) to keep the automatic decision."),
+        ("3", "The LOB column says where the decision applies: a LOB name = that LOB only, 'All LOBs' = every LOB. Keep it as downloaded."),
+        ("4", "Sheets 'LOB' and 'Domain': No = every node of that LOB / domain is not feasible, Yes = automatic."),
+        ("5", "Upload on the EDR feasibility page. Only the rows in the file are changed, so sheets for other LOBs / types stay as they are."),
+        ("", "Automatic: an OS is feasible when any CrowdStrike sensor release ran on it (old sensors included); a node type is feasible "
+             "when an agent is installed on at least one node of that type; a node with an agent is always feasible."),
+    ]]
+    name = "_".join(x for x in ("edr_feasibility", (lob_name or "all_lobs"), type_name or "", node_type or "") if x)
+    return xlsx_response([("Node Type x OS", SHEET_PAIRS, out), scope("lob", "LOB", lob_rows), scope("domain", "Domain", dom_rows),
+                          ("How to use", GUIDE, guide)], "".join(ch if ch.isalnum() or ch in "_-" else "_" for ch in name))
+
+
+def _yn(v):
+    v = _k(v)
+    return "Yes" if v in ("yes", "y", "true", "1", "feasible") else "No" if v in ("no", "n", "false", "0", "not feasible", "notfeasible") else None
+
+
+@router.post("/api/feasibility/sheet")
+async def feasibility_sheet_upload(file: UploadFile = File(...)):
+    """Apply a filled-in sheet. Only the rows in the file change: other LOBs, types and node types keep their decisions."""
+    from openpyxl import load_workbook
+    try:
+        wb = load_workbook(io.BytesIO(await file.read()), read_only=True, data_only=True)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"Not an Excel file: {e}")
+    stats = {"pairs": 0, "pairs_stored": 0, "pairs_auto": 0, "lob_no": 0, "domain_no": 0, "skipped": 0}
+    with db.get_conn() as c:
+        cls, d = _decider_with_evidence(c)
+        inv = db.rows(c, "SELECT lob_id, node_type, os_resolved, edr_state FROM inventory_current")
+        pair_installed = {}
+        for r in inv:
+            if r["edr_state"] in ("Online", "Offline"):
+                k = (_k(r["node_type"]), os_group(cls, r["os_resolved"])[0])
+                for scope_id in (0, r["lob_id"]):
+                    pair_installed[(scope_id, *k)] = pair_installed.get((scope_id, *k), 0) + 1
+        lob_ids = {_k(r["name"]): r["id"] for r in db.rows(c, "SELECT id, name FROM lobs")}
+        m = get_marks(c)
+        found, now = False, db.now_iso()
+        for ws in wb.worksheets:
+            it = ws.iter_rows(values_only=True)
+            head = [_k(h) for h in (next(it, None) or [])]
+            col = lambda *names: next((i for i, h in enumerate(head) if any(h.startswith(n) for n in names)), None)  # noqa: E731
+            fcol = col("feasible")
+            if fcol is None:
+                continue
+            ntc, osc, lc, rc = col("node type"), col("os"), col("lob"), col("remarks")
+            if ntc is not None and osc is not None:
+                found = True
+                for row in it:
+                    nt = "" if row[ntc] in (None, "(blank)") else str(row[ntc]).strip()
+                    os_ = "" if row[osc] in (None, "(unknown)") else str(row[osc]).strip()
+                    if not nt and not os_:
+                        continue
+                    lname = _k(row[lc]) if lc is not None else ""
+                    scope_id = 0 if lname in ("", _k(ALL_LOBS)) else lob_ids.get(lname)
+                    if scope_id is None:
+                        stats["skipped"] += 1
+                        continue
+                    stats["pairs"] += 1
+                    ok = os_group(cls, os_)[0]
+                    auto = "Yes" if pair_installed.get((scope_id, _k(nt), ok)) else d.pair(nt, os_)[0]
+                    val = _yn(row[fcol])
+                    if val is None or val == auto:
+                        c.execute("DELETE FROM feasibility_pairs WHERE lob_id=? AND node_type=? AND os_key=?", (scope_id, _k(nt), ok))
+                        stats["pairs_auto"] += 1
+                        continue
+                    c.execute("""INSERT OR REPLACE INTO feasibility_pairs(lob_id, node_type, os_key, node_type_label, os_label, feasible,
+                                 remarks, set_at) VALUES (?,?,?,?,?,?,?,?)""",
+                              (scope_id, _k(nt), ok, nt, os_, val, str(row[rc] or "") if rc is not None else "", now))
+                    stats["pairs_stored"] += 1
+                continue
+            for dim in ("lob", "domain"):
+                vc = col(dim)
+                if vc is None:
+                    continue
+                found = True
+                for row in it:
+                    name = _k(row[vc])
+                    if not name or name == "(blank)":
+                        continue
+                    key = str(lob_ids[name]) if dim == "lob" and name in lob_ids else (name if dim == "domain" else None)
+                    if not key:
+                        stats["skipped"] += 1
+                        continue
+                    if _yn(row[fcol]) == "No":
+                        m[dim][key] = "No"
+                        stats[f"{dim}_no"] += 1
+                    else:
+                        m[dim].pop(key, None)
+                break
+        if not found:
+            raise HTTPException(400, "No sheet with a 'Feasible' column and Node Type + OS, LOB or Domain columns")
+        save_marks(c, m)
+        from .inventory import refresh_matches
+        refresh_matches(c)
+        stats["summary"] = _summary(c)
+    return stats
+
+
+@router.delete("/api/feasibility/sheet")
+def feasibility_sheet_clear():
+    with db.get_conn() as c:
+        c.execute("DELETE FROM feasibility_pairs")
+        from .inventory import refresh_matches
+        refresh_matches(c)
+    return {"ok": True}
 
 
 @router.post("/api/feasibility/override")
@@ -240,10 +530,8 @@ def _query(p):
     reason = p.get("reason")
     if reason == "rule":
         w.append("ic.feasible_reason LIKE '%rule:%'")
-    elif reason in ("Legacy OS", "OS not supported", "OS supported", "OS rule", "Node type rule", "Domain rule",
-                    "Set manually", "EDR installed", "Inventory sheet",
-                    "OS rule (feasible)", "Node type rule (feasible)", "Domain rule (feasible)",
-                    "OS not in the support catalog", "OS unknown"):
+    elif reason in ("OS not supported", "OS supported", "OS marked", "Node type marked", "Domain marked", "LOB marked",
+                    "Set manually", "EDR installed", "Feasibility sheet", "Node type"):
         w.append("ic.feasible_reason LIKE ?")
         params.append(reason + "%")
     if p.get("os_support") in ("Supported", "Legacy", "Not supported"):
@@ -315,7 +603,7 @@ def feasibility_export(request: Request):
         prepare_outdated_temp(c)
         rows = db.rows(c, f"SELECT {COLS} FROM inventory_current ic JOIN lobs l ON l.id=ic.lob_id {where} {order}", params)
     cols = [("lob", "LOB"), ("ip", "IP"), ("node_name", "Node Name"), ("msp", "MSP"), ("node_type", "Node Type"), ("domain", "Domain"),
-            ("live", "Live / Non Live"), ("os_resolved", "OS"), ("os_source", "OS Source"), ("os_support", "OS Support (N-2 sensors)"),
+            ("live", "Live / Non Live"), ("os_resolved", "OS"), ("os_source", "OS Source"),
             ("feasible", "EDR Feasible"), ("cs_agent_version", "Sensor Version"), ("sensor_level", "Sensor Level"),
             ("feasible_reason", "Reason"), ("edr_feasible", "EDR Feasible (inventory sheet)"), ("edr_state", "EDR Status")]
     return xlsx_response([("EDR feasibility", cols, rows)], "edr_feasibility")

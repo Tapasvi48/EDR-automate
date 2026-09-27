@@ -35,50 +35,73 @@ LEGACY_NOTE = ("Supported only by end-of-life sensor releases: the current N-2 (
                "that old sensor package is no longer maintained - needs Falcon for Legacy Systems / extended support")
 _S, _L, _N = STATUSES
 
-# platform, pattern, status, note. Verified against the CrowdStrike Deployment FAQ (products/faq): the standard
-# Windows/Linux/macOS lists = Supported; "Legacy Operating Systems with Falcon for Legacy Systems" = Legacy.
+# platform, pattern, status, last sensor, source. Status: Supported = in CrowdStrike's current supported list; Legacy =
+# "old sensors only" (a sensor release ran on it, current releases do not; still EDR feasible); Not supported = no sensor.
+# Sources (checked Sep 2026):
+#   FAQ    - CrowdStrike Deployment FAQ, crowdstrike.com/en-us/products/faq (current supported list, Legacy Operating Systems)
+#   MAC25  - Macnica CrowdStrike update notices 2025 (distributor): Windows 7 / 2008 R2 end at Windows sensor 7.16;
+#            Windows 10 v1507 and Windows 11 v22H2 locked to 7.29; macOS Ventura 13 support ended Dec 31, 2025
+#   DELL   - Dell KB 000177899 "CrowdStrike Falcon Sensor System Requirements" (sensors 6.44 / 6.45 and later; macOS Big
+#            Sur last supported sensor 6.57)
+# Where no source names the last version, it is left blank: the console fills it from CrowdStrike's own kernel data
+# (Linux) after a sync, or you set it on the OS support list.
+FLS = "Falcon for Legacy Systems"
 BASELINE = [
-    ("Windows", "Windows 11", _S, ""), ("Windows", "Windows 10", _S, "only the feature updates CrowdStrike lists are supported"),
-    ("Windows", "Windows Server 2025", _S, ""), ("Windows", "Windows Server 2022", _S, ""),
-    ("Windows", "Windows Server 2019", _S, ""), ("Windows", "Windows Server 2016", _S, ""),
-    ("Windows", "Windows Server 2012 R2", _S, "in CrowdStrike's standard supported list; the OS itself needs Microsoft ESU"),
-    ("Windows", "Windows Server 2012", _S, "in CrowdStrike's standard supported list; the OS itself needs Microsoft ESU"),
-    ("Windows", "Windows 8.1", _L, "FAQ: Legacy Operating Systems - Falcon for Legacy Systems only"), ("Windows", "Windows 8", _L, "FAQ: Legacy Operating Systems - Falcon for Legacy Systems only"),
-    ("Windows", "Windows 7", _S, "in CrowdStrike's standard supported list (SP1); the OS itself needs Microsoft ESU"),
-    ("Windows", "Windows Server 2008 R2", _S, "in CrowdStrike's standard supported list (SP1); the OS itself needs Microsoft ESU"),
-    ("Windows", "Windows Server 2008", _L, "FAQ: Legacy Operating Systems - Falcon for Legacy Systems only"),
-    ("Windows", "Windows Server 2003", _L, "FAQ: Legacy Operating Systems - Falcon for Legacy Systems only"), ("Windows", "Windows XP", _L, "FAQ: Legacy Operating Systems - Falcon for Legacy Systems only"),
-    ("Windows", "Windows Vista", _L, "FAQ: Legacy Operating Systems - Falcon for Legacy Systems only"),
-    ("Windows", "Windows 2000", _N, "no Falcon sensor"),
-    ("Windows", "Windows NT", _N, "no Falcon sensor"),
-    ("macOS", "macOS 26", _S, ""), ("macOS", "Tahoe", _S, ""), ("macOS", "macOS 15", _S, ""), ("macOS", "Sequoia", _S, ""),
-    ("macOS", "macOS 14", _S, ""), ("macOS", "Sonoma", _S, ""),
-    ("macOS", "macOS 13", _L, "FAQ: not on the current list - only sensor 6.x (<= 6.57) ever ran on it: " + LEGACY_NOTE), ("macOS", "Ventura", _L, LEGACY_NOTE),
-    ("macOS", "macOS 12", _L, LEGACY_NOTE), ("macOS", "Monterey", _L, LEGACY_NOTE),
-    ("macOS", "macOS 11", _L, LEGACY_NOTE), ("macOS", "Big Sur", _L, LEGACY_NOTE), ("macOS", "Catalina", _L, LEGACY_NOTE),
-    ("Linux", "RHEL 10", _S, ""), ("Linux", "RHEL 9", _S, ""), ("Linux", "RHEL 8", _S, ""),
-    ("Linux", "RHEL 7", _S, "7.9 in CrowdStrike's current supported list: Red Hat ELS only - confirm the kernel is on the supported-kernel list"),
-    ("Linux", "RHEL 6", _L, LEGACY_NOTE), ("Linux", "RHEL 5", _N, "no supported sensor and no kernel on the supported-kernel list"),
-    ("Linux", "CentOS Stream 9", _S, ""), ("Linux", "CentOS 8", _S, "vendor end of life: ELS/ESM style support needed"),
-    ("Linux", "CentOS 7", _S, "vendor end of life Jun 2024 - RHEL 7.9 kernels are still on CrowdStrike's list, confirm the kernel"),
-    ("Linux", "CentOS 6", _L, LEGACY_NOTE), ("Linux", "CentOS 5", _N, ""),
-    ("Linux", "Oracle Linux 10", _S, ""), ("Linux", "Oracle Linux 9", _S, ""), ("Linux", "Oracle Linux 8", _S, ""), ("Linux", "Oracle Linux 7", _S, ""),
-    ("Linux", "Oracle Linux 6", _L, LEGACY_NOTE),
-    ("Linux", "Rocky Linux 10", _S, ""), ("Linux", "Rocky Linux 9", _S, ""), ("Linux", "Rocky Linux 8", _S, ""),
-    ("Linux", "Alma Linux 10", _S, ""), ("Linux", "Alma Linux 9", _S, ""), ("Linux", "Alma Linux 8", _S, ""),
-    ("Linux", "Ubuntu 24.04", _S, ""), ("Linux", "Ubuntu 22.04", _S, ""), ("Linux", "Ubuntu 20.04", _S, ""),
-    ("Linux", "Ubuntu 18.04", _S, "FAQ: all supported sensor versions; Ubuntu Pro / ESM"),
-    ("Linux", "Ubuntu 16.04", _S, "FAQ: all supported sensor versions; vendor LTS ended - Ubuntu Pro / ESM recommended"),
-    ("Linux", "Ubuntu 14.04", _L, "not in CrowdStrike's current list - only sensor 6.x (>= 6.48) ever ran on it: " + LEGACY_NOTE),
-    ("Linux", "Debian 12", _S, ""), ("Linux", "Debian 11", _S, ""), ("Linux", "Debian 10", _S, "vendor LTS ended: check the kernel"),
-    ("Linux", "Debian 9", _L, LEGACY_NOTE),
-    ("Linux", "SLES 16", _S, ""), ("Linux", "SLES 15", _S, ""), ("Linux", "SLES 12", _S, "FAQ: 12.5 - all supported sensor versions"), ("Linux", "SLES 11", _L, LEGACY_NOTE),
-    ("Linux", "Amazon Linux 2023", _S, ""), ("Linux", "Amazon Linux 2", _S, ""), ("Linux", "Amazon Linux AMI", _L, LEGACY_NOTE),
-    ("Other", "AIX", _N, "no Falcon sensor"), ("Other", "Solaris", _N, "no Falcon sensor"), ("Other", "HP-UX", _N, "no Falcon sensor"),
-    ("Other", "Cisco IOS", _N, "network OS: no sensor, protect it through the network"), ("Other", "Cisco NX-OS", _N, "network OS"),
-    ("Other", "Junos", _N, "network OS"), ("Other", "FortiOS", _N, "network OS"), ("Other", "PAN-OS", _N, "network OS"),
-    ("Other", "Arista EOS", _N, "network OS"), ("Other", "VMware ESXi", _N, "hypervisor: no sensor, protect the VMs"),
-    ("Other", "z/OS", _N, ""), ("Other", "OS/400", _N, ""),
+    ("Windows", "Windows 11", _S, "", "FAQ: 25H2, 24H2, 23H2, 21H2"),
+    ("Windows", "Windows 11 22H2", _L, "7.29", "MAC25: end of support Apr 12, 2026; lock hosts to Windows sensor 7.29"),
+    ("Windows", "Windows 10", _S, "", "FAQ: 22H2, 21H2, 1809, 1607 - other feature updates are not supported"),
+    ("Windows", "Windows 10 1507", _L, "7.29", "MAC25: end of support Apr 12, 2026; lock hosts to Windows sensor 7.29"),
+    ("Windows", "Windows 7", _L, "7.16", "MAC25: Windows sensor 7.16 ends support for Windows 7 SP1 / POSReady 7 (FAQ still lists it)"),
+    ("Windows", "POSReady 7", _L, "7.16", "MAC25: Windows sensor 7.16 ends support"),
+    ("Windows", "Windows Server 2025", _S, "", "FAQ"), ("Windows", "Windows Server 2022", _S, "", "FAQ (incl. Server Core)"),
+    ("Windows", "Windows Server 2019", _S, "", "FAQ (incl. Server Core)"), ("Windows", "Windows Server 2016", _S, "", "FAQ (incl. Server Core)"),
+    ("Windows", "Windows Server 2012 R2", _S, "", "FAQ"), ("Windows", "Windows Server 2012", _S, "", "FAQ (Server Core / Minimal Server not supported: DELL)"),
+    ("Windows", "Windows Server 2008 R2", _L, "7.16", "MAC25: Windows sensor 7.16 ends support; ML updates and critical fixes until Dec 9, 2026"),
+    ("Windows", "Windows 8.1", _L, "", "FAQ: Legacy Operating Systems (" + FLS + "); DELL: ran on sensor 6.44+"),
+    ("Windows", "Windows 8", _L, FLS, "FAQ: Legacy Operating Systems"),
+    ("Windows", "Windows Server 2008", _L, FLS, "FAQ: Legacy Operating Systems (SP2)"),
+    ("Windows", "Windows Server 2003", _L, FLS, "FAQ: Legacy Operating Systems (SP2, incl. R2)"),
+    ("Windows", "Windows Vista", _L, FLS, "FAQ: Legacy Operating Systems (SP2)"),
+    ("Windows", "Windows XP", _L, FLS, "FAQ: Legacy Operating Systems (SP3 32-bit, SP2 64-bit)"),
+    ("Windows", "POSReady 2009", _L, FLS, "FAQ: Legacy Operating Systems"),
+    ("Windows", "Windows 2000", _N, "", "no Falcon sensor"), ("Windows", "Windows NT", _N, "", "no Falcon sensor"),
+    ("macOS", "macOS 27", _S, "", "FAQ: Golden Gate 27, sensor 8.10+"), ("macOS", "Golden Gate", _S, "", "FAQ: sensor 8.10+"),
+    ("macOS", "macOS 26", _S, "", "FAQ"), ("macOS", "Tahoe", _S, "", "FAQ"),
+    ("macOS", "macOS 15", _S, "", "FAQ"), ("macOS", "Sequoia", _S, "", "FAQ"),
+    ("macOS", "macOS 14", _S, "", "FAQ"), ("macOS", "Sonoma", _S, "", "FAQ"),
+    ("macOS", "macOS 13", _L, "", "MAC25: support ended Dec 31, 2025"), ("macOS", "Ventura", _L, "", "MAC25: support ended Dec 31, 2025"),
+    ("macOS", "macOS 12", _L, "", "DELL: ran on sensor 6.45+; not in the current list"), ("macOS", "Monterey", _L, "", "DELL: ran on sensor 6.45+; not in the current list"),
+    ("macOS", "macOS 11", _L, "6.57", "DELL: last supported sensor version 6.57"), ("macOS", "Big Sur", _L, "6.57", "DELL: last supported sensor version 6.57"),
+    ("Linux", "RHEL 10", _S, "", "FAQ: 10.2 needs sensor 7.38.19102+"), ("Linux", "RHEL 9", _S, "", "FAQ: 9.8 needs sensor 7.38.19102+"),
+    ("Linux", "RHEL 8", _S, "", "FAQ: 8.10 needs sensor 7.16.16903+"), ("Linux", "RHEL 7", _S, "", "FAQ: 7.9, all supported sensor versions"),
+    ("Linux", "RHEL 6", _L, "", "DELL: 6.7-6.10 on sensor 6.45+; not in the current list"),
+    ("Linux", "Alma Linux 10", _S, "", "FAQ: sensor 7.38.19102+"), ("Linux", "Alma Linux 9", _S, "", "FAQ"), ("Linux", "Alma Linux 8", _S, "", "FAQ: 8.10 needs 7.16.16903+"),
+    ("Linux", "Rocky Linux 10", _S, "", "FAQ: sensor 7.38.19102+"), ("Linux", "Rocky Linux 9", _S, "", "FAQ"), ("Linux", "Rocky Linux 8", _S, "", "FAQ: 8.10 needs 7.16.16903+"),
+    ("Linux", "Oracle Linux 10", _S, "", "FAQ: UEK 8, sensor 7.27.18003+"), ("Linux", "Oracle Linux 9", _S, "", "FAQ: UEK 8, sensor 7.25.17804+"),
+    ("Linux", "Oracle Linux 8", _S, "", "FAQ: UEK 7"), ("Linux", "Oracle Linux 7", _S, "", "FAQ: UEK 6, sensor 7.15.16803+"),
+    ("Linux", "Oracle Linux 6", _L, "", "DELL: UEK 3/4 on sensor 6.45+; not in the current list"),
+    ("Linux", "SLES 16", _S, "", "FAQ: sensor 7.40.19311+"), ("Linux", "SLES 15", _S, "", "FAQ: 15 SP7 needs 7.29.18202+"),
+    ("Linux", "SLES 12", _S, "", "FAQ: 12 SP5, all supported sensor versions"), ("Linux", "SLES 11", _L, "", "DELL: 11.4 on sensor 6.45+; not in the current list"),
+    ("Linux", "openSUSE Leap 16", _S, "", "FAQ: sensor 7.40.19311+"), ("Linux", "openSUSE Leap 15", _S, "", "FAQ: 15.6 needs 7.19.17219+"),
+    ("Linux", "Ubuntu 24.04", _S, "", "FAQ: sensor 7.19.17219+"), ("Linux", "Ubuntu 22.04", _S, "", "FAQ"), ("Linux", "Ubuntu 20.04", _S, "", "FAQ"),
+    ("Linux", "Ubuntu 18.04", _S, "", "FAQ"), ("Linux", "Ubuntu 16.04", _S, "", "FAQ: all supported sensor versions"),
+    ("Linux", "Ubuntu 14.04", _L, "", "DELL: sensor 6.45+; not in the current list"),
+    ("Linux", "CentOS 7", _S, "", "Same kernels as RHEL 7.9 (FAQ); sensor 7.32 still adds RHEL / CentOS 7 kernels"),
+    ("Linux", "CentOS 8", _L, "", "DELL: 8.0-8.5 on sensor 6.45+; not in the current list"),
+    ("Linux", "CentOS 6", _L, "", "DELL: 6.7-6.10 on sensor 6.45+; not in the current list"),
+    ("Linux", "Debian 11", _L, "", "DELL: sensor 6.45+; not in CrowdStrike's current public list - a sync with the kernel list decides"),
+    ("Linux", "Debian 10", _L, "", "DELL: sensor 6.45+; not in the current public list"), ("Linux", "Debian 9", _L, "", "DELL: 9.1-9.4 on sensor 6.45+"),
+    ("Linux", "Amazon Linux 2", _L, "", "DELL: sensor 6.45+; not in CrowdStrike's current public list - a sync with the kernel list decides"),
+    ("Linux", "Amazon Linux AMI", _L, "", "DELL: 2018.03 / 2017.09 on sensor 6.45+"),
+    ("Other", "AIX", _N, "", "no Falcon sensor"), ("Other", "Solaris", _N, "", "no Falcon sensor"), ("Other", "HP-UX", _N, "", "no Falcon sensor"),
+    ("Other", "Cisco IOS", _N, "", "network OS"), ("Other", "Cisco NX-OS", _N, "", "network OS"), ("Other", "Junos", _N, "", "network OS"),
+    ("Other", "FortiOS", _N, "", "network OS"), ("Other", "PAN-OS", _N, "", "network OS"), ("Other", "Arista EOS", _N, "", "network OS"),
+    ("Other", "VMware ESXi", _N, "", "hypervisor: protect the VMs"), ("Other", "z/OS", _N, "", ""), ("Other", "OS/400", _N, "", ""),
+]
+SOURCES = [
+    ("CrowdStrike Deployment FAQ", "https://www.crowdstrike.com/en-us/products/faq/"),
+    ("Macnica CrowdStrike update notices (Jul / Oct 2025)", "https://www.macnica.co.jp/en/business/security/manufacturers/crowdstrike/202510_update.html"),
+    ("Dell KB 000177899 - CrowdStrike Falcon Sensor System Requirements", "https://www.dell.com/support/kbdoc/en-in/000177899/crowdstrike-falcon-sensor-system-requirements"),
 ]
 
 _REWRITES = [(re.compile(p, re.I), r) for p, r in [
@@ -120,15 +143,22 @@ def crowdstrike_entries(c):
         status = _S if r["n2_supported"] else _L
         note = (f"CrowdStrike: {r['kernels']} kernels, sensors {r['oldest_sensor']} – {r['newest_sensor']}"
                 + ("" if r["n2_supported"] else " (no N-2 or newer sensor)"))
-        out.append({"platform": "Linux", "pattern": f"{fam} {r['version']}", "status": status, "note": note, "source": "crowdstrike"})
+        out.append({"platform": "Linux", "pattern": f"{fam} {r['version']}", "status": status, "note": note, "source": "crowdstrike",
+                    "last_sensor": "" if r["n2_supported"] else r["newest_sensor"]})
     return out
+
+
+# last sensor release known to support an OS that only old sensors run on (from CrowdStrike's system requirements);
+# anything else is blank until the Linux kernel list is fetched or you fill it in on the page
+
 
 
 def catalog(c):
     """Effective catalog: baseline < CrowdStrike Linux data < your entries (same normalised pattern = replaced)."""
     merged = {}
-    for p, pat, st, note in BASELINE:
-        merged[norm_os(pat)] = {"platform": p, "pattern": pat, "status": st, "note": note, "source": "baseline"}
+    for p, pat, st, last, note in BASELINE:
+        merged[norm_os(pat)] = {"platform": p, "pattern": pat, "status": st, "note": note, "source": "baseline",
+                                "last_sensor": last}
     for e in crowdstrike_entries(c):
         merged[norm_os(e["pattern"])] = e
     for e in custom_entries(c):
@@ -274,6 +304,31 @@ def sensor_support_get():
             "linux": linux, "statuses": STATUSES}
 
 
+STATUS_LABEL = {"Supported": "Supported by current sensors", "Legacy": "Old sensors only", "Not supported": "No sensor"}
+
+
+@router.get("/api/sensor-support/export")
+def sensor_support_export():
+    """Excel: every OS with its CrowdStrike support, the last sensor version for OS only old sensors run on, and whether
+    it is EDR feasible (any sensor at all = feasible); plus the current N / N-1 / N-2 sensor builds."""
+    from .exporter import xlsx_response
+    d = sensor_support_get()
+    # last sensor version only where a source states it; no filler for the rest
+    rows = [{**e, "feasible": "No" if e["status"] == "Not supported" else "Yes", "last_sensor": e.get("last_sensor") or "",
+             "source": {"custom": "Edited", "crowdstrike": "CrowdStrike API", "baseline": "Built-in"}.get(e["source"], e["source"])}
+            for e in d["catalog"]]
+    cols = [("platform", "Platform"), ("pattern", "OS"), ("feasible", "EDR Feasible"), ("last_sensor", "Last Sensor Version"),
+            ("nodes", "Inventory Nodes"), ("installed", "With EDR"), ("note", "Source / note"), ("source", "Entry")]
+    builds = [{"platform": "macOS" if p == "Mac" else p, **b} for p, bs in d["builds"].items() for b in bs]
+    bcols = [("platform", "Platform"), ("tag", "Level"), ("version", "Sensor Version"), ("release", "Release"), ("stage", "Stage")]
+    unmatched = [{"os": u["os"], "n": u["n"]} for u in d["unmatched"]]
+    srcs = [{"name": n, "url": u} for n, u in SOURCES] + [
+        {"name": "Linux rows marked 'CrowdStrike API'", "url": "your console: Sensor update policies - supported kernels (fetched on sync)"}]
+    return xlsx_response([("OS vs sensor", cols, rows), ("Sensor builds N-2", bcols, builds),
+                          ("OS not in list", [("os", "OS (inventory)"), ("n", "Nodes")], unmatched),
+                          ("Sources", [("name", "Source"), ("url", "Link")], srcs)], "os_sensor_support")
+
+
 @router.post("/api/sensor-support/refresh")
 def sensor_support_refresh():
     from . import config, falcon
@@ -302,7 +357,8 @@ def sensor_support_save(data: dict = Body(...)):
             continue
         if e.get("status") not in STATUSES:
             raise HTTPException(400, f"Status of '{pat}' must be one of {', '.join(STATUSES)}")
-        entries.append({"platform": str(e.get("platform") or "Other"), "pattern": pat, "status": e["status"], "note": str(e.get("note") or "")})
+        entries.append({"platform": str(e.get("platform") or "Other"), "pattern": pat, "status": e["status"], "note": str(e.get("note") or ""),
+                        "last_sensor": str(e.get("last_sensor") or "").strip()})
     with db.get_conn() as c:
         c.execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", (KEY, json.dumps({"entries": entries})))
         from .inventory import refresh_matches

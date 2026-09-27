@@ -13,7 +13,7 @@ const REPORTS: { title: string; desc: string; path: string; params?: Record<stri
   { title: "Removed from console", desc: "Auto-removed, deleted and hidden hosts retained in the database.", path: "/api/hosts/export", params: { state: "removed" } },
   { title: "Duplicate IPs", desc: "Every agent in every duplicate-IP group.", path: "/api/duplicates/export", params: { by: "ip" } },
   { title: "Duplicate hostnames", desc: "Every agent in every duplicate-hostname group.", path: "/api/duplicates/export", params: { by: "hostname" } },
-  { title: "Unmapped agents", desc: "Agents in the console that no LOB inventory or agent tag claims.", path: "/api/hosts/export", params: { unmapped: "1" } },
+  { title: "Agents not in inventory", desc: "Agents in the console that no LOB inventory row matches.", path: "/api/hosts/export", params: { unmapped: "1" } },
   { title: "EDR only (not in inventory)", desc: "Agents tagged to a LOB/MSP but missing from its inventory.", path: "/api/hosts/export", params: { unlisted: "1" } },
   { title: "Pending install (all LOBs)", desc: "Applicable inventory nodes that are not installed, removed or hidden.", path: "/api/lobs/0/inventory/export", params: { pending: "1" } },
   { title: "Outdated sensors", desc: "Hosts older than the three newest sensor versions per platform.", path: "/api/hosts/export", params: { outdated: "1" } },
