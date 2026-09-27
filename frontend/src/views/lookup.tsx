@@ -3,10 +3,10 @@ import * as React from "react";
 import { Download, ListChecks, Play } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
-import { fmtN } from "@/lib/format";
+import { fmtDt, fmtN } from "@/lib/format";
 import { Badge, Button, Card, CardHeader, Chip, PageHeader, type Tone } from "@/components/ui";
 import { SimpleTable } from "@/components/data-table";
-import { HostLink, Mono, When } from "@/components/badges";
+import { HostLink, Mono, SevCounts, When } from "@/components/badges";
 
 const TONE: Record<string, Tone> = { Online: "good", "Online (stale)": "warn", Offline: "serious", Removed: "crit", Hidden: "crit", "Not Found": "crit", "IP seen in history only": "violet", Unknown: "neutral" };
 
@@ -66,6 +66,8 @@ export default function Lookup() {
                 { key: "lobs", label: "LOB" },
                 { key: "inv_edr_installed", label: "Inv. EDR installed" },
                 { key: "inv_verification", label: "Inv. verification" },
+                { key: "vulns", label: "Open C / H / M / L", render: (r: any) => <SevCounts c={r.crit} h={r.high} m={r.med} l={r.low} /> },
+                { key: "last_scan", label: "Last scan", render: (r: any) => r.last_scan ? fmtDt(r.last_scan) : <span className="text-muted">Never</span> },
               ]} />
             </>
           )}

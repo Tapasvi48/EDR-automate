@@ -18,6 +18,7 @@ STEPS = [
     ("online", "Fetch online state"),
     ("write", "Save to database"),
     ("nic", "Fetch NIC / IP history"),
+    ("sensors", "Fetch sensor builds & supported OS"),
     ("analyze", "Detect duplicates & reinstalls"),
     ("inventory", "Re-verify LOB inventories"),
 ]
@@ -89,7 +90,7 @@ def _join(v):
 
 
 def map_host(d):
-    ip = (d.get("local_ip") or "").strip()
+    ip = db.canon_ip(d.get("local_ip"))
     return {
         "aid": d.get("device_id"),
         "cid": d.get("cid"),
@@ -97,9 +98,9 @@ def map_host(d):
         "hostname_norm": db.norm_hostname(d.get("hostname")),
         "local_ip": ip,
         "local_ip_num": db.ip_to_num(ip),
-        "external_ip": d.get("external_ip") or "",
-        "connection_ip": d.get("connection_ip") or "",
-        "default_gateway_ip": d.get("default_gateway_ip") or "",
+        "external_ip": db.canon_ip(d.get("external_ip")),
+        "connection_ip": db.canon_ip(d.get("connection_ip")),
+        "default_gateway_ip": db.canon_ip(d.get("default_gateway_ip")),
         "mac_address": d.get("mac_address") or "",
         "platform_name": d.get("platform_name") or "",
         "os_version": d.get("os_version") or "",
@@ -302,7 +303,8 @@ def _do_sync(started, prog):
            f"VALUES ({', '.join('?' * len(cols))}, ?, ?, ?) ON CONFLICT(aid) DO UPDATE SET {upd}, "
            "online_checked_at=excluded.online_checked_at, db_last_synced=excluded.db_last_synced, "
            "removed_at=CASE WHEN excluded.console_state='active' THEN NULL ELSE hosts.removed_at END, "
-           "removal_type=CASE WHEN excluded.console_state='active' THEN NULL ELSE hosts.removal_type END")
+           "removal_type=CASE WHEN excluded.console_state='active' THEN NULL ELSE hosts.removal_type END, "
+           "source='falcon'")
     with db.get_conn() as c:
         c.executemany(sql, [[h[col] for col in cols] + [now, now, now] for h in upserts])
         c.executemany(
@@ -353,6 +355,13 @@ def _do_sync(started, prog):
             prog.warn("nic", f"NIC history skipped: {e}")
             counts["message"] = "NIC history skipped"
 
+    prog.start("sensors")
+    try:
+        from .sensor_support import refresh_from_falcon
+        prog.done("sensors", refresh_from_falcon(client))
+    except Exception as e:  # noqa: BLE001 - optional scope (Sensor update policies: Read)
+        prog.warn("sensors", f"Sensor builds skipped: {e}")
+
     prog.start("analyze")
     with db.get_conn() as c:
         detect_reinstalls(c, settings)
@@ -375,7 +384,7 @@ def store_nic_history(hist, checked_aids):
     for aid, entries in hist.items():
         per_ip = {}
         for e in entries:
-            ip = (e.get("ip_address") or "").strip()
+            ip = db.canon_ip(e.get("ip_address"))
             if not ip:
                 continue
             ts = e.get("timestamp") or ""

@@ -35,7 +35,8 @@ def friendly(code, msg, what):
     if code == 401:
         return f"{what}: authentication failed (HTTP 401). Check the client ID / secret and that the cloud region matches your tenant."
     if code == 403:
-        return f"{what}: access denied (HTTP 403). The API client needs the 'Hosts: Read' scope."
+        scope = "Sensor update policies: Read" if what.startswith(("Sensor", "Supported Linux")) else "Hosts: Read"
+        return f"{what}: access denied (HTTP 403). The API client needs the '{scope}' scope."
     if code == 429:
         return f"{what}: rate limited by CrowdStrike (HTTP 429)."
     if code in (0, None):
@@ -76,6 +77,30 @@ class FalconClient:
         if member_cid:
             kwargs["member_cid"] = member_cid.strip()
         self.hosts = Hosts(**kwargs)
+        self._kwargs = kwargs
+        self._sup = None
+
+    @property
+    def sensor_policy(self):
+        """Sensor update policies: Read - sensor builds (N / N-1 / N-2) and supported Linux kernels. Optional scope."""
+        if self._sup is None:
+            from falconpy import SensorUpdatePolicy
+            self._sup = SensorUpdatePolicy(**self._kwargs)
+        return self._sup
+
+    def sensor_builds(self, platform):
+        return self._call(self.sensor_policy.query_combined_builds, f"Sensor builds ({platform})", platform=platform).get("resources") or []
+
+    def linux_kernels(self, limit=500, cap=60000):
+        out, offset = [], 0
+        while True:
+            body = self._call(self.sensor_policy.query_combined_kernels, "Supported Linux kernels", limit=limit, offset=offset)
+            res = body.get("resources") or []
+            out.extend(res)
+            total = ((body.get("meta") or {}).get("pagination") or {}).get("total", 0)
+            offset += len(res)
+            if not res or offset >= total or offset >= cap:
+                return out
 
     # -- low level -------------------------------------------------------
     def login(self):
@@ -256,5 +281,7 @@ def test_connection(client_id, client_secret, base_url, member_cid=""):
         run("Hosts: online state", online)
         run("Hosts: hidden hosts", hidden, required=False)
         run("Hosts: NIC / IP history", nic, required=False)
+        run("Sensor update policies: builds (N / N-1 / N-2)",
+            lambda: f"{len(state['c'].sensor_builds('windows'))} Windows sensor builds available", required=False)
     ok = all(c["ok"] for c in checks if c["required"]) and len(checks) >= 2
     return {"ok": ok, "checks": checks}

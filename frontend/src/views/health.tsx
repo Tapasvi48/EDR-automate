@@ -1,50 +1,51 @@
 "use client";
 import * as React from "react";
+import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { useMeta, useUrlState } from "@/lib/hooks";
-import { daysAgo, fillDays, today } from "@/lib/format";
-import { Callout, Card, CardHeader, Kpi, KpiGrid, Loading, PageHeader, Segmented, Tabs } from "@/components/ui";
+import { daysAgo, fillDays, fmtN, today } from "@/lib/format";
+import { Callout, Card, CardHeader, Loading, PageHeader, Segmented, Tabs } from "@/components/ui";
 import { COLORS, DayBars } from "@/components/charts";
 import { HostTable } from "@/components/host-table";
 
 export default function Health() {
   const [state, set, replaceAll] = useUrlState();
   const tab = state.tab || "offline";
-  const { data: d } = useQuery({ queryKey: ["dashboard"], queryFn: () => api<any>("/api/dashboard") });
+  const { data: d, error: dErr, refetch: dRetry } = useQuery({ queryKey: ["dashboard"], queryFn: () => api<any>("/api/dashboard") });
   const { data: meta } = useMeta();
-  if (!d) return <Loading />;
+  if (!d) return <Loading error={dErr} retry={() => dRetry()} />;
   const k = d.kpi;
   const days = meta?.settings.auto_remove_days || "90";
   return (
     <div>
-      <PageHeader title="Offline & stale" sub={`Devices that stopped checking in, agents that left the console (deleted, auto-removed after ${days} days, or hidden), and sensors that report online but have not been seen recently. Duplicate agents are counted once.`} />
+      <PageHeader title="Offline & stale" sub={`Devices that stopped checking in, and sensors that report online but have not been seen recently. Duplicate agents are counted once.`} />
       <Tabs value={tab} onChange={(t) => replaceAll({ tab: t })} tabs={[
         { id: "offline", label: "Offline", count: k.offline },
-        { id: "removed", label: "Removed & hidden", count: k.removed + k.hidden },
         { id: "stale", label: "Online · last seen stale", count: k.stale_online },
       ]} />
       {tab === "stale" && <Stale d={d} state={state} set={set} replaceAll={replaceAll} />}
       {tab === "offline" && <Offline d={d} state={state} set={set} replaceAll={replaceAll} />}
-      {tab === "removed" && <Removed d={d} days={days} state={state} set={set} replaceAll={replaceAll} />}
+      {tab === "removed" && <Callout className="mb-4">Agents that left the console are in <Link className="font-semibold underline" href="/edr-history/">EDR history</Link>.</Callout>}
     </div>
   );
 }
 
 type P = { d: any; state: Record<string, string>; set: any; replaceAll: any };
 
+/** Offline has three different causes; the table shows one at a time. EDR history lives here, not on its own tab. */
+const OFFLINE_VIEWS: [string, string, Record<string, string>][] = [
+  ["console", "Offline in the console", { state: "active", dedupe: "1" }],
+  ["removed", "Removed from console", { state: "gone", gone_source: "console", dedupe: "1" }],
+  ["import", "Old EDR import", { state: "gone", gone_source: "import", dedupe: "1" }],
+];
+
 function Stale({ d, state, set, replaceAll }: P) {
-  const st = d.stale_buckets;
-  const b = state.seen_bucket || "";
   return (
     <>
-      <KpiGrid>
-        {[["", "All stale", d.kpi.stale_online, "crit"], ["1-2h", "Seen 1 – 2 h ago", st.b1_2, "warn"], ["2-4h", "Seen 2 – 4 h ago", st.b2_4, "warn"], ["4-8h", "Seen 4 – 8 h ago", st.b4_8, "serious"], ["8-24h", "Seen 8 – 24 h ago", st.b8_24, "serious"]].map(([bk, l, n, tone]) => (
-          <Kpi key={bk as string} label={l} value={n as number} tone={tone as string} active={b === bk} onClick={() => set({ seen_bucket: bk || undefined })} />
-        ))}
-      </KpiGrid>
       <Callout className="my-4">
         Falcon reports these sensors as <b>online</b>, but their <b>last seen</b> is older than {d.stale_hours}h — usually proxies, sleeping laptops, RFM or cloud connectivity problems.
+        {d.kpi.stale_online ? <> <b>{fmtN(d.kpi.stale_online)}</b> hosts: {fmtN(d.stale_buckets.b1_2)} in the last 1–2 h, {fmtN(d.stale_buckets.b2_4)} in 2–4 h, {fmtN(d.stale_buckets.b4_8)} in 4–8 h, {fmtN(d.stale_buckets.b8_24)} in 8–24 h.</> : null}
       </Callout>
       <HostTable state={state} set={set} reset={() => replaceAll({ tab: "stale" })} defaults={{ status: "stale", sort: "last_seen", dir: "asc" }}
         fixed={{ state: "active", dedupe: "1" }} omit={["tab"]} storageKey="health" />
@@ -54,55 +55,27 @@ function Stale({ d, state, set, replaceAll }: P) {
 
 function Offline({ d, state, set, replaceAll }: P) {
   const k = d.kpi;
-  const [days, setDays] = React.useState("29");
-  const { data } = useQuery({ queryKey: ["series", "offline", days], queryFn: () => api<any>("/api/series", { params: { kind: "offline", start: daysAgo(+days), end: today() } }) });
-  const b = state.seen_bucket || "";
+  const days = state.offline_kind || "console";
+  const view = OFFLINE_VIEWS.find((v) => v[0] === days) || OFFLINE_VIEWS[0];
+  const { data } = useQuery({ queryKey: ["series", "offline", "29"], queryFn: () => api<any>("/api/series", { params: { kind: "offline", start: daysAgo(29), end: today() } }) });
   return (
     <>
-      <KpiGrid>
-        {[["", "All offline", k.offline, "neutral"], ["lt24h", "Went offline today", k.offline_lt24h, "warn"], ["1-7d", "Offline 1 – 7 days", k.offline_1_7d, "serious"], ["7-30d", "Offline 7 – 30 days", k.offline_7_30d, "crit"], ["gt30d", "Offline > 30 days", k.offline_gt30d, "crit"]].map(([bk, l, n, tone]) => (
-          <Kpi key={bk as string} label={l} value={n as number} tone={tone as string} active={b === bk && !state.last_from} onClick={() => set({ seen_bucket: bk || undefined, last_from: undefined, last_to: undefined })} />
-        ))}
-      </KpiGrid>
-      <Card className="my-4">
-        <CardHeader title="Went offline per day" hint="by last-seen date · click a bar for that day"
-          right={<Segmented value={days} onChange={setDays} options={[["6", "7 days"], ["29", "30 days"], ["89", "90 days"]]} />} />
+      <Callout className="my-4">
+        <b>{fmtN(k.offline)}</b> hosts are offline in the console ({fmtN(k.offline_lt24h)} went offline today, {fmtN(k.offline_1_7d)} 1–7 days ago, {fmtN(k.offline_7_30d)} 7–30 days ago, {fmtN(k.offline_gt30d)} over 30 days ago).
+        Agents that left the console (<b>{fmtN(d.removed_devices?.devices || 0)}</b> devices — {fmtN(d.removed_devices?.from_console || 0)} removed from the console, {fmtN(d.removed_devices?.import_only || 0)} known from the old EDR upload) count as Offline too and are in <Link className="font-semibold underline" href="/edr-history/">EDR history</Link>.
+      </Callout>
+      <Card className="mb-4">
+        <CardHeader title="Went offline per day" hint="by last-seen date · click a bar for that day" />
         <div className="px-3 pb-3">
-          <DayBars height={180} data={data ? fillDays(data.rows, daysAgo(+days), today(), ["n"]) : []} series={[{ key: "n", label: "Went offline", color: COLORS.s2 }]}
+          <DayBars height={180} data={data ? fillDays(data.rows, daysAgo(29), today(), ["n"]) : []} series={[{ key: "n", label: "Went offline", color: COLORS.s2 }]}
             onClick={(r) => set({ last_from: r.day, last_to: r.day, seen_bucket: undefined })} />
         </div>
       </Card>
-      <HostTable state={state} set={set} reset={() => replaceAll({ tab: "offline" })} defaults={{ status: "offline", sort: "last_seen", dir: "desc" }}
-        fixed={{ state: "active", dedupe: "1" }} omit={["tab"]} storageKey="health" />
-    </>
-  );
-}
-
-function Removed({ d, days, state, set, replaceAll }: P & { days: string }) {
-  const { data: counts } = useQuery({
-    queryKey: ["removed-counts"],
-    queryFn: async () => {
-      const [del, auto] = await Promise.all([
-        api<any>("/api/hosts", { params: { state: "removed", removal_type: "deleted", size: 1 } }),
-        api<any>("/api/hosts", { params: { state: "removed", removal_type: "auto_inactive", size: 1 } }),
-      ]);
-      return { deleted: del.total, auto: auto.total };
-    },
-  });
-  const view = state.view || "";
-  const pick = (v: string) => set({ view: view === v ? undefined : v });
-  const fixed: Record<string, string> = view === "hidden" ? { state: "hidden" } : view === "deleted" ? { state: "removed", removal_type: "deleted" } : view === "auto" ? { state: "removed", removal_type: "auto_inactive" } : { state: "gone" };
-  return (
-    <>
-      <KpiGrid className="grid-cols-[repeat(auto-fill,minmax(240px,1fr))]">
-        <Kpi label="Deleted manually" value={counts?.deleted ?? "–"} tone="crit" foot="removed from the console while still recently active" active={view === "deleted"} onClick={() => pick("deleted")} />
-        <Kpi label={`Removed > ${days} days`} value={counts?.auto ?? "–"} tone="serious" foot={`auto-removed by Falcon after ${days} days without check-in`} active={view === "auto"} onClick={() => pick("auto")} />
-        <Kpi label="Hidden" value={d.kpi.hidden} tone="violet" foot="hidden in the console" active={view === "hidden"} onClick={() => pick("hidden")} />
-      </KpiGrid>
-      <div className="mt-4">
-        <HostTable state={state} set={set} reset={() => replaceAll({ tab: "removed" })} defaults={{ sort: "removed_at", dir: "desc" }}
-          fixed={fixed} omit={["tab", "view"]} storageKey="removed" removalFilter
-          title={view ? { deleted: "Deleted manually", auto: `Removed > ${days} days`, hidden: "Hidden" }[view] : "Removed & hidden"} />
+      <Segmented value={days} onChange={(v) => replaceAll({ tab: "offline", offline_kind: v })} options={OFFLINE_VIEWS.map(([v, l]) => [v, l])} />
+      <div className="mt-3">
+        <HostTable state={state} set={set} reset={() => replaceAll({ tab: "offline" })}
+          defaults={{ ...(view[0] === "console" ? { status: "offline", sort: "last_seen", dir: "desc" } : { sort: "removed_at", dir: "desc" }) }}
+          fixed={view[2]} omit={["tab", "offline_kind"]} storageKey="health-offline" removalFilter={view[0] !== "console"} />
       </div>
     </>
   );

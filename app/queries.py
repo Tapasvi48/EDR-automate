@@ -1,5 +1,4 @@
 """SQL builders for hosts, dashboard metrics, IP search and duplicates."""
-import ipaddress
 import re
 from datetime import datetime, timedelta, timezone
 
@@ -61,21 +60,23 @@ NODE_TYPE_SQL = "COALESCE(NULLIF(inv.inv_node_type, ''), h.product_type_desc)"
 HOST_LIST_COLS = """h.aid, h.hostname, h.local_ip, h.connection_ip, h.external_ip, h.mac_address, h.platform_name, h.os_version, h.os_build,
     h.product_type_desc, h.chassis_type_desc, h.machine_domain, h.site_name, h.ou, h.agent_version, h.containment_status, h.rfm,
     h.system_manufacturer, h.system_product_name, h.serial_number, h.last_login_user, h.tags, h.groups,
-    h.first_seen, h.last_seen, h.online_state, h.console_state, h.removed_at, h.removal_type,
+    h.first_seen, h.last_seen, h.online_state, h.console_state, h.removed_at, h.removal_type, h.gone_group, h.gone_source,
     h.is_reinstall, h.reinstall_reason, COALESCE(d.dup_count, 0) dup_count, COALESCE(rc.dup_count, 0) rc_count,
     hm.inv_lobs, hm.inv_msps, hm.tag_only, COALESCE(NULLIF(inv.inv_node_type, ''), h.product_type_desc) node_type,
     inv.inv_node_name, inv.inv_node_type, inv.inv_domain, inv.inv_live, inv.inv_os,
-    inv.inv_edr_feasible, inv.inv_edr_installed, inv.inv_remarks, inv.inv_verification"""
+    inv.inv_edr_feasible, inv.inv_edr_installed, inv.inv_remarks, inv.inv_verification,
+    (SELECT GROUP_CONCAT(n.ne_id, ', ') FROM niam_nodes n WHERE n.present=1 AND n.ip=h.local_ip AND h.local_ip<>'') niam_ne_ids"""
 
 HOST_EXPORT_COLUMNS = [
-    ("hostname", "Hostname"), ("aid", "Agent ID"), ("local_ip", "Local IP"), ("connection_ip", "Connection IP"), ("external_ip", "External IP"),
+    ("hostname", "Hostname"), ("aid", "Agent ID"), ("connection_ip", "Connection IP"), ("local_ip", "Local IP"), ("external_ip", "External IP"),
+    ("niam_text", "In NIAM"), ("niam_ne_ids", "NIAM NE ID"),
     ("mac_address", "MAC"), ("console_state", "Console State"), ("online_state", "Online State"),
     ("first_seen", "First Seen (UTC)"), ("last_seen", "Last Seen (UTC)"), ("platform_name", "Platform"),
     ("os_version", "OS"), ("os_build", "OS Build"), ("product_type_desc", "Type"), ("chassis_type_desc", "Chassis"),
     ("machine_domain", "Domain"), ("site_name", "Site"), ("ou", "OU"), ("agent_version", "Sensor Version"),
     ("containment_status", "Containment"), ("rfm", "RFM"), ("system_manufacturer", "Manufacturer"),
     ("system_product_name", "Model"), ("serial_number", "Serial"), ("last_login_user", "Last Login User"),
-    ("tags", "Tags"), ("groups", "Host Groups"), ("dup_count", "Duplicate Agents (same connection + local IP)"), ("rc_count", "Routing Conflict (online agents on same IPs)"), ("is_reinstall", "Reinstall"),
+    ("tags", "Tags"), ("groups", "Host Groups"), ("dup_count", "Duplicate Agents (same connection + local IP)"), ("rc_count", "Routing Conflict (online agents on same IPs)"),
     ("removed_at", "Removed At"), ("removal_type", "Removal Type"),
     ("inv_lobs", "LOB"), ("inv_msps", "MSP"), ("node_type", "Node Type"), ("inv_node_name", "Inv Node Name"), ("inv_node_type", "Inv Node Type"),
     ("inv_domain", "Inv Domain"), ("inv_live", "Inv Live/Non Live"), ("inv_os", "Inv OS"),
@@ -107,7 +108,10 @@ def build_host_query(p: dict, settings):
     w = []
     state = p.get("state") or "active"
     if state == "gone":
-        w.append("h.console_state IN ('removed', 'hidden')")
+        w.append("h.console_state='removed' AND h.gone_primary=1")  # EDR history: one row per device
+        if p.get("gone_source") in ("console", "import"):
+            w.append("h.gone_source=?")
+            params.append(p["gone_source"])
     elif state != "all":
         w.append("h.console_state = ?")
         params.append(state)
@@ -117,7 +121,14 @@ def build_host_query(p: dict, settings):
         if len(terms) > 1:  # bulk paste of hostnames / IPs
             ph = ",".join("?" * len(terms))
             w.append(f"(h.local_ip IN ({ph}) OR h.hostname_norm IN ({ph}) OR h.aid IN ({ph}))")
-            params += terms + [db.norm_hostname(t) for t in terms] + [t.lower() for t in terms]
+            params += [db.canon_ip(t) for t in terms] + [db.norm_hostname(t) for t in terms] + [t.lower() for t in terms]
+        elif "/" in q and db.is_range_query(q):
+            w.append("ip_in(h.local_ip, ?)")
+            params.append(q)
+        elif db.is_ip(q):
+            ip = db.canon_ip(q)
+            w.append("(h.local_ip = ? OR h.external_ip = ? OR h.connection_ip = ?)")
+            params += [ip, ip, ip]
         else:
             w.append("""(h.hostname LIKE ? ESCAPE '\\' OR h.local_ip LIKE ? ESCAPE '\\' OR h.aid = ? OR h.external_ip = ?
                         OR h.serial_number LIKE ? ESCAPE '\\' OR h.mac_address LIKE ? ESCAPE '\\' OR h.last_login_user LIKE ? ESCAPE '\\'
@@ -176,6 +187,8 @@ def build_host_query(p: dict, settings):
         w.append("LOWER(h.rfm) = 'yes'")
     if p.get("contained") == "1":
         w.append("h.containment_status <> 'normal' AND h.containment_status <> ''")
+    if p.get("niam") in ("0", "1"):
+        w.append(("" if p["niam"] == "1" else "NOT ") + "EXISTS (SELECT 1 FROM niam_nodes n WHERE n.present=1 AND n.ip=h.local_ip AND h.local_ip<>'')")
     if p.get("inventory") == "none" or p.get("unmapped") == "1":
         w.append("hm.aid IS NULL")
     elif p.get("inventory") == "any":
@@ -220,6 +233,9 @@ def build_host_query(p: dict, settings):
         if lo is not None:
             w.append("h.local_ip_num BETWEEN ? AND ?")
             params += [lo, hi]
+        elif db.parse_net(p["ip_range"]):  # IPv6
+            w.append("ip_in(h.local_ip, ?)")
+            params.append(p["ip_range"])
     sort = HOST_SORTS.get(p.get("sort") or "", "h.last_seen")
     direction = "ASC" if (p.get("dir") or "desc").lower() == "asc" else "DESC"
     where = ("WHERE " + " AND ".join(w)) if w else ""
@@ -246,8 +262,16 @@ def sensor_levels(c):
     out, by_plat = [], {}
     for r in c.execute("SELECT DISTINCT platform_name, agent_version FROM hosts WHERE console_state='active' AND agent_version<>''"):
         by_plat.setdefault(r["platform_name"] or "", set()).add(r["agent_version"])
+    # the newest release CrowdStrike has published (build tagged N, from the Sensor update policies API) when fetched,
+    # else the newest release installed anywhere in the console
+    from .sensor_support import PLATFORMS
+    published = {}
+    for r in c.execute("SELECT platform, sensor_version FROM sensor_builds WHERE tag='N'"):
+        k = version_key(sensor_release(r["sensor_version"]))
+        p = PLATFORMS.get(r["platform"], r["platform"])
+        published[p] = max(published.get(p, k), k)
     for plat, vers in by_plat.items():
-        newest = max((version_key(sensor_release(v)) for v in vers), default=(0, 0))
+        newest = published.get(plat) or max((version_key(sensor_release(v)) for v in vers), default=(0, 0))
 
         def level(rel):
             # N-k by release number: with 7.40 newest, 7.39 is N-1 and 7.38 is N-2 even when those releases
@@ -276,13 +300,11 @@ SENSOR_LEVEL_SQL = """(SELECT s.lvl FROM _sensor_rel s WHERE s.platform = COALES
 
 
 def cidr_range(text):
-    try:
-        net = ipaddress.ip_network(text.strip(), strict=False)
-        if net.version != 4:
-            return None, None
-        return int(net.network_address), int(net.broadcast_address)
-    except ValueError:
+    """IPv4 network / prefix -> (lo, hi) integers for local_ip_num queries; IPv6 -> (None, None), use ip_in()."""
+    net = db.parse_net(text)
+    if not net or net.version != 4:
         return None, None
+    return int(net.network_address), int(net.broadcast_address)
 
 
 # ------------------------------------------------------------------ dashboard
@@ -385,24 +407,42 @@ COVERAGE_SELECT = """COUNT(ic.item_key) nodes,
     SUM(ic.applicable=1 AND ic.edr_state IN ('Online','Offline')) installed,
     SUM(ic.applicable=1 AND ic.edr_state='Online') online,
     SUM(ic.applicable=1 AND ic.edr_state='Offline') offline,
+    SUM(ic.applicable=1 AND ic.edr_state='Offline' AND ic.edr_actual IN ('Offline','Inactive')) offline_console,
     SUM(ic.applicable=1 AND ic.edr_state='Hidden') hidden,
     SUM(ic.applicable=1 AND ic.edr_state='Removed') removed,
+    SUM(ic.applicable=1 AND ic.edr_state='Offline' AND ic.edr_actual IN ('Removed','Hidden')) offline_removed,
+    SUM(COALESCE(ic.ip,'')<>'' AND EXISTS (SELECT 1 FROM niam_nodes nn WHERE nn.present=1 AND nn.ip=ic.ip)) in_niam,
+    SUM(COALESCE(ic.live,'')<>'Non Live') live_nodes,
+    SUM(COALESCE(ic.live,'')<>'Non Live' AND EXISTS (SELECT 1 FROM vuln_scan_hosts vs WHERE vs.lob_id=ic.lob_id AND vs.ip=ic.ip)) scanned_live,
+    SUM(ic.applicable=1 AND ic.edr_state='Offline' AND ic.edr_actual IN ('Removed','Hidden') AND EXISTS (SELECT 1 FROM hosts hx
+        WHERE hx.aid=ic.matched_aid AND hx.removal_type='imported')) removed_import,
+    SUM(ic.applicable=1 AND ic.edr_state='Offline' AND ic.edr_actual IN ('Removed','Hidden') AND NOT EXISTS (SELECT 1 FROM hosts hx
+        WHERE hx.aid=ic.matched_aid AND hx.removal_type='imported')) removed_console,
     SUM(ic.applicable=1 AND ic.edr_state='Not Installed') not_installed,
     SUM(ic.coverage_status='Not Feasible') not_feasible,
+    SUM(ic.coverage_status='To Be Decided') to_be_decided,
+    SUM(ic.feasible='To be decided') feasible_pending,
     SUM(ic.coverage_status='Non Live') non_live,
+    SUM(ic.feasible='Legacy') legacy, SUM(ic.feasible='Legacy' AND ic.edr_state IN ('Online','Offline')) legacy_installed,
     SUM(ic.applicable=0 AND ic.edr_state IN ('Online','Offline')) installed_not_applicable,
     SUM(ic.edr_installed='Yes' AND ic.applicable=1 AND ic.edr_state NOT IN ('Online','Offline')) claimed_missing,
     SUM(ic.edr_installed='No' AND ic.edr_state IN ('Online','Offline')) marked_no,
     SUM(ic.change_tag='new') new_items, SUM(ic.change_tag='modified') modified_items"""
 
-COV_KEYS = ["nodes", "applicable", "installed", "online", "offline", "hidden", "removed", "not_installed", "not_feasible",
-            "non_live", "installed_not_applicable", "claimed_missing", "marked_no", "new_items", "modified_items"]
+COV_KEYS = ["nodes", "applicable", "installed", "online", "offline", "offline_console", "hidden", "removed", "removed_import",
+            "removed_console", "offline_removed", "in_niam",
+            "live_nodes", "scanned_live", "not_installed", "not_feasible", "to_be_decided", "feasible_pending",
+            "non_live", "legacy", "legacy_installed", "installed_not_applicable", "claimed_missing", "marked_no", "new_items", "modified_items"]
 
 
 def _finish(r):
     for k in COV_KEYS:
         r[k] = r.get(k) or 0
     r["pending"] = r["not_installed"] + r["hidden"] + r["removed"]
+    r["not_in_niam"] = r["nodes"] - r["in_niam"]
+    r["never_scanned"] = r["live_nodes"] - r["scanned_live"]
+    r["niam_coverage"] = round(100.0 * r["in_niam"] / r["nodes"], 1) if r["nodes"] else None
+    r["scan_coverage"] = round(100.0 * r["scanned_live"] / r["live_nodes"], 1) if r["live_nodes"] else None
     r["coverage"] = round(100.0 * r["installed"] / r["applicable"], 1) if r["applicable"] else None
     return r
 
@@ -484,6 +524,38 @@ def cross_msp_duplicates(c, lob_id):
         ORDER BY n DESC, ic.ip""", (lob_id,))
 
 
+def compute_gone(c):
+    """EDR history = devices whose agent is no longer live: removed from the console (seen by our syncs: auto-removed by
+    the inactivity policy or deleted) or known only from an uploaded old EDR inventory. One row per device: agents are
+    grouped by hostname (else local IP), duplicates of a machine collapse into one, and a device that is back in the
+    console with a new agent is not listed. Hidden hosts are ignored everywhere. Sets hosts.gone_primary / gone_group /
+    gone_source on the representative agent of each device."""
+    active_hn = {r[0] for r in c.execute("SELECT hostname_norm FROM hosts WHERE console_state='active' AND hostname_norm<>''")}
+    active_ip = {r[0] for r in c.execute("SELECT local_ip FROM hosts WHERE console_state='active' AND local_ip<>''")}
+    groups = {}
+    for r in c.execute("SELECT aid, hostname_norm, local_ip, removal_type, last_seen FROM hosts WHERE console_state='removed'"):
+        hn, ip = r["hostname_norm"] or "", r["local_ip"] or ""
+        if (hn and hn in active_hn) or (not hn and ip and ip in active_ip):
+            continue
+        key = ("hn", hn) if hn else ("ip", ip) if ip else ("aid", r["aid"])
+        groups.setdefault(key, []).append(r)
+    c.execute("UPDATE hosts SET gone_primary=0, gone_group=NULL, gone_source=NULL WHERE gone_primary=1 OR gone_group IS NOT NULL")
+    upd = []
+    for agents in groups.values():
+        # representative: an agent our syncs tracked (richer data) before an imported one, then the most recently seen
+        best = sorted(agents, key=lambda a: (a["removal_type"] == "imported", -int("".join(ch for ch in (a["last_seen"] or "") if ch.isdigit()) or 0)))[0]
+        src = "console" if any(a["removal_type"] != "imported" for a in agents) else "import"
+        upd.append((len(agents), src, best["aid"]))
+    c.executemany("UPDATE hosts SET gone_primary=1, gone_group=?, gone_source=? WHERE aid=?", upd)
+
+
+def removed_devices(c):
+    r = db.one(c, """SELECT COUNT(*) devices, SUM(gone_source='console') from_console, SUM(gone_source='import') import_only,
+        SUM(gone_group) agents, SUM(gone_source='console' AND removal_type='auto_inactive') auto,
+        SUM(gone_source='console' AND removal_type<>'auto_inactive') deleted FROM hosts WHERE gone_primary=1""")
+    return {k: v or 0 for k, v in r.items()}
+
+
 def overview(c, settings):
     d = dashboard(c, settings)
     prepare_outdated_temp(c)
@@ -504,13 +576,35 @@ def overview(c, settings):
         AND NOT EXISTS (SELECT 1 FROM host_map hm WHERE hm.aid=h.aid)""").fetchone()[0]
     d["kpi"]["unmapped"] = unmapped
     d["kpi"]["agents"] = c.execute("SELECT COUNT(*) FROM hosts WHERE console_state='active'").fetchone()[0]
-    d.update(sensors=sensors, os=os_rows, node_types=node_types, msps=msp_summaries(c, settings))
+    from .vulns import summary as vuln_summary
+    vs = vuln_summary(c)
+    last_inv = db.one(c, "SELECT MAX(uploaded_at) at FROM inventory_versions")["at"]
+    edr_imp = db.one(c, "SELECT COUNT(*) n, MAX(uploaded_at) at FROM edr_imports")
+    niam_up = db.one(c, "SELECT COUNT(*) n, MAX(uploaded_at) at FROM niam_uploads")
+    d["sources"] = {
+        "lobs": len(d["lobs"]), "lobs_with_inventory": sum(1 for l in d["lobs"] if l["nodes"]), "inventory_at": last_inv,
+        "lobs_scanned": len(vs["by_lob"]), "scan_at": vs["assets"]["last_scan"],
+        "edr_import": edr_imp["n"] > 0, "edr_import_at": edr_imp["at"],
+        "edr_import_agents": c.execute("SELECT COUNT(*) FROM hosts WHERE removal_type='imported'").fetchone()[0],
+        "niam": niam_up["n"] > 0, "niam_at": niam_up["at"],
+        "niam_nodes": c.execute("SELECT COUNT(*) FROM niam_nodes WHERE present=1").fetchone()[0],
+    }
+    d["removed_devices"] = removed_devices(c)
+    from . import niam
+    d["niam"] = niam.summary(c)
+    from .sod import sod_summary
+    d["sod"] = sod_summary()
+    from .registry import registry_summary
+    d["registry"] = registry_summary()
+    d.update(sensors=sensors, os=os_rows, node_types=node_types, msps=msp_summaries(c, settings),
+             vulns={"severity": vs["severity"], "assets": vs["assets"], "by_lob": vs["by_lob"], "by_msp": vs["by_msp"]})
     return d
 
 
 # ------------------------------------------------------------------ IP search
 def ip_search(c, q):
     q = (q or "").strip()
+    q = db.canon_ip(q) if db.is_ip(q) else q
     out = {"query": q, "mode": None, "current": [], "history": [], "inventory": []}
     if not q:
         return out
@@ -563,7 +657,7 @@ def ip_search(c, q):
 def duplicate_groups(c, settings, kind="duplicate", q="", include_removed=False, limit=500, offset=0):
     """Agents grouped by (connection IP, local IP). kind='duplicate': at most one online agent in the group;
     kind='routing': two or more online agents. Removed / hidden agents are only listed when asked for."""
-    states = "('active','hidden','removed')" if include_removed else "('active')"
+    states = "('active','removed')" if include_removed else "('active')"
     ex1, p1 = excl_sql("connection_ip", settings)
     ex2, p2 = excl_sql("local_ip", settings)
     params = p1 + p2
@@ -583,7 +677,7 @@ def duplicate_groups(c, settings, kind="duplicate", q="", include_removed=False,
 
 
 def duplicate_members(c, connection_ip, local_ip, include_removed=False):
-    states = "('active','hidden','removed')" if include_removed else "('active')"
+    states = "('active','removed')" if include_removed else "('active')"
     return db.rows(c, f"""SELECT aid, hostname, connection_ip, local_ip, mac_address, platform_name, os_version, agent_version,
             console_state, online_state, first_seen, last_seen, serial_number, is_reinstall, removal_type, removed_at, last_login_user
             FROM hosts WHERE connection_ip = ? AND local_ip = ? AND console_state IN {states}

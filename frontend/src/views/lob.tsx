@@ -3,12 +3,12 @@ import * as React from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Download, GitCompare, History, Layers, List, Pencil, Plus, RotateCcw, Tags, Trash2, Upload } from "lucide-react";
+import { ArrowLeft, ChevronDown, Download, FileSpreadsheet, GitCompare, History, Layers, List, MoreHorizontal, Pencil, Plus, RotateCcw, ShieldAlert, Tags, Trash2, Upload } from "lucide-react";
 import { toast } from "sonner";
 import { api, downloadExcel } from "@/lib/api";
 import { useUrlState } from "@/lib/hooks";
 import { fmtDt, fmtN, fmtRel } from "@/lib/format";
-import { Badge, Button, Callout, Card, CardHeader, Chip, Field, Input, Kpi, KpiGrid, Loading, Modal, PageHeader, SearchInput, Select, Tabs, useConfirm } from "@/components/ui";
+import { Badge, Button, Callout, Card, CardHeader, Chip, Field, Input, Kpi, KpiGrid, Loading, Menu, Modal, PageHeader, SearchInput, Segmented, Select, Tabs, useConfirm } from "@/components/ui";
 import { COLORS, HBars, Legend } from "@/components/charts";
 import { DataTable, SimpleTable } from "@/components/data-table";
 import { InventoryTable } from "@/components/inventory-table";
@@ -18,6 +18,11 @@ import { HostLink, HostStatus, Mono, When } from "@/components/badges";
 import { Preview, UploadWizard } from "@/components/upload-wizard";
 import { TagWizard } from "@/components/tag-wizard";
 import { LobForm } from "./lobs";
+import { VulnPanel } from "@/components/vuln-views";
+import { Hero, Line2, Split } from "@/components/summary-cards";
+import { useMeta } from "@/lib/hooks";
+import { cn } from "@/lib/utils";
+import { MappedUpload } from "@/components/mapped-upload";
 
 export default function Lob() {
   const [state, set, replaceAll] = useUrlState();
@@ -27,18 +32,20 @@ export default function Lob() {
   const qc = useQueryClient();
   const confirm = useConfirm();
   const [upload, setUpload] = React.useState<{ msp?: number | null; type?: number | null } | null>(null);
+  const [vulnUpload, setVulnUpload] = React.useState(false);
   const [typeForm, setTypeForm] = React.useState<any>(null);
   const [tagging, setTagging] = React.useState<{ msp?: number | null } | null>(null);
   const [edit, setEdit] = React.useState(false);
   const [mspForm, setMspForm] = React.useState<any>(null);
-  const { data } = useQuery({ queryKey: ["lob", id], queryFn: () => api<any>(`/api/lobs/${id}`), enabled: !!id });
+  const { data: meta } = useMeta();
+  const { data, error: dataErr, refetch: dataRetry } = useQuery({ queryKey: ["lob", id], queryFn: () => api<any>(`/api/lobs/${id}`), enabled: !!id });
   const { data: versions } = useQuery({ queryKey: ["lob-versions", id], queryFn: () => api<any>(`/api/lobs/${id}/versions`), enabled: !!id });
   if (!id) return <Callout tone="crit">No LOB selected. <Link href="/lobs/" className="underline">Back to LOBs</Link></Callout>;
-  if (!data) return <Loading />;
+  if (!data) return <Loading error={dataErr} retry={() => dataRetry()} />;
   const { lob, summary: s, current_version: cv, msps, types = [] } = data;
   const goTab = (t: string, extra: Record<string, string> = {}) => replaceAll({ id: String(id), tab: t, ...extra });
   const del = async () => {
-    if (!(await confirm({ title: `Delete ${lob.name}?`, body: "This permanently deletes the LOB, its MSPs, all inventory versions, change history and agent tags. Falcon host data is not affected.", ok: "Delete LOB", danger: true }))) return;
+    if (!(await confirm({ title: `Delete ${lob.name}?`, body: "This permanently deletes the LOB, its MSPs, all inventory versions, change history, agent tags and vulnerability scans. Falcon host data is not affected.", ok: "Delete LOB", danger: true }))) return;
     await api(`/api/lobs/${id}`, { method: "DELETE" });
     toast.success("LOB deleted");
     qc.invalidateQueries();
@@ -54,121 +61,124 @@ export default function Lob() {
     try { await api(`/api/types/${t.id}`, { method: "DELETE" }); toast.success("Type deleted"); qc.invalidateQueries(); }
     catch (e: any) { toast.error(e.message); }
   };
+  const historyTab = tab === "versions" || tab === "changes";
+  const quality = [
+    ["Inventory says “Yes”, no agent found", s.claimed_missing, "crit", { claimed_missing: "1" }, "EDR claim"],
+    ["Inventory says “No”, agent is running", s.marked_no, "serious", { marked_no: "1" }, "EDR claim"],
+    ["Marked not feasible, agent is running", s.installed_not_applicable, "warn", { installed_na: "1" }, "EDR claim"],
+    ["Same IP on several rows", s.dup_ips, "serious", { dup: "ip" }, "Duplicates"],
+    ["Same IP under more than one MSP", s.cross_msp_dup_ips, "serious", { cross_msp_dup: "1" }, "Duplicates"],
+    ["IP also listed by another LOB", s.cross_lob_ips, "warn", { dup: "cross_lob" }, "Duplicates"],
+  ] as const;
+  const issues = quality.reduce((a, q) => a + (q[1] || 0), 0);
 
   return (
     <div>
       <Link href="/lobs/" className="mb-2 inline-flex items-center gap-1 text-xs text-fg-2 hover:text-fg"><ArrowLeft className="size-3.5" /> All LOBs</Link>
       <PageHeader
-        title={<span className="flex items-center gap-2">{lob.name}{cv && <Badge tone="info">v{cv.version_no}</Badge>}{types.length > 0 && <Badge tone="violet">{types.length} type{types.length > 1 ? "s" : ""}</Badge>}</span>}
+        title={<span className="flex items-center gap-2">{lob.name}{cv && <Badge tone="info">v{cv.version_no}</Badge>}</span>}
         sub={<>{lob.description}{lob.owner ? ` · ${lob.owner}` : ""}{cv ? ` · last upload ${fmtRel(cv.uploaded_at)} by ${cv.uploaded_by || "unknown"}${cv.scope_msp ? ` (MSP ${cv.scope_msp} only)` : ""}` : " · no inventory uploaded yet"}</>}
         actions={<>
-          <Button variant="ghost" size="icon" title="Edit LOB" onClick={() => setEdit(true)}><Pencil /></Button>
-          <Button variant="ghost" size="icon" title="Delete LOB" onClick={del}><Trash2 /></Button>
-          <Button onClick={() => setMspForm({})}><Plus /> MSP</Button>
-          <Button onClick={() => setTypeForm({})}><Plus /> Type</Button>
-          <Button onClick={() => setTagging({})}><Tags /> Tag agents</Button>
-          <Button onClick={() => downloadExcel(`/api/lobs/${id}/inventory/export`)}><Download /> Inventory</Button>
-          <Button variant="primary" onClick={() => setUpload({})}><Upload /> Upload inventory</Button>
+          <Menu trigger={<Button><MoreHorizontal /> Manage</Button>} items={[
+            { label: "Add MSP", icon: <Plus />, onSelect: () => setMspForm({}) },
+            { label: "Add inventory type", icon: <Layers />, hint: "e.g. Servers, Network devices — own file and versions", onSelect: () => setTypeForm({}) },
+            { label: "Tag agents (AID + MSP)", icon: <Tags />, hint: "assign EDR agents to this LOB / its MSPs", onSelect: () => setTagging({}) },
+            { label: "Export inventory to Excel", icon: <Download />, onSelect: () => downloadExcel(`/api/lobs/${id}/inventory/export`) },
+            "sep",
+            { label: "Edit LOB", icon: <Pencil />, onSelect: () => setEdit(true) },
+            { label: "Delete LOB", icon: <Trash2 />, danger: true, onSelect: del },
+          ]} />
+          <Menu trigger={<Button variant="primary"><Upload /> Upload <ChevronDown /></Button>} width={280} items={[
+            { label: "Inventory", icon: <FileSpreadsheet />, hint: "whole LOB, or one MSP / type from the MSP table", onSelect: () => setUpload({}) },
+            { label: "Vulnerability scan", icon: <ShieldAlert />, hint: "Nessus export for this LOB", onSelect: () => setVulnUpload(true) },
+            { label: "Agent tags (AID + MSP)", icon: <Tags />, onSelect: () => setTagging({}) },
+          ]} />
         </>}
       />
-      <Tabs value={tab} onChange={(t) => goTab(t)} tabs={[
+      <Tabs value={historyTab ? "history" : tab} onChange={(t) => goTab(t === "history" ? "versions" : t)} tabs={[
         { id: "overview", label: "Overview" },
         { id: "inventory", label: "Inventory", count: s.nodes },
         { id: "unlisted", label: "Not in inventory", count: s.unlisted },
+        { id: "vulns", label: "Vulnerabilities" },
         { id: "tags", label: "Agent tags" },
-        { id: "changes", label: "Change log" },
-        { id: "versions", label: "Versions", count: versions?.rows.length },
+        { id: "history", label: "History", count: versions?.rows.length },
       ]} />
 
       {tab === "overview" && (
-        <>
+        <div className="space-y-4">
           {!s.nodes && (
-            <Callout className="mb-4">No inventory yet. Add the LOB&apos;s MSPs, then upload the inventory (one file for the whole LOB with an MSP column, or one file per MSP).</Callout>
+            <Callout>No inventory yet. Add the LOB&apos;s MSPs, then upload the inventory (one file for the whole LOB with an MSP column, or one file per MSP).</Callout>
           )}
-          <KpiGrid className="grid-cols-[repeat(auto-fill,minmax(140px,1fr))]">
-            <Kpi label="Nodes" value={s.nodes} tone="info" onClick={() => goTab("inventory")} foot={`${fmtN(s.not_feasible)} not feasible · ${fmtN(s.non_live)} non live`} />
-            <Kpi label="Applicable" value={s.applicable} onClick={() => goTab("inventory", { applicable: "1" })} foot="Live & EDR feasible" />
-            <Kpi label="Installed" value={s.installed} tone="good" foot={s.coverage === null ? undefined : `${s.coverage}% coverage`} onClick={() => goTab("inventory", { installed: "1" })} />
-            <Kpi label="Online" value={s.online} tone="good" onClick={() => goTab("inventory", { coverage_status: "Online" })} />
-            <Kpi label="Offline" value={s.offline} tone="warn" onClick={() => goTab("inventory", { coverage_status: "Offline" })} />
-            <Kpi label="Not installed" value={s.not_installed} tone="crit" onClick={() => goTab("inventory", { coverage_status: "Not Installed" })} />
-            <Kpi label="Hidden" value={s.hidden} tone="violet" onClick={() => goTab("inventory", { coverage_status: "Hidden" })} />
-            <Kpi label="Not in inventory" value={s.unlisted} tone="violet" foot="agents on EDR, missing from inventory" onClick={() => goTab("unlisted")} />
-            <Kpi label="Duplicate IPs" value={s.dup_ips} tone="serious" foot="IP on several rows in this LOB" onClick={() => goTab("inventory", { dup: "ip" })} />
-            <Kpi label="IPs in other LOBs" value={s.cross_lob_ips} tone="serious" foot="same IP also listed by another LOB" onClick={() => goTab("inventory", { dup: "cross_lob" })} />
-          </KpiGrid>
+          <LobSummary id={id} s={s} goTab={goTab} days={meta?.settings.auto_remove_days} />
 
-          <Card className="mt-4">
-            <CardHeader title={<span className="flex items-center gap-2"><Layers className="size-4" /> Inventories</span>}
-              hint="the main inventory plus one per type — each has its own upload and version history"
-              right={<Button size="sm" onClick={() => setTypeForm({})}><Plus /> Add type</Button>} />
-            <SimpleTable rows={[{ id: null, name: "Main inventory", main: true, nodes: s.nodes - types.reduce((a: number, t: any) => a + t.nodes, 0),
-              current_version: cv?.version_no, uploaded_at: cv?.uploaded_at, uploaded_by: cv?.uploaded_by, versions: undefined }, ...types]}
-              columns={[
-                { key: "name", label: "Inventory", render: (t: any) => <span className="flex items-center gap-1.5"><b>{t.name}</b>{t.main ? <Badge tone="outline">whole LOB</Badge> : <Badge tone="violet">type</Badge>}</span> },
-                { key: "nodes", label: "Nodes", num: true, render: (t: any) => fmtN(t.nodes) },
-                { key: "current_version", label: "Current version", render: (t: any) => t.current_version ? <Badge tone="info">v{t.current_version}</Badge> : <span className="text-muted">nothing uploaded</span> },
-                { key: "uploaded_at", label: "Last upload", render: (t: any) => t.uploaded_at ? <span>{fmtRel(t.uploaded_at)} <span className="text-xs text-muted">{t.uploaded_by}</span></span> : "–" },
-                { key: "act", label: "", render: (t: any) => (
-                  <div className="flex justify-end gap-1">
-                    <Button size="sm" variant="ghost" title={`Upload ${t.name}`} onClick={() => setUpload({ type: t.id })}><Upload /></Button>
-                    <Button size="sm" variant="ghost" title="Show nodes" onClick={() => goTab("inventory", { type: t.main ? "main" : String(t.id) })}><List /></Button>
-                    {!t.main && <Button size="sm" variant="ghost" title="Rename type" onClick={() => setTypeForm(t)}><Pencil /></Button>}
-                    {!t.main && <Button size="sm" variant="ghost" title="Delete type" onClick={() => delType(t)}><Trash2 /></Button>}
-                  </div>
-                ) },
-              ]} />
-          </Card>
-
-          <Card className="mt-4">
-            <CardHeader title="MSP-wise coverage" hint="click any number to open the matching nodes"
-              right={<Button size="sm" onClick={() => setMspForm({})}><Plus /> Add MSP</Button>} />
+          <Card>
+            <CardHeader title="Coverage by MSP" hint="EDR, NIAM and vulnerability scan per MSP · hover a bar for numbers" />
             {msps.length ? (
-              <CoverageTable rows={msps} mode="msp" showLob={false} actions={(m) => (
-                <div className="flex justify-end gap-1">
-                  {m.msp_id && <Button size="sm" variant="ghost" title="Upload inventory for this MSP" onClick={() => setUpload({ msp: m.msp_id })}><Upload /></Button>}
-                  {m.msp_id && <Button size="sm" variant="ghost" title="Tag agents to this MSP" onClick={() => setTagging({ msp: m.msp_id })}><Tags /></Button>}
-                  {m.msp_id && <Button size="sm" variant="ghost" title="Edit MSP" onClick={() => setMspForm(m)}><Pencil /></Button>}
-                  {m.msp_id && <Button size="sm" variant="ghost" title="Delete MSP" onClick={() => delMsp(m)}><Trash2 /></Button>}
-                </div>
-              )} />
+              <CoverageTable rows={msps} mode="msp" showLob={false} days={meta?.settings.auto_remove_days} actions={(m) => m.msp_id ? (
+                <Menu trigger={<Button size="sm" variant="ghost" title="MSP actions"><MoreHorizontal /></Button>} items={[
+                  { label: `Upload ${m.msp} inventory`, icon: <Upload />, hint: "replaces only this MSP's rows", onSelect: () => setUpload({ msp: m.msp_id }) },
+                  { label: "Tag agents to this MSP", icon: <Tags />, onSelect: () => setTagging({ msp: m.msp_id }) },
+                  { label: "Edit MSP", icon: <Pencil />, onSelect: () => setMspForm(m) },
+                  "sep",
+                  { label: "Delete MSP", icon: <Trash2 />, danger: true, onSelect: () => delMsp(m) },
+                ]} />
+              ) : null} />
             ) : (
               <div className="px-4 pb-6 pt-2 text-center text-muted">No MSPs yet — <button className="text-accent-fg hover:underline" onClick={() => setMspForm({})}>add one</button>, or upload an inventory with an MSP column and they are created automatically.</div>
             )}
           </Card>
 
-          <div className="mt-4 grid gap-4 lg:grid-cols-3">
+          <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)]">
             <Card>
-              <CardHeader title="Node type coverage" hint="applicable nodes" />
+              <CardHeader title="EDR coverage by node type" hint="EDR-applicable nodes" />
               <div className="px-4 pb-4">
-                <Legend series={[{ key: "i", label: "Installed", color: COLORS.good }, { key: "o", label: "of which offline", color: COLORS.warn }, { key: "p", label: "Pending", color: COLORS.crit }]} />
+                <Legend series={[{ key: "i", label: "Online", color: COLORS.good }, { key: "o", label: "Offline", color: COLORS.warn }, { key: "p", label: "Not installed", color: COLORS.crit }]} />
                 <HBars items={data.node_types.filter((r: any) => r.applicable > 0).map((r: any) => ({
                   label: r.label, n: r.applicable, href: `/lob/?id=${id}&tab=inventory&node_type=${encodeURIComponent(r.label)}&applicable=1`,
-                  title: `${r.label}: ${r.installed}/${r.applicable} installed (${r.offline} offline), ${r.pending} pending`,
-                  parts: [{ n: r.installed - r.offline, color: COLORS.good }, { n: r.offline, color: COLORS.warn }, { n: r.pending, color: COLORS.crit }],
+                  parts: [{ n: r.installed - r.offline, color: COLORS.good, label: "Online" }, { n: r.offline, color: COLORS.warn, label: "Offline" }, { n: r.pending, color: COLORS.crit, label: "Not installed" }],
                 }))} />
               </div>
             </Card>
             <Card>
-              <CardHeader title="Inventory accuracy" hint="inventory claim vs Falcon" />
-              <div className="space-y-1 px-2 pb-3">
-                {[
-                  ["Inventory says “Yes”, no agent found", s.claimed_missing, "crit", { claimed_missing: "1" }],
-                  ["Inventory says “No”, agent is running", s.marked_no, "serious", { marked_no: "1" }],
-                  ["Marked not applicable, agent is running", s.installed_not_applicable, "warn", { installed_na: "1" }],
-                  ["Same IP listed under more than one MSP", s.cross_msp_dup_ips, "serious", { cross_msp_dup: "1" }],
-                  ["Installed nodes with duplicate agents", s.edr_dup_ips, "serious", {}],
-                ].map(([l, n, tone, f]: any) => (
-                  <button key={l} onClick={() => goTab("inventory", f)} className="flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left hover:bg-surface-2">
-                    <Badge tone={n ? tone : "neutral"} className="min-w-[40px] justify-center tabular">{fmtN(n)}</Badge>
-                    <span className="text-[13px] text-fg-2">{l}</span>
+              <CardHeader title="Data quality" hint={issues ? `${fmtN(issues)} items to fix in the inventory` : "no issues found"} />
+              <div className="grid gap-2 px-4 pb-4 sm:grid-cols-2 lg:grid-cols-3">
+                {quality.map(([l, n, tone, f, group]) => (
+                  <button key={l} onClick={() => goTab("inventory", f as Record<string, string>)}
+                    className={cn("rounded-xl border border-border p-3 text-left transition-colors hover:border-accent", n ? "bg-surface" : "bg-surface-2/40")}>
+                    <div className="text-[10.5px] font-semibold uppercase tracking-wider text-muted">{group}</div>
+                    <div className={cn("mt-1 text-[22px] font-semibold leading-none tabular", n ? TONE_TEXT[tone as string] : "text-muted")}>{fmtN(n || 0)}</div>
+                    <div className="mt-1.5 text-[12px] leading-snug text-fg-2">{l}</div>
                   </button>
                 ))}
               </div>
             </Card>
-            <CrossMspDups id={id} />
           </div>
-        </>
+
+          {types.length > 0 && (
+            <Card>
+              <CardHeader title={<span className="flex items-center gap-2"><Layers className="size-4" /> Inventories</span>}
+                hint="main inventory plus one per type — each with its own uploads and versions" />
+              <SimpleTable rows={[{ id: null, name: "Main inventory", main: true, nodes: s.nodes - types.reduce((a: number, t: any) => a + t.nodes, 0),
+                current_version: cv?.version_no, uploaded_at: cv?.uploaded_at, uploaded_by: cv?.uploaded_by }, ...types]}
+                columns={[
+                  { key: "name", label: "Inventory", render: (t: any) => <b>{t.name}</b> },
+                  { key: "nodes", label: "Nodes", num: true, render: (t: any) => fmtN(t.nodes) },
+                  { key: "current_version", label: "Version", render: (t: any) => t.current_version ? <Badge tone="info">v{t.current_version}</Badge> : <span className="text-muted">nothing uploaded</span> },
+                  { key: "uploaded_at", label: "Last upload", render: (t: any) => t.uploaded_at ? <span>{fmtRel(t.uploaded_at)} <span className="text-xs text-muted">{t.uploaded_by}</span></span> : "–" },
+                  { key: "act", label: "", render: (t: any) => (
+                    <div className="flex justify-end">
+                      <Menu trigger={<Button size="sm" variant="ghost"><MoreHorizontal /></Button>} items={[
+                        { label: `Upload ${t.name}`, icon: <Upload />, onSelect: () => setUpload({ type: t.id }) },
+                        { label: "Show nodes", icon: <List />, onSelect: () => goTab("inventory", { type: t.main ? "main" : String(t.id) }) },
+                        ...(t.main ? [] : [{ label: "Rename type", icon: <Pencil />, onSelect: () => setTypeForm(t) }, "sep" as const,
+                          { label: "Delete type", icon: <Trash2 />, danger: true, onSelect: () => delType(t) }]),
+                      ]} />
+                    </div>
+                  ) },
+                ]} />
+            </Card>
+          )}
+        </div>
       )}
 
       {tab === "inventory" && (
@@ -177,17 +187,26 @@ export default function Lob() {
       {tab === "unlisted" && (
         <>
           <Callout className="mb-3">
-            Agents tagged to {lob.name} (via an AID + MSP sheet) that report to Falcon but are <b>not in the LOB inventory</b>. Add them to the inventory, or remove the tag if they belong elsewhere.
+            <b>Not in inventory</b>: agents that report to CrowdStrike and are tagged to {lob.name} (via an AID + MSP sheet), but are <b>not in its uploaded inventory</b> ("EDR only"). Add them to the inventory, or remove the tag if they belong elsewhere.
           </Callout>
           <HostTable state={state} set={set} reset={() => goTab("unlisted")} fixed={{ state: "active", unlisted: "1", lob: String(id) }} omit={["tab", "id"]} storageKey="unlisted"
             extraFilters={<Button size="sm" onClick={() => setTagging({})}><Tags /> Tag agents</Button>} />
         </>
       )}
       {tab === "tags" && <AgentTags id={id} state={state} set={set} reset={() => goTab("tags")} onTag={() => setTagging({})} msps={msps} />}
-      {tab === "changes" && <Changes id={id} state={state} set={set} reset={() => goTab("changes")} versions={versions?.rows || []} />}
-      {tab === "versions" && <Versions id={id} versions={versions?.rows} goTab={goTab} />}
+      {tab === "vulns" && <VulnPanel lobId={id} state={state} set={set} replaceAll={replaceAll} />}
+      {historyTab && (
+        <>
+          <div className="mb-3">
+            <Segmented value={tab as "versions" | "changes"} onChange={(t) => goTab(t)} options={[["versions", "Versions"], ["changes", "Change log"]]} />
+          </div>
+          {tab === "changes" && <Changes id={id} state={state} set={set} reset={() => goTab("changes")} versions={versions?.rows || []} />}
+          {tab === "versions" && <Versions id={id} versions={versions?.rows} goTab={goTab} />}
+        </>
+      )}
 
       {upload && <UploadWizard lob={lob} mspId={upload.msp} typeId={upload.type} open onOpenChange={(o) => !o && setUpload(null)} />}
+      {vulnUpload && <MappedUpload kind="vulns" lobId={id} open onOpenChange={setVulnUpload} />}
       {tagging && <TagWizard lob={lob} mspId={tagging.msp} open onOpenChange={(o) => !o && setTagging(null)} />}
       <LobForm open={edit} onOpenChange={setEdit} lob={lob} />
       {mspForm && <MspForm lobId={id} msp={mspForm.msp_id ? mspForm : null} onClose={() => setMspForm(null)} />}
@@ -246,23 +265,43 @@ function TypeForm({ lobId, type, onClose }: { lobId: number; type: any; onClose:
   );
 }
 
-const verLabel = (v: any) => `${v.type_name || "Main"} v${v.version_no}`;
+const TONE_TEXT: Record<string, string> = { crit: "text-crit-fg", serious: "text-serious-fg", warn: "text-warn-fg" };
 
-function CrossMspDups({ id }: { id: number }) {
-  const { data } = useQuery({ queryKey: ["xdup", id], queryFn: () => api<any>(`/api/lobs/${id}/cross-msp-duplicates`) });
-  const rows = data?.rows || [];
+/** EDR, NIAM and vulnerability status of one LOB, same layout as the Overview. */
+function LobSummary({ id, s, goTab, days }: { id: number; s: any; goTab: (t: string, e?: Record<string, string>) => void; days?: string }) {
+  const { data: v } = useQuery({ queryKey: ["vuln-summary", String(id)], queryFn: () => api<any>("/api/vulns/summary", { params: { lob: id } }) });
+  const inv = (q: string) => `/lob/?id=${id}&tab=inventory&${q}`;
+  const scanned = v?.assets?.scanned > 0;
   return (
-    <Card>
-      <CardHeader title="IPs listed by more than one MSP" hint={`${rows.length} IPs`}
-        right={rows.length ? <Link className="text-xs text-accent-fg hover:underline" href={`/lob/?id=${id}&tab=inventory&cross_msp_dup=1`}>Show nodes</Link> : undefined} />
-      <SimpleTable rows={rows} maxHeight="300px" empty="No IP is claimed by two MSPs" columns={[
-        { key: "ip", label: "IP", render: (r: any) => <Link className="font-mono text-[12px] text-accent-fg hover:underline" href={`/lob/?id=${id}&tab=inventory&q=${r.ip}`}>{r.ip}</Link> },
-        { key: "msps", label: "MSPs", wrap: true, render: (r: any) => <span className="flex flex-wrap gap-1">{r.msps.split(",").map((m: string) => <Badge key={m} tone="outline">{m}</Badge>)}</span> },
-        { key: "node_names", label: "Node names", wrap: true },
-      ]} />
-    </Card>
+    <div className="grid gap-4 lg:grid-cols-3">
+      <Hero title="EDR coverage" href={inv("applicable=1")} value={s.coverage === null ? "–" : `${s.coverage}%`}
+        sub={`${fmtN(s.installed)} installed of ${fmtN(s.applicable)} EDR-applicable nodes (${fmtN(s.nodes)} in inventory)`}>
+        <Split parts={[{ label: "Online", n: s.online, color: "var(--good)", href: inv("coverage_status=Online") },
+          { label: "Offline", n: s.offline, color: "var(--warn)", href: inv("coverage_status=Offline") },
+          { label: "Not installed", n: s.pending, color: "var(--crit)", href: inv("pending=1") }]} />
+        <Line2 items={[[`Offline: agent left the console (> ${days || 90} days / old EDR upload)`, s.offline_removed, inv("coverage_status=Offline")],
+          ["Not EDR applicable (not feasible / legacy OS)", s.nodes - s.applicable, inv("applicable=0")],
+          ["EDR only (in EDR, not in inventory)", s.unlisted, `/lob/?id=${id}&tab=unlisted`]]} />
+      </Hero>
+      <Hero title="NIAM coverage" href={inv("niam=0")} value={s.niam_coverage === null ? "–" : `${s.niam_coverage}%`}
+        sub={`${fmtN(s.in_niam)} of ${fmtN(s.nodes)} inventory nodes are in the NIAM dump`}>
+        <Split parts={[{ label: "In NIAM", n: s.in_niam, color: "var(--good)", href: inv("niam=1") },
+          { label: "Not in NIAM", n: s.not_in_niam, color: "var(--crit)", href: inv("niam=0") }]} />
+      </Hero>
+      <Hero title="Vulnerabilities" href={`/lob/?id=${id}&tab=vulns`} value={scanned ? fmtN(v.severity.crit + v.severity.high) : "No data"}
+        sub={scanned ? `open critical + high · ${fmtN(s.scanned_live)} of ${fmtN(s.live_nodes)} live nodes scanned` : "no scan uploaded for this LOB"}>
+        {scanned ? <>
+          <Split parts={[{ label: "Critical", n: v.severity.crit, color: "var(--crit)", href: `/lob/?id=${id}&tab=vulns&vtab=findings&severity=Critical` },
+            { label: "High", n: v.severity.high, color: "var(--serious)", href: `/lob/?id=${id}&tab=vulns&vtab=findings&severity=High` },
+            { label: "Medium", n: v.severity.med, color: "var(--warn)", href: `/lob/?id=${id}&tab=vulns&vtab=findings&severity=Medium` }]} />
+          <Line2 items={[["Live nodes never scanned", s.never_scanned, inv("scanned=0")], ["Crit / high hosts with no EDR", v.assets.crit_high_no_edr, `/lob/?id=${id}&tab=vulns&vtab=hosts&min_sev=3&no_edr=1`]]} />
+        </> : <button onClick={() => goTab("vulns")} className="text-[13px] text-accent-fg hover:underline">Upload a scan →</button>}
+      </Hero>
+    </div>
   );
 }
+
+const verLabel = (v: any) => `${v.type_name || "Main"} v${v.version_no}`;
 
 function AgentTags({ id, state, set, reset, onTag, msps }: { id: number; state: Record<string, string>; set: any; reset: () => void; onTag: () => void; msps: any[] }) {
   const qc = useQueryClient();
@@ -290,7 +329,7 @@ function AgentTags({ id, state, set, reset, onTag, msps }: { id: number; state: 
         { key: "local_ip", label: "IP", render: (r: any) => <Mono>{r.local_ip}</Mono> },
         { key: "msp", label: "MSP" },
         { key: "st", label: "Status", render: (r: any) => <HostStatus r={r} /> },
-        { key: "in_inventory", label: "In inventory", render: (r: any) => r.in_inventory ? <Badge tone="good">Yes</Badge> : <Badge tone="violet">Not in inventory</Badge> },
+        { key: "in_inventory", label: "In inventory", render: (r: any) => r.in_inventory ? <Badge tone="good">Yes</Badge> : <Badge tone="violet">EDR only</Badge> },
         { key: "last_seen", label: "Last seen", render: (r: any) => <When ts={r.last_seen} /> },
         { key: "source", label: "Source file" },
         { key: "tagged_at", label: "Tagged", render: (r: any) => fmtDt(r.tagged_at) },

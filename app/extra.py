@@ -3,7 +3,7 @@ import re
 
 from fastapi import APIRouter, Body
 
-from . import db, queries
+from . import db, queries, vulns
 from .exporter import xlsx_response
 from .sync import exclusion_patterns, ip_excluded
 
@@ -27,7 +27,8 @@ def _terms(text):
 
 def _lookup(c, text, stale_h):
     terms = _terms(text)
-    ips = [t for t in terms if db.ip_to_num(t) is not None]
+    terms = [db.canon_ip(t) if db.is_ip(t) else t for t in terms]
+    ips = [t for t in terms if db.is_ip(t)]
     names = [t for t in terms if t not in ips]
     host_cols = "aid, hostname, hostname_norm, local_ip, console_state, online_state, last_seen, first_seen, agent_version, os_version, platform_name"
     by_ip, by_hn, hist = {}, {}, {}
@@ -53,6 +54,11 @@ def _lookup(c, text, stale_h):
                 if key:
                     inv.setdefault(key, []).append(r)
     stale_cut = queries.iso_ago(hours=stale_h)
+    vul = {}
+    for ch in _chunks(list(set(ips) | {h["local_ip"] for v in list(by_hn.values()) for h in v if h["local_ip"]})):
+        for r in db.rows(c, f"""SELECT ip, SUM(crit) crit, SUM(high) high, SUM(med) med, SUM(low) low, MAX(last_scanned_at) last_scan
+                               FROM vuln_assets WHERE ip IN ({','.join('?' * len(ch))}) GROUP BY ip""", ch):
+            vul[r["ip"]] = r
     out = []
     for t in terms:
         is_ip = t in ips
@@ -90,6 +96,9 @@ def _lookup(c, text, stale_h):
             "inv_edr_installed": ", ".join(sorted({r["edr_installed"] for r in inv_rows if r["edr_installed"]})),
             "inv_verification": ", ".join(sorted({r["verification"] for r in inv_rows if r["verification"]})),
         })
+        v = vul.get(t if is_ip else (best["local_ip"] if best else ""), {})
+        out[-1].update(crit=v.get("crit") or 0, high=v.get("high") or 0, med=v.get("med") or 0, low=v.get("low") or 0,
+                       last_scan=v.get("last_scan") or "")
     return out
 
 
@@ -97,7 +106,8 @@ LOOKUP_COLS = [("term", "Input"), ("type", "Type"), ("status", "EDR Status"), ("
                ("local_ip", "Current IP"), ("last_seen", "Last Seen (UTC)"), ("first_seen", "First Seen (UTC)"),
                ("active_agents", "Active Agents"), ("total_agents", "Total Agents"), ("os_version", "OS"),
                ("agent_version", "Sensor"), ("lobs", "LOB"), ("inv_edr_installed", "Inventory EDR Installed"),
-               ("inv_verification", "Inventory Verification")]
+               ("inv_verification", "Inventory Verification"), ("crit", "Open Critical"), ("high", "Open High"),
+               ("med", "Open Medium"), ("low", "Open Low"), ("last_scan", "Last Vulnerability Scan")]
 
 
 @router.post("/api/lookup")
@@ -154,8 +164,11 @@ def executive_report():
             ("Contained", k["contained"]), ("Unmapped agents (no LOB)", k["not_in_inventory"]),
         ]]
         cov_cols = [("nodes", "Nodes"), ("applicable", "Applicable"), ("installed", "Installed"), ("online", "Online"),
-                    ("offline", "Offline"), ("pending", "Pending"), ("not_installed", "Not Installed"), ("hidden", "Hidden"),
-                    ("removed", "Removed"), ("coverage", "Coverage %"), ("not_feasible", "Not Feasible"), ("non_live", "Non Live"),
+                    ("offline", "Offline"), ("offline_console", "Offline in Console"), ("removed_import", "Offline - Old EDR Import"),
+                    ("removed_console", "Offline - Removed from Console"),
+                    ("pending", "Pending"), ("not_installed", "Not Installed"), ("hidden", "Hidden"),
+                    ("removed", "Removed"), ("coverage", "Coverage %"), ("not_feasible", "Not Feasible"),
+                    ("to_be_decided", "Feasibility to be Decided"), ("legacy", "Legacy"), ("non_live", "Non Live"),
                     ("unlisted", "Not in Inventory"), ("edr_dup_ips", "Duplicate IPs (EDR)"),
                     ("claimed_missing", "Inventory Yes - Not Installed"), ("marked_no", "Inventory No - Installed")]
         lob_cols = [("name", "LOB"), ("msp_count", "MSPs")] + cov_cols + [("cross_msp_dup_ips", "IPs in >1 MSP"),
@@ -166,7 +179,10 @@ def executive_report():
             if params.get("outdated") == "1" or params.get("sensor_level"):
                 queries.prepare_outdated_temp(c)
             frm, where, prm, order = queries.build_host_query(params, s)
-            return db.rows(c, f"SELECT {queries.HOST_LIST_COLS} FROM {frm} {where} {order} LIMIT 50000", prm)
+            rows = db.rows(c, f"SELECT {queries.HOST_LIST_COLS} FROM {frm} {where} {order} LIMIT 50000", prm)
+            for r in rows:
+                r["niam_text"] = "Yes" if r["niam_ne_ids"] else "No"
+            return rows
 
         hc = queries.HOST_EXPORT_COLUMNS
         dup_cols = [("connection_ip", "Connection IP"), ("local_ip", "Local IP"), ("group_size", "Agents"), ("hostname", "Hostname"),
@@ -201,6 +217,32 @@ def executive_report():
             ("Unmapped Agents", hc, hosts({"unmapped": "1"})),
             ("Outdated Sensor", hc, hosts({"outdated": "1"})),
         ]
+        vs = vulns.summary(c)
+        if vs["assets"]["scanned"]:
+            sev = vs["severity"]
+            summary += [{"metric": m, "value": v} for m, v in [
+                ("Scanned hosts", vs["assets"]["scanned"]), ("Open critical vulnerabilities", sev["crit"]),
+                ("Open high vulnerabilities", sev["high"]), ("Open medium vulnerabilities", sev["med"]),
+                ("Hosts with critical/high but no active EDR", vs["assets"]["crit_high_no_edr"]),
+                ("Last vulnerability scan", vs["assets"]["last_scan"])]]
+            vcols = [("lob", "LOB"), ("msp", "MSP"), ("ip", "IP"), ("hostname", "Falcon Hostname"), ("node_name", "Inventory Node"),
+                     ("edr_status", "EDR Status"), ("crit", "Critical"), ("high", "High"), ("med", "Medium"), ("low", "Low"),
+                     ("last_scanned_at", "Last Scan")]
+            risky = db.rows(c, """SELECT a.*, l.name lob FROM vuln_assets a JOIN lobs l ON l.id=a.lob_id
+                WHERE a.crit + a.high > 0 AND a.edr_status NOT IN ('Online','Offline') ORDER BY a.crit DESC, a.high DESC""")
+            fcols = [("lob", "LOB"), ("msp", "MSP"), ("ip", "IP"), ("hostname", "Falcon Hostname"), ("edr_status", "EDR Status"),
+                     ("severity", "Severity"), ("name", "Vulnerability"), ("plugin_id", "Plugin ID"), ("port", "Port"), ("cve", "CVE"),
+                     ("exploit_ease", "Exploit Ease"), ("first_discovered", "First Discovered"), ("last_observed", "Last Observed")]
+            frm, where, prm, order = vulns.findings_query({"min_sev": "3"})
+            crit = db.rows(c, f"SELECT {vulns.FINDING_LIST_COLS} FROM {frm} {where} {order} LIMIT 100000", prm)
+            sheets += [("Vulns - No EDR (Crit+High)", vcols, risky), ("Open Critical & High Vulns", fcols, crit)]
+        from . import posture
+        top = posture.export_rows(posture._risk_rows(c, {"level": "Critical|High"}, limit=5000))
+        if top:
+            sheets.append(("Top risk assets", posture.RISK_EXPORT, top))
+        gaps = posture.export_rows(posture._risk_rows(c, {"inventory_live": "1", "stale_scan": "30", "sort": "scan_age_days"}, limit=100000))
+        if gaps:
+            sheets.append(("Scan gaps (>30d or never)", posture.RISK_EXPORT, gaps))
     return xlsx_response(sheets, "edr_executive_report")
 
 

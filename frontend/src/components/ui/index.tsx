@@ -1,6 +1,7 @@
 "use client";
 import * as React from "react";
 import * as Dialog from "@radix-ui/react-dialog";
+import * as DM from "@radix-ui/react-dropdown-menu";
 import { Loader2, Search, X } from "lucide-react";
 import Link from "next/link";
 import { cn } from "@/lib/utils";
@@ -241,7 +242,21 @@ export function Spinner({ className }: { className?: string }) {
 export function Empty({ children = "No matching records", className }: { children?: React.ReactNode; className?: string }) {
   return <div className={cn("py-10 text-center text-muted text-[13px]", className)}>{children}</div>;
 }
-export function Loading() {
+/** Spinner while a query loads; a clear message + retry once it fails (instead of spinning forever). */
+export function Loading({ error, retry }: { error?: unknown; retry?: () => void }) {
+  if (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    const missing = /^404\b/.test(msg) || /Not Found/i.test(msg);
+    return (
+      <div className="mx-auto my-10 max-w-lg rounded-xl border border-border bg-surface p-5 text-center">
+        <div className="text-[14px] font-semibold text-crit-fg">{missing ? "This feature isn't available on the running server" : "Couldn't load this data"}</div>
+        <div className="mt-1.5 text-[12.5px] text-fg-2">
+          {missing ? <>The page was updated but the backend is an older build. Restart it (<code className="font-mono">./run.sh</code> or restart the container) and reload.</> : msg}
+        </div>
+        {retry && <button onClick={retry} className="mt-3 rounded-lg border border-border px-3 py-1.5 text-[12.5px] hover:bg-surface-2">Try again</button>}
+      </div>
+    );
+  }
   return (
     <div className="flex items-center justify-center py-16">
       <Spinner />
@@ -251,7 +266,7 @@ export function Loading() {
 export function Meter({ value, tone }: { value: number; tone?: string }) {
   const color = tone || (value >= 95 ? "var(--good)" : value >= 80 ? "var(--warn)" : "var(--crit)");
   return (
-    <div className="h-2 w-full rounded-full bg-surface-3 overflow-hidden">
+    <div title={`${value}%`} className="h-2 w-full rounded-full bg-surface-3 overflow-hidden">
       <div className="h-full rounded-full" style={{ width: `${Math.min(100, value)}%`, background: color }} />
     </div>
   );
@@ -409,3 +424,49 @@ export function ConfirmProvider({ children }: { children: React.ReactNode }) {
   );
 }
 export const useConfirm = () => React.useContext(ConfirmCtx);
+
+/* ---------------- Menu (dropdown of actions) ---------------- */
+export type MenuItem = { label: React.ReactNode; icon?: React.ReactNode; onSelect: () => void; danger?: boolean; hint?: React.ReactNode } | "sep";
+export function Menu({ trigger, items, align = "end", width = 240 }: { trigger: React.ReactNode; items: MenuItem[]; align?: "start" | "end"; width?: number }) {
+  return (
+    <DM.Root modal={false}>
+      <DM.Trigger asChild>{trigger}</DM.Trigger>
+      <DM.Portal>
+        <DM.Content align={align} sideOffset={6} style={{ width }} className="z-50 rounded-xl border border-border bg-surface p-1.5 shadow-xl">
+          {items.map((it, i) => it === "sep" ? <DM.Separator key={i} className="my-1 h-px bg-border" /> : (
+            <DM.Item key={i} onSelect={it.onSelect}
+              className={cn("flex cursor-pointer select-none items-start gap-2.5 rounded-lg px-2.5 py-2 text-[13px] outline-none data-[highlighted]:bg-surface-2 [&_svg]:mt-0.5 [&_svg]:size-4 [&_svg]:shrink-0",
+                it.danger ? "text-crit-fg" : "text-fg")}>
+              {it.icon && <span className={it.danger ? "" : "text-fg-2"}>{it.icon}</span>}
+              <span className="min-w-0">
+                <span className="block font-medium">{it.label}</span>
+                {it.hint && <span className="block text-[11.5px] leading-snug text-muted">{it.hint}</span>}
+              </span>
+            </DM.Item>
+          ))}
+        </DM.Content>
+      </DM.Portal>
+    </DM.Root>
+  );
+}
+
+/* ---------------- Labelled filter select ---------------- */
+type Opt = string | [string, string] | { value: string | number; label: string };
+const optPair = (o: Opt): [string, string] => (Array.isArray(o) ? o : typeof o === "object" ? [String(o.value), o.label] : [o, o]);
+/** A filter that always says what it filters: "Status: Any ▾". Highlighted while a value is set. */
+export function FilterSelect({ label, value, onChange, options, any = "Any", className }: {
+  label: string; value?: string; onChange: (v: string) => void; options: Opt[]; any?: string; className?: string;
+}) {
+  const on = !!value;
+  return (
+    <label className={cn("inline-flex h-8.5 min-w-0 items-center rounded-lg border pl-2.5 text-[13px] shadow-card transition-colors",
+      on ? "border-accent bg-accent-soft" : "border-border-strong bg-surface hover:border-fg-2/40", className)}>
+      <span className="shrink-0 whitespace-nowrap text-muted">{label}:</span>
+      <select className={cn("h-full min-w-0 max-w-[190px] cursor-pointer truncate bg-transparent pl-1 pr-1.5 outline-none", on ? "font-semibold text-accent-fg" : "font-medium text-fg")}
+        value={value ?? ""} onChange={(e) => onChange(e.target.value)}>
+        <option value="">{any}</option>
+        {options.map((o) => { const [v, l] = optPair(o); return <option key={v} value={v}>{l}</option>; })}
+      </select>
+    </label>
+  );
+}

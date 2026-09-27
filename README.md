@@ -25,7 +25,13 @@ Open http://<host>:8765 → **Sync & settings** → enter the CrowdStrike API cl
 
 ```bash
 ./run.sh            # creates .venv, builds the UI once, starts http://127.0.0.1:8765
+./run.sh --demo     # same, with sample data in data/demo.db (real database untouched, syncing off)
 ```
+
+**Sample data:** `--demo` (or `-e DEMO=1` with Docker) fills its own database file with three LOBs, MSPs, two inventory
+versions each, ~450 agents (online / offline / removed > 90 days / deleted / hidden / duplicates / reinstalls), an old EDR
+import, two Nessus scans per LOB and a NIAM dump, so every page has something to show. Restart without the flag to go
+back to your own data.
 
 ### Connect to Falcon
 1. In Falcon go to **Support and resources → API clients and keys**. Create a client with the **Hosts: Read** scope.
@@ -90,6 +96,86 @@ fewer than half of the previously active hosts, so an API or scope problem can't
 - **Not in inventory** means agents tagged to a LOB/MSP but missing from its inventory. To tag agents, upload a sheet with an Agent ID column
   (hostname or IP also work) and an MSP column from the LOB page. **Unmapped agents** are agents that no LOB inventory or tag claims.
 - **Duplicate IPs**: an IP on several inventory rows of one LOB. **IPs in other LOBs**: the same IP is also listed by another LOB. **Dup IPs (EDR)**: installed nodes whose agent has duplicate agents.
+
+## Vulnerabilities, old EDR inventory and Asset 360
+- **Vulnerability scans (per LOB):** upload a Nessus-format export (S.No., IP Address, Vulnerability Name, Severity, Protocol, Port,
+  Synopsis, Description, Steps to Remediate, Plugin Text, See Also, CVE, Exploit Ease, Plugin ID, First Discovered, Last Observed,
+  Vuln / Patch Publication Date, Remarks) from **Upload center** or the LOB's **Vulnerabilities** tab.
+  - A finding is identified by IP + plugin + port + protocol.
+  - For every IP in a new scan, findings that are gone are marked **fixed**, and findings that come back are marked **reopened**.
+    IPs that are not in the file keep their findings, so partial scans are safe.
+  - Each IP keeps its **last scan date**.
+  - Scanned IPs are matched to the LOB inventory (MSP, node type) and to CrowdStrike (EDR status). This powers the highest-risk
+    view: *critical/high findings on hosts without active EDR*.
+- **Old EDR inventory:** upload an older CrowdStrike host export. Agents that are no longer in the live console are stored as
+  **Old EDR import**.
+  - They appear in **EDR history** next to agents that were auto-removed (> N days), deleted manually, or hidden.
+  - They are used for inventory, vulnerability and search matching.
+  - If one reports again, the next sync restores it.
+- **Asset 360** (`/ip-search/`): one search for an IP, hostname or AID. It shows EDR status and agent, LOB and MSP, what the
+  inventory says, open vulnerabilities, the last scan and the IP history. A prefix or CIDR lists every asset in the range.
+  The same data is in the host drawer, bulk lookup and the executive report.
+
+## Risk ranking and scan coverage
+
+- **Risk ranking:** every inventory node and scanned IP gets a 0–100 score from EDR and vulnerabilities only: no EDR
+  agent (+35), EDR offline (+8 / +15 after 7 days / +25 after 30 days; agents removed from the console count as offline),
+  open critical (+12, +6 each more, max 30), high (+5, +2 each more, max 15), medium (max 5), and +10 when a critical / high
+  finding has a known exploit (the scan's "Exploit Ease" column, e.g. Nessus "Exploits are available"). Non Live nodes
+  count 30%. Levels: Critical ≥ 60, High ≥ 35, Medium ≥ 15. Asset 360 shows the score and its parts.
+- **Scan coverage:** live inventory nodes by last-scan age (≤ 30, 31–60, 61–90, > 90 days, never) per LOB / MSP and node type.
+- All three export to Excel and are included in the executive report.
+
+## OS and EDR feasibility
+
+**OS** is resolved for every asset in this order:
+1. the CrowdStrike agent's OS;
+2. the inventory's OS column;
+3. the VA scan.
+
+For the VA scan, Nessus plugin **11936 "OS Identification"** gives a line such as `Remote operating system : Microsoft Windows Server 2019 Standard`. When several guesses are listed, the first is used. An optional "Operating System" column in the scan export is used if the plugin is absent. Keep severity None/Info rows in the export so plugin 11936 is included.
+
+**EDR feasibility** is decided by the console, not taken from the inventory sheet. It depends only on the OS and node type; Live / Non Live does not matter. Each node gets one of three values: **Feasible**, **Legacy** or **Not feasible**.
+
+The OS is checked against what the supported CrowdStrike sensors run on.
+
+**Sensor builds**
+- Every sync fetches the N / N-1 / N-2 builds per platform, and the supported Linux kernel list, from the Sensor update policies API.
+- The API client needs the **Sensor update policies: Read** scope. The page also has a Refresh button.
+- A sensor older than N-2 is end of support. The sensor level shown on CrowdStrike assets uses these builds.
+
+**OS support catalog** (Supported / Legacy / Not supported)
+- CrowdStrike publishes the full supported-OS matrix only in its support portal. So the catalog starts from a built-in list, with Linux taken from CrowdStrike's kernel data when it has been fetched.
+- Edit any status on **CrowdStrike → EDR feasibility**; your edits win.
+- Matching ignores vendor wording ("Red Hat Enterprise Linux 8.8" = "RHEL 8"), and the longest match wins.
+
+**Result per node**
+- **Legacy OS:** Legacy, whether or not an agent is installed.
+- **Not supported OS:** not feasible (Legacy if an agent is somehow installed).
+- **Supported or unknown OS with an agent:** feasible.
+- **Otherwise:** node type / domain rules can make it not feasible.
+- **Manual decision:** set per node or for all filtered nodes, and beats everything.
+
+**EDR applicable** = feasible, or Legacy with an agent installed. A Legacy node without an agent is left out of coverage and shows the EDR status "Legacy OS".
+
+Assets in no inventory:
+- If CrowdStrike has them, they are feasible and count in the applicable total on All inventory.
+- Anything found only by a VA scan or the NIAM dump is **Unidentified**. It counts in the total but not in the applicable count.
+
+## NIAM dump and integrations
+
+**Integrations → Upload NIAM dump** (or the Upload center) takes a sheet with **Host** (IP) and **NE ID**; other columns
+(NE name, type, vendor, circle…) are kept. Each upload is a full snapshot: nodes missing from a newer dump are marked
+*dropped*, not deleted. Every node shows its EDR status, LOB / MSP and open vulnerabilities, NE IDs appear in Asset 360
+(you can also search by NE ID), and everything exports to Excel.
+
+## IPv4 and IPv6
+
+Every IP that is stored or searched is normalised first, so the same address always matches however it was typed:
+IPv4 with leading zeros or a port (`010.001.001.005`, `10.1.1.5:443`), IPv6 in any case or compression
+(`2001:DB8:0:0::1` = `2001:db8::1`), `[addr]:port`, `%zone` suffixes and IPv4-mapped IPv6 (`::ffff:10.0.0.1`).
+Cells with several IPs use the first one. Searches accept exact IPs, IPv4 prefixes (`10.20.`) and CIDR for both versions
+(`10.20.0.0/16`, `2001:db8::/48`). Existing databases are converted once on the first start after upgrading.
 
 ## LOB inventory
 - **Templates** map the LOB spreadsheet's columns to the standard fields: IP, Node Name, Node Type, Domain, Live/Non Live, OS, EDR Feasible,

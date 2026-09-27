@@ -2,7 +2,7 @@
 import * as React from "react";
 import * as Popover from "@radix-ui/react-popover";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { ArrowDown, ArrowUp, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Columns3, Download, RotateCcw } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Columns3, Download, GripVertical, RotateCcw } from "lucide-react";
 import { api, downloadExcel } from "@/lib/api";
 import { fmtN } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -78,8 +78,35 @@ export function DataTable<T extends Record<string, any>>(p: Props<T>) {
       if (p.storageKey) localStorage.setItem("cols:" + p.storageKey, JSON.stringify([...h]));
     } catch {}
   };
+  // user-chosen column order (drag in the Columns menu), saved per table
+  const [order, setOrder] = React.useState<string[]>([]);
+  React.useEffect(() => {
+    if (!p.storageKey) return;
+    try {
+      const s = localStorage.getItem("colorder:" + p.storageKey);
+      if (s) setOrder(JSON.parse(s));
+    } catch {}
+  }, [p.storageKey]);
+  const saveOrder = (o: string[]) => {
+    setOrder(o);
+    try {
+      if (p.storageKey) localStorage.setItem("colorder:" + p.storageKey, JSON.stringify(o));
+    } catch {}
+  };
+  const ordered = React.useMemo(() => {
+    if (!order.length) return p.columns;
+    const pos = new Map(order.map((k, i) => [k, i]));
+    // columns missing from the saved order keep their default neighbours
+    return [...p.columns].map((c, i) => ({ c, i })).sort((a, b) => (pos.get(a.c.key) ?? a.i - 0.5) - (pos.get(b.c.key) ?? b.i - 0.5)).map((x) => x.c);
+  }, [order, p.columns]);
+  const move = (key: string, to: number) => {
+    const keys = ordered.map((c) => c.key).filter((k) => k !== key);
+    keys.splice(Math.max(0, Math.min(keys.length, to)), 0, key);
+    saveOrder(keys);
+  };
+  const [dragKey, setDragKey] = React.useState<string | null>(null);
   const [expanded, setExpanded] = React.useState<Set<string>>(new Set());
-  const cols = p.columns.filter((c) => !hidden.has(c.key));
+  const cols = ordered.filter((c) => !hidden.has(c.key));
   const rows = q.data?.rows || [];
   const total = q.data?.total ?? 0;
   const pages = Math.max(1, Math.ceil(total / size));
@@ -112,15 +139,21 @@ export function DataTable<T extends Record<string, any>>(p: Props<T>) {
             <Button size="sm"><Columns3 /> Columns</Button>
           </Popover.Trigger>
           <Popover.Portal>
-            <Popover.Content align="end" sideOffset={6} className="z-50 max-h-[420px] w-60 overflow-y-auto rounded-xl border border-border bg-surface p-2 shadow-xl scroll-thin">
-              <div className="flex items-center gap-2 px-1.5 pb-2 text-xs">
+            <Popover.Content align="end" side="bottom" sideOffset={6} collisionPadding={10} style={{ maxHeight: "min(460px, var(--radix-popover-content-available-height))" }} className="z-50 w-64 overflow-y-auto rounded-xl border border-border bg-surface p-2 shadow-xl scroll-thin">
+              <div className="flex items-center gap-2 px-1.5 pb-1 text-xs">
                 <b>Columns</b>
                 <span className="flex-1" />
                 <button className="text-accent-fg hover:underline" onClick={() => saveHidden(new Set())}>All</button>
-                <button className="text-accent-fg hover:underline" onClick={() => saveHidden(new Set(p.columns.filter((c) => c.hidden).map((c) => c.key)))}>Default</button>
+                <button className="text-accent-fg hover:underline" onClick={() => { saveHidden(new Set(p.columns.filter((c) => c.hidden).map((c) => c.key))); saveOrder([]); }}>Default</button>
               </div>
-              {p.columns.map((c) => (
-                <label key={c.key} className="flex cursor-pointer items-center gap-2 rounded-md px-1.5 py-1 text-[12.5px] hover:bg-surface-2">
+              <div className="px-1.5 pb-2 text-[11px] text-muted">Drag ⋮⋮ to reorder</div>
+              {ordered.map((c, i) => (
+                <label key={c.key} draggable
+                  onDragStart={(e) => { setDragKey(c.key); e.dataTransfer.effectAllowed = "move"; }}
+                  onDragOver={(e) => { e.preventDefault(); if (dragKey && dragKey !== c.key) move(dragKey, i); }}
+                  onDragEnd={() => setDragKey(null)}
+                  className={cn("group/col flex cursor-pointer items-center gap-2 rounded-md px-1.5 py-1 text-[12.5px] hover:bg-surface-2", dragKey === c.key && "bg-accent-soft")}>
+                  <GripVertical className="size-3.5 shrink-0 cursor-grab text-muted" />
                   <input
                     type="checkbox"
                     className="accent-[var(--accent)]"
@@ -131,7 +164,11 @@ export function DataTable<T extends Record<string, any>>(p: Props<T>) {
                       saveHidden(h);
                     }}
                   />
-                  {c.label || c.key}
+                  <span className="flex-1 truncate">{c.label || c.key}</span>
+                  <span className="hidden gap-0.5 group-hover/col:flex">
+                    <button type="button" title="Move up" disabled={i === 0} onClick={(e) => { e.preventDefault(); move(c.key, i - 1); }} className="rounded p-0.5 hover:bg-surface-3 disabled:opacity-30"><ArrowUp className="size-3" /></button>
+                    <button type="button" title="Move down" disabled={i === ordered.length - 1} onClick={(e) => { e.preventDefault(); move(c.key, i + 1); }} className="rounded p-0.5 hover:bg-surface-3 disabled:opacity-30"><ArrowDown className="size-3" /></button>
+                  </span>
                 </label>
               ))}
             </Popover.Content>

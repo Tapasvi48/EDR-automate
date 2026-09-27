@@ -74,13 +74,13 @@ export function TagWizard({ lob, mspId, open, onOpenChange }: { lob: { id: numbe
         <div className="py-8 text-center">
           <div className="mx-auto mb-3 grid size-12 place-items-center rounded-full bg-good-soft"><Check className="size-6 text-good-fg" /></div>
           <div className="text-[17px] font-semibold">{fmtN(done.tagged)} agents tagged</div>
-          <div className="mt-1 text-muted">{fmtN(done.unlisted)} are not in {lob.name}&apos;s inventory and now show as <b>Not in inventory</b>.</div>
+          <div className="mt-1 text-muted">{fmtN(done.unlisted)} are not in {lob.name}&apos;s inventory and now show as <b>EDR only</b>.</div>
         </div>
       ) : (
         <>
           <Callout className="mb-4">
             Use this for agents that report to Falcon for this LOB but are not in its inventory yet. Upload a sheet with an <b>Agent ID</b> column (hostname or IP also work) and optionally an <b>MSP</b> column.
-            Tagged agents count toward the LOB/MSP; the ones missing from the inventory are reported as <b>Not in inventory</b>.
+            Tagged agents count toward the LOB/MSP; the ones missing from the inventory are reported as <b>EDR only</b>.
           </Callout>
           <div className="mb-4 grid gap-3 md:grid-cols-3">
             <Field label="MSP"><Select className="max-w-none" value={msp} onChange={(v) => { setMsp(v); setPreview(null); }} placeholder="From MSP column in file" options={lobMsps.map((m) => ({ value: m.id, label: m.name }))} /></Field>
@@ -107,7 +107,7 @@ export function TagWizard({ lob, mspId, open, onOpenChange }: { lob: { id: numbe
               {preview && (
                 <>
                   <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
-                    {[["Rows", preview.total, ""], ["Matched in Falcon", preview.resolved, "text-good-fg"], ["Not found", preview.unresolved, "text-crit-fg"], ["Already in inventory", preview.in_inventory, ""], ["Not in inventory", preview.unlisted, "text-violet-fg"]].map(([l, n, c]) => (
+                    {[["Rows", preview.total, ""], ["Matched in Falcon", preview.resolved, "text-good-fg"], ["Not found", preview.unresolved, "text-crit-fg"], ["Already in inventory", preview.in_inventory, ""], ["EDR only", preview.unlisted, "text-violet-fg"]].map(([l, n, c]) => (
                       <div key={l as string} className="rounded-xl border border-border bg-surface-2 px-3 py-2.5">
                         <div className="text-[11.5px] text-muted">{l}</div>
                         <div className={cn("text-[22px] font-semibold tabular", c as string)}>{fmtN(n)}</div>
@@ -120,7 +120,7 @@ export function TagWizard({ lob, mspId, open, onOpenChange }: { lob: { id: numbe
                       { key: "value", label: "Value", render: (r: any) => <Mono>{r.value}</Mono> },
                       { key: "aid", label: "Agent ID", render: (r: any) => <Mono>{r.aid || "–"}</Mono> },
                       { key: "msp", label: "MSP", render: (r: any) => r.msp || <span className="text-muted">Unassigned</span> },
-                      { key: "status", label: "Result", render: (r: any) => <Badge tone={r.status === "Not in inventory" ? "violet" : r.status === "Already in inventory" ? "good" : "crit"}>{r.status}</Badge> },
+                      { key: "status", label: "Result", render: (r: any) => <Badge tone={r.status === "EDR only" ? "violet" : r.status === "Already in inventory" ? "good" : "crit"}>{r.status}</Badge> },
                     ]} />
                   </div>
                 </>

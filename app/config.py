@@ -17,9 +17,16 @@ FALCON_BASE_URL = _env("FALCON_BASE_URL", "us-1")
 FALCON_MEMBER_CID = _env("FALCON_MEMBER_CID")
 
 
+# DEMO=1: sample data in its own database file (data/demo.db) - the real database is never touched; syncing is off
+DEMO = _env("DEMO").lower() in ("1", "true", "yes")
 DB_PATH = Path(_env("DB_PATH", "data/edr_assets.db"))
 if not DB_PATH.is_absolute():
     DB_PATH = BASE_DIR / DB_PATH
+if DEMO:
+    # always a separate file next to the real one (DB_PATH from .env / Docker must never receive sample data)
+    DB_PATH = Path(_env("DEMO_DB_PATH") or DB_PATH.with_name("demo.db"))
+    if not DB_PATH.is_absolute():
+        DB_PATH = BASE_DIR / DB_PATH
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 UPLOAD_DIR = DB_PATH.parent / "uploads"
@@ -30,6 +37,9 @@ APP_PASSWORD = _env("APP_PASSWORD")
 
 # Defaults for settings editable from the UI (stored in the settings table).
 DEFAULT_SETTINGS = {
+    # MSP scorecard targets
+    "target_coverage": "95", "target_offline_pct": "5", "target_scan_days": "30", "target_scan_coverage": "90",
+    "target_max_critical": "0", "target_max_risk_critical": "0",
     # Host is online per Falcon but last_seen is older than this -> "stale online"
     "stale_online_hours": "1",
     # Falcon auto-removes hosts inactive for this many days (console setting)

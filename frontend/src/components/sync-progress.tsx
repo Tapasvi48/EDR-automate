@@ -87,7 +87,7 @@ export function SyncProgress({ status, compact }: { status: any; compact?: boole
 /** Banner / empty state shown when the CrowdStrike API is not connected, or the first sync is running. */
 export function NotConnected({ big }: { big?: boolean }) {
   const { data: st } = useSyncStatus();
-  if (!st) return null;
+  if (!st || st.demo) return null;
   const synced = st.runs?.some((r: any) => r.status === "ok");
   if (st.configured && synced) return null;
   if (st.configured && st.running) {

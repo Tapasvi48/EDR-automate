@@ -2,13 +2,13 @@
 import * as React from "react";
 import Link from "next/link";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Copy, History, RefreshCw } from "lucide-react";
+import { Copy, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { fmtDt, fmtRel, hoursSince } from "@/lib/format";
-import { Badge, Button, Callout, Card, KV, Loading, SectionTitle, Sheet, Tabs } from "./ui";
+import { Badge, Button, Callout, Card, KV, Loading, Sheet, Tabs } from "./ui";
 import { SimpleTable } from "./data-table";
-import { ActualBadge, EventBadge, EventDetails, HostFlags, HostStatus, Live, Mono, VerifBadge, When, YN, removalLabel } from "./badges";
+import { ActualBadge, FeasibleBadge, HostFlags, HostStatus, Live, Mono, SevCounts, SeverityBadge, VerifBadge, When, YN, removalLabel } from "./badges";
 
 const Ctx = React.createContext<{ open: (aid: string) => void }>({ open: () => {} });
 export const useHostDrawer = () => React.useContext(Ctx);
@@ -84,17 +84,12 @@ function HostSheet({ aid, onClose, onBack, canBack }: { aid: string; onClose: ()
               Falcon reports this host <b>online</b> but it last checked in {fmtRel(h.last_seen)}. The sensor may be connected but not reporting normally (proxy, sleep/hibernate, RFM or cloud connectivity).
             </Callout>
           )}
-          {h.is_reinstall ? (
-            <Callout tone="info" className="mb-3">
-              <b>Reinstall:</b> an older agent ID had the same connection IP. See the “Related agents” tab.
-            </Callout>
-          ) : null}
           <Tabs value={tab} onChange={setTab} tabs={[
             { id: "overview", label: "Overview" },
             { id: "ips", label: "IP / NIC history", count: d.ip_history.length },
-            { id: "related", label: "Related agents", count: d.same_ip.length + d.same_hostname.length + (h.reinstall_of?.length || 0) + d.replaced_by.length },
+            { id: "related", label: "Duplicates", count: d.same_ip.length },
             { id: "inventory", label: "Inventory", count: d.inventory.length },
-            { id: "activity", label: "Activity", count: d.events.length },
+            { id: "vulns", label: "Vulnerabilities", count: (d.vulns || []).filter((v: any) => v.status === "open").length },
             { id: "raw", label: "Raw" },
           ]} />
 
@@ -102,8 +97,8 @@ function HostSheet({ aid, onClose, onBack, canBack }: { aid: string; onClose: ()
             <div className="space-y-4">
               <Card className="p-4">
                 <KV items={[
-                  ["Local IP", <Mono key="a">{h.local_ip}</Mono>], ["External IP", <Mono key="b">{h.external_ip}</Mono>],
-                  ["Connection IP", <Mono key="c">{h.connection_ip}</Mono>], ["Default gateway", h.default_gateway_ip],
+                  ["Connection IP", <Mono key="c">{h.connection_ip}</Mono>], ["Local IP", <Mono key="a">{h.local_ip}</Mono>],
+                  ["External IP", <Mono key="b">{h.external_ip}</Mono>], ["Default gateway", h.default_gateway_ip],
                   ["MAC", <Mono key="d">{h.mac_address}</Mono>], ["Platform", h.platform_name],
                   ["OS", h.os_version], ["OS product", h.os_product_name],
                   ["OS build / kernel", h.os_build || h.kernel_version], ["Host type", h.product_type_desc],
@@ -121,16 +116,16 @@ function HostSheet({ aid, onClose, onBack, canBack }: { aid: string; onClose: ()
                   ["First synced to DB", fmtDt(h.db_first_synced)], ["Last synced", fmtDt(h.db_last_synced)],
                 ]} />
               </Card>
-              {d.inventory.length > 0 && (
-                <Card className="p-4">
-                  <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted">Inventory ({d.inventory.map((i: any) => i.lob).join(", ")})</div>
-                  <KV items={[
-                    ["Node type", d.inventory[0].node_type], ["Domain", d.inventory[0].domain], ["Live / Non Live", <Live key="l" v={d.inventory[0].live} />],
-                    ["EDR feasible", <YN key="f" v={d.inventory[0].edr_feasible} />], ["EDR installed (inventory)", <YN key="i" v={d.inventory[0].edr_installed} />],
-                    ["Verification", <VerifBadge key="v" v={d.inventory[0].verification} />], ["Remarks", d.inventory[0].remarks],
-                  ]} />
-                </Card>
-              )}
+              <Card className="p-4">
+                <KV items={[
+                  ["In NIAM dump", (d.niam || []).length
+                    ? <span key="n" className="flex items-center gap-2"><Badge tone="good">Yes</Badge><span className="text-xs">NE ID {d.niam.map((n: any) => n.ne_id).join(", ")}</span></span>
+                    : <span key="n" className="flex items-center gap-2"><Badge tone="neutral">No</Badge><span className="text-xs text-muted">{h.local_ip ? `${h.local_ip} is not in the latest NIAM dump` : "no local IP"}</span></span>],
+                  ["LOB inventory", d.inventory.length
+                    ? <button key="i" className="text-accent-fg hover:underline" onClick={() => setTab("inventory")}>{d.inventory.map((i: any) => `${i.lob}${i.msp ? " · " + i.msp : ""}`).join(", ")} — show all details</button>
+                    : <span key="i" className="text-muted">Not in any LOB inventory</span>],
+                ]} />
+              </Card>
             </div>
           )}
 
@@ -153,67 +148,63 @@ function HostSheet({ aid, onClose, onBack, canBack }: { aid: string; onClose: ()
           )}
 
           {tab === "related" && (
-            <div className="space-y-4">
-              {h.reinstall_of?.length > 0 && (
-                <div>
-                  <SectionTitle className="mt-0">Reinstall of — older agent IDs</SectionTitle>
-                  <Card><SimpleTable rows={h.reinstall_of} columns={[
-                    { key: "hostname", label: "Hostname", render: (r: any) => <PeerLink aid={r.aid}>{r.hostname || r.aid}</PeerLink> },
-                    { key: "shared_ip", label: "Shared connection IP", render: (r: any) => <Mono>{r.shared_ip || r.ip}</Mono> },
-                    { key: "ip", label: "Its current connection IP", render: (r: any) => <Mono>{r.ip}</Mono> },
-                    { key: "state", label: "Console state" },
-                    { key: "first_seen", label: "First seen", render: (r: any) => fmtDt(r.first_seen) },
-                    { key: "last_seen", label: "Last seen", render: (r: any) => fmtDt(r.last_seen) },
-                  ]} /></Card>
-                </div>
-              )}
-              {d.replaced_by.length > 0 && (
-                <div>
-                  <SectionTitle className="mt-0">Replaced by newer agent ID</SectionTitle>
-                  <Card><SimpleTable rows={d.replaced_by} columns={[
-                    { key: "hostname", label: "Hostname", render: (r: any) => <PeerLink aid={r.aid}>{r.hostname}</PeerLink> },
-                    { key: "local_ip", label: "IP", render: (r: any) => <Mono>{r.local_ip}</Mono> },
-                    { key: "first_seen", label: "First seen", render: (r: any) => fmtDt(r.first_seen) },
-                  ]} /></Card>
-                </div>
-              )}
-              <div>
-                <SectionTitle className="mt-0">Other agents with the same connection IP and local IP ({d.same_ip.length})</SectionTitle>
-                <Card><SimpleTable rows={d.same_ip} columns={peerCols} empty="No other agent ID has this connection IP and local IP" /></Card>
-              </div>
-              <div>
-                <SectionTitle className="mt-0">Other agents with the same hostname ({d.same_hostname.length})</SectionTitle>
-                <Card><SimpleTable rows={d.same_hostname} columns={peerCols} empty="No other agent ID has this hostname" /></Card>
-              </div>
+            <div className="space-y-3">
+              <Callout>Duplicate agents: other agent IDs with the same <b>connection IP and local IP</b> as this host — the same machine with an old sensor record left behind. With two or more online at once it is a routing conflict instead.</Callout>
+              <Card><SimpleTable rows={d.same_ip} columns={peerCols} empty="No other agent ID has this connection IP and local IP" /></Card>
             </div>
           )}
 
           {tab === "inventory" && (
-            <Card>
-              <SimpleTable rows={d.inventory} empty="This host is not in any LOB inventory" columns={[
-                { key: "lob", label: "LOB", render: (r: any) => <Link className="text-accent-fg hover:underline" href={`/lob/?id=${r.lob_id}&q=${encodeURIComponent(r.ip || r.node_name)}`}>{r.lob}</Link> },
-                { key: "node_name", label: "Node name" }, { key: "ip", label: "IP", render: (r: any) => <Mono>{r.ip}</Mono> },
-                { key: "node_type", label: "Node type" }, { key: "domain", label: "Domain" },
-                { key: "live", label: "Live", render: (r: any) => <Live v={r.live} /> },
-                { key: "edr_feasible", label: "EDR feasible", render: (r: any) => <YN v={r.edr_feasible} /> },
-                { key: "edr_installed", label: "EDR installed", render: (r: any) => <YN v={r.edr_installed} /> },
-                { key: "edr_actual", label: "EDR actual", render: (r: any) => <ActualBadge v={r.edr_actual} /> },
-                { key: "verification", label: "Verification", render: (r: any) => <VerifBadge v={r.verification} /> },
-                { key: "match_method", label: "Match", render: (r: any) => <Badge>{r.match_method}</Badge> },
-                { key: "remarks", label: "Remarks", wrap: true },
-              ]} />
-            </Card>
+            d.inventory.length ? (
+              <div className="space-y-4">
+                {d.inventory.map((r: any) => (
+                  <Card key={`${r.lob_id}|${r.item_key}`} className="p-4">
+                    <div className="mb-3 flex flex-wrap items-baseline gap-2">
+                      <span className="text-[14px] font-semibold">Inventory ({r.lob})</span>
+                      {r.msp && <Badge tone="outline">{r.msp}</Badge>}
+                      {r.version_no && <Badge tone="info">v{r.version_no}</Badge>}
+                      <span className="text-xs text-muted">{r.filename}{r.uploaded_at ? ` · uploaded ${fmtRel(r.uploaded_at)}` : ""}</span>
+                      <Link className="ml-auto text-xs text-accent-fg hover:underline" href={`/lob/?id=${r.lob_id}&tab=inventory&q=${encodeURIComponent(r.ip || r.node_name)}`}>Open in LOB</Link>
+                    </div>
+                    <KV items={[
+                      ["IP", <Mono key="ip">{r.ip}</Mono>], ["Node name", r.node_name], ["MSP", r.msp], ["Node type", r.node_type],
+                      ["Domain", r.domain], ["Live / Non Live", <Live key="l" v={r.live} />], ["OS (sheet)", r.os || "–"],
+                      ["EDR feasible", r.feasible ? <span key="fd" className="inline-flex items-center gap-1.5"><FeasibleBadge v={r.feasible} reason={r.feasible_reason} /><span className="text-xs text-muted">{r.feasible_reason}</span></span> : "–"],
+                      ["EDR feasible (sheet)", <YN key="f" v={r.edr_feasible} />], ["EDR installed (inventory)", <YN key="i" v={r.edr_installed} />],
+                      ["Remarks", r.remarks],
+                      ...Object.entries(r.extra || {}).map(([k, v]) => [k, String(v)] as [string, React.ReactNode]),
+                    ]} />
+                    <div className="mt-3 border-t border-border pt-3">
+                      <KV items={[
+                        ["EDR status (matched)", <ActualBadge key="a" v={r.edr_actual} />], ["Inventory claim check", <VerifBadge key="v" v={r.verification} />],
+                        ["Matched by", r.match_method], ["Change in latest version", r.change_tag || "–"],
+                      ]} />
+                    </div>
+                  </Card>
+                ))}
+              </div>
+            ) : <Card className="p-8 text-center text-muted">This host is not in any LOB inventory</Card>
           )}
 
-          {tab === "activity" && (
-            <Card className="px-4 py-2">
-              {d.events.length ? d.events.map((e: any, i: number) => (
-                <div key={i} className="grid grid-cols-[150px_150px_1fr] gap-3 border-b border-border py-2 text-[12.5px] last:border-0">
-                  <span className="text-muted">{fmtDt(e.ts)}</span>
-                  <span><EventBadge e={e.event} /></span>
-                  <span><EventDetails e={e} /></span>
-                </div>
-              )) : <div className="py-6 text-center text-muted"><History className="mx-auto mb-2 size-5" />No events recorded</div>}
+          {tab === "vulns" && (
+            <Card>
+              <div className="flex flex-wrap items-center gap-3 px-4 py-3 text-[12.5px]">
+                <SevCounts c={(d.vulns || []).filter((v: any) => v.status === "open" && v.sev_rank === 4).length}
+                  h={(d.vulns || []).filter((v: any) => v.status === "open" && v.sev_rank === 3).length}
+                  m={(d.vulns || []).filter((v: any) => v.status === "open" && v.sev_rank === 2).length}
+                  l={(d.vulns || []).filter((v: any) => v.status === "open" && v.sev_rank === 1).length} />
+                <span className="text-muted">Last scan: {d.scans?.length ? `${fmtDt(d.scans[0].scanned_at)} (${d.scans[0].lob})` : "never scanned"}</span>
+                <Link className="ml-auto text-accent-fg hover:underline" href={`/ip-search/?q=${h.local_ip}`}>Open in Asset 360</Link>
+              </div>
+              <SimpleTable rows={d.vulns || []} maxHeight="55vh" empty={`No vulnerability findings for ${h.local_ip || "this host"}`} columns={[
+                { key: "severity", label: "Severity", render: (r: any) => <SeverityBadge s={r.severity} /> },
+                { key: "name", label: "Vulnerability", wrap: true },
+                { key: "lob", label: "LOB" },
+                { key: "port", label: "Port", render: (r: any) => `${r.port || ""}${r.protocol ? "/" + r.protocol : ""}` },
+                { key: "cve", label: "CVE", wrap: true },
+                { key: "last_observed", label: "Last observed", render: (r: any) => fmtDt(r.last_observed) },
+                { key: "status", label: "Status", render: (r: any) => r.status === "fixed" ? <span className="text-good-fg">Fixed</span> : "Open" },
+              ]} />
             </Card>
           )}
 

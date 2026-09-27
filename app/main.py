@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import config, db, falcon, inventory, queries, sync
+from . import asset360, commatrix, config, db, falcon, feasibility, sensor_support, filetemplates, sod, inventory, legacy, niam, posture, queries, registry, sync, vulns
 from .exporter import xlsx_response
 from .extra import router as extra_router
 
@@ -21,12 +21,21 @@ log = logging.getLogger("app")
 @asynccontextmanager
 async def lifespan(app):
     db.init_db()
+    if config.DEMO:
+        from . import demo
+        with db.get_conn() as c:
+            if demo.seed(c):
+                c.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('match_rev', ?)", (inventory.MATCH_REV,))
     with db.get_conn() as c:
         settings = db.get_settings(c)
         sync.compute_devices(c, settings)  # columns / matching rules may be new after an upgrade
         sync.detect_reinstalls(c, settings, emit_events=False)
         inventory.tag_duplicates(c)
-    sync.start_scheduler()
+        if settings.get("match_rev") != inventory.MATCH_REV:  # matching rules changed in this release
+            inventory.refresh_matches(c)
+            c.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('match_rev', ?)", (inventory.MATCH_REV,))
+    if not config.DEMO:
+        sync.start_scheduler()
     yield
 
 
@@ -72,6 +81,7 @@ def meta():
             return [r[0] for r in c.execute(f"SELECT DISTINCT {col} FROM hosts WHERE {where} AND {col}<>'' ORDER BY 1 COLLATE NOCASE")]
         return {
             "connected": falcon.is_configured(),
+            "demo": config.DEMO,
             "inventory_fields": config.INVENTORY_FIELDS,
             "key_fields": inventory.KEY_FIELDS,
             "platforms": distinct("platform_name"),
@@ -173,7 +183,7 @@ def _has_synced():
 
 
 def _start_sync(trigger):
-    if sync.STATUS["running"] or not falcon.is_configured():
+    if config.DEMO or sync.STATUS["running"] or not falcon.is_configured():
         return False
     threading.Thread(target=sync.run_sync, kwargs={"trigger": trigger}, daemon=True).start()
     return True
@@ -181,6 +191,8 @@ def _start_sync(trigger):
 
 @app.post("/api/sync")
 def trigger_sync():
+    if config.DEMO:
+        return {"ok": False, "message": "Sample data mode: syncing is off. Start without --demo to use your CrowdStrike tenant."}
     if not falcon.is_configured():
         return {"ok": False, "message": "Connect CrowdStrike first (Sync & settings → Connection)"}
     if sync.STATUS["running"]:
@@ -195,7 +207,7 @@ def sync_status():
         runs = db.rows(c, "SELECT * FROM sync_runs ORDER BY id DESC LIMIT 50")
         tail = db.rows(c, "SELECT ts, level, step, message FROM sync_log WHERE run_id=? ORDER BY id DESC LIMIT 12",
                        (sync.STATUS["run_id"],)) if sync.STATUS["run_id"] else []
-    return {**sync.STATUS, "runs": runs, "log_tail": list(reversed(tail)), "configured": falcon.is_configured(),
+    return {**sync.STATUS, "runs": runs, "log_tail": list(reversed(tail)), "configured": falcon.is_configured(), "demo": config.DEMO,
             "interval_minutes": int(db.get_settings().get("sync_interval_minutes") or 0), "next_sync_at": sync.next_sync_at()}
 
 
@@ -257,7 +269,7 @@ def hosts_export(request: Request):
         frm, where, params, order = _host_query(c, p)
         rows = db.rows(c, f"SELECT {queries.HOST_LIST_COLS} FROM {frm} {where} {order}", params)
     for r in rows:
-        r["is_reinstall"] = "Yes" if r["is_reinstall"] else ""
+        r["niam_text"] = "Yes" if r["niam_ne_ids"] else "No"
     return xlsx_response([("Hosts", queries.HOST_EXPORT_COLUMNS, rows)], p.get("name") or "edr_hosts")
 
 
@@ -287,10 +299,24 @@ def host_detail(aid: str):
         replaced_by = [r for r in db.rows(c, "SELECT aid, hostname, local_ip, connection_ip, first_seen, reinstall_of FROM hosts WHERE is_reinstall=1 AND first_seen > ?",
                                           (h["first_seen"] or "",))
                        if aid in (r.pop("reinstall_of") or "")]
-        inv = db.rows(c, """SELECT l.name lob, l.id lob_id, ic.* FROM inventory_current ic JOIN lobs l ON l.id=ic.lob_id
-                            WHERE ic.matched_aid=?""", (aid,))
+        inv = db.rows(c, """SELECT l.name lob, l.id lob_id, v.version_no, v.uploaded_at, v.filename, ic.* FROM inventory_current ic
+                            JOIN lobs l ON l.id=ic.lob_id LEFT JOIN inventory_versions v ON v.id=l.current_version_id
+                            WHERE ic.matched_aid=? AND ic.edr_state<>'Not Installed'""", (aid,))
+        for r in inv:
+            r["extra"] = db.jloads(r.get("extra"), {})
+        niam = db.rows(c, """SELECT ne_id, host, ip, extra, first_seen_at, last_seen_at FROM niam_nodes
+                             WHERE present=1 AND ip=? AND ip<>''""", (h["local_ip"] or "",))
+        for n in niam:
+            n["extra"] = db.jloads(n["extra"], {})
+        vulns, scans = [], []
+        if h["local_ip"]:
+            vulns = db.rows(c, """SELECT f.id, l.name lob, f.severity, f.sev_rank, f.name, f.plugin_id, f.port, f.protocol, f.cve,
+                f.exploit_ease, f.first_discovered, f.last_observed, f.status, f.fixed_at FROM vuln_findings f
+                JOIN lobs l ON l.id=f.lob_id WHERE f.ip=? ORDER BY f.status='open' DESC, f.sev_rank DESC LIMIT 500""", (h["local_ip"],))
+            scans = db.rows(c, """SELECT l.name lob, sh.scanned_at FROM vuln_scan_hosts sh JOIN lobs l ON l.id=sh.lob_id
+                WHERE sh.ip=? ORDER BY sh.scanned_at DESC""", (h["local_ip"],))
     return {"host": h, "ip_history": ips, "events": events, "same_ip": same_ip, "same_hostname": same_hn,
-            "replaced_by": replaced_by, "inventory": inv}
+            "replaced_by": replaced_by, "inventory": inv, "vulns": vulns, "scans": scans, "niam": niam}
 
 
 @app.post("/api/hosts/{aid}/nic-refresh")
@@ -455,10 +481,11 @@ def delete_lob(lob_id: int):
     with db.get_conn() as c:
         vids = [r[0] for r in c.execute("SELECT id FROM inventory_versions WHERE lob_id=?", (lob_id,))]
         c.executemany("DELETE FROM inventory_rows WHERE version_id=?", [(v,) for v in vids])
-        for t in ("inventory_changes", "inventory_current", "inventory_versions", "msps", "agent_tags", "lob_types"):
+        for t in ("inventory_changes", "inventory_current", "inventory_versions", "msps", "agent_tags", "lob_types",
+                  "vuln_findings", "vuln_scans", "vuln_scan_hosts", "vuln_assets", "asset_risk", "msp_daily"):
             c.execute(f"DELETE FROM {t} WHERE lob_id=?", (lob_id,))
         c.execute("DELETE FROM lobs WHERE id=?", (lob_id,))
-        inventory.rebuild_host_map(c)
+        inventory.refresh_matches(c)  # full re-join after LOB / MSP / tag changes
     return {"ok": True}
 
 
@@ -548,7 +575,7 @@ def delete_lob_type(type_id: int):
         c.execute("DELETE FROM inventory_current WHERE type_id=?", (type_id,))
         c.execute("DELETE FROM lob_types WHERE id=?", (type_id,))
         inventory.tag_duplicates(c, t["lob_id"])
-        inventory.rebuild_host_map(c)
+        inventory.refresh_matches(c)  # full re-join after LOB / MSP / tag changes
     return {"ok": True}
 
 
@@ -594,7 +621,7 @@ def delete_msp(msp_id: int):
             raise ValueError(f"{n} inventory nodes still belong to this MSP. Upload an inventory without them first.")
         c.execute("DELETE FROM agent_tags WHERE msp_id=?", (msp_id,))
         c.execute("DELETE FROM msps WHERE id=?", (msp_id,))
-        inventory.rebuild_host_map(c)
+        inventory.refresh_matches(c)  # full re-join after LOB / MSP / tag changes
     return {"ok": True}
 
 
@@ -624,6 +651,7 @@ def tags_commit(lob_id: int, data: dict = Body(...)):
         scope = data.get("replace")  # None | 'lob' | 'msp'
         replace_scope = "lob" if scope == "lob" else (data.get("msp_id") if scope == "msp" and data.get("msp_id") else None)
         n = inventory.commit_tags(c, lob_id, rows, parsed["filename"], replace_scope)
+        inventory.refresh_matches(c)  # tags change LOB / MSP attribution everywhere
     return {**summary, "tagged": n}
 
 
@@ -658,14 +686,15 @@ def tags_remove(lob_id: int, data: dict = Body(...)):
                 c.execute("DELETE FROM agent_tags WHERE lob_id=?", (lob_id,))
         else:
             c.executemany("DELETE FROM agent_tags WHERE lob_id=? AND aid=?", [(lob_id, a) for a in data.get("aids", [])])
-        inventory.rebuild_host_map(c)
+        inventory.refresh_matches(c)  # full re-join after LOB / MSP / tag changes
     return {"ok": True}
 
 
 INV_BASE_COLS = [("lob", "LOB"), ("msp", "MSP"), ("ip", "IP"), ("node_name", "Node Name"), ("node_type", "Node Type"), ("domain", "Domain"),
                  ("live", "Live/Non Live"), ("os", "OS"), ("edr_feasible", "EDR Feasible"),
                  ("edr_installed", "EDR Installed (Inventory)"), ("remarks", "Remarks")]
-INV_STATUS_COLS = [("coverage_status", "EDR Status"), ("change_tag", "Change Tag"), ("first_version_no", "First Seen in Version"),
+INV_STATUS_COLS = [("coverage_status", "EDR Status"), ("os_resolved", "OS (resolved)"), ("os_source", "OS Source"),
+                   ("feasible", "EDR Feasible (decided)"), ("feasible_reason", "Feasibility Reason"), ("niam_text", "In NIAM"), ("niam_ne_ids", "NIAM NE ID"), ("last_scan", "Last Vulnerability Scan"), ("change_tag", "Change Tag"), ("first_version_no", "First Seen in Version"),
                    ("last_changed_version_no", "Last Changed in Version"), ("edr_actual", "EDR Actual Status"),
                    ("verification", "Verification"), ("match_method", "Match Method"), ("cs_hostname", "Falcon Hostname"),
                    ("cs_last_seen", "Falcon Last Seen"), ("cs_agent_version", "Sensor Version"), ("cs_os", "Falcon OS"),
@@ -675,7 +704,8 @@ INV_SORTS = {"ip": "ic.ip", "node_name": "ic.node_name COLLATE NOCASE", "node_ty
              "live": "ic.live", "os": "ic.os", "edr_feasible": "ic.edr_feasible", "edr_installed": "ic.edr_installed",
              "verification": "ic.verification", "edr_actual": "ic.edr_actual", "change_tag": "ic.change_tag",
              "cs_last_seen": "ic.cs_last_seen", "lob": "l.name", "remarks": "ic.remarks", "msp": "ic.msp COLLATE NOCASE",
-             "coverage_status": "ic.coverage_status", "dup": "(ic.file_dups>0) + (ic.dup_ip>1) + (ic.dup_name>1)"}
+             "coverage_status": "ic.coverage_status", "os_resolved": "ic.os_resolved COLLATE NOCASE", "feasible": "ic.feasible",
+             "dup": "(ic.file_dups>0) + (ic.dup_ip>1) + (ic.dup_name>1)"}
 
 
 def _inventory_query(p, lob_id):
@@ -688,7 +718,9 @@ def _inventory_query(p, lob_id):
         cols = "l.name lob, ic.*"
     else:
         frm = "inventory_current ic JOIN lobs l ON l.id=ic.lob_id"
-        cols = "l.name lob, ic.*"  # msp name is stored on the row
+        cols = """l.name lob, ic.*,
+            (SELECT GROUP_CONCAT(n.ne_id, ', ') FROM niam_nodes n WHERE n.present=1 AND n.ip=ic.ip AND COALESCE(ic.ip,'')<>'') niam_ne_ids,
+            (SELECT MAX(s.scanned_at) FROM vuln_scan_hosts s WHERE s.lob_id=ic.lob_id AND s.ip=ic.ip) last_scan"""  # msp name is on the row
         if lob_id:
             w.append("ic.lob_id=?")
             params.append(lob_id)
@@ -699,7 +731,13 @@ def _inventory_query(p, lob_id):
         if len(terms) > 1:
             ph = ",".join("?" * len(terms))
             w.append(f"(ic.ip IN ({ph}) OR LOWER(ic.node_name) IN ({ph}))")
-            params += terms + [t.lower() for t in terms]
+            params += [db.canon_ip(t) for t in terms] + [t.lower() for t in terms]
+        elif db.is_range_query(q) and ("/" in q or ":" in q):
+            w.append("ip_in(ic.ip, ?)")
+            params.append(q)
+        elif db.is_ip(q):  # exact IP (any IPv4 / IPv6 spelling)
+            w.append("ic.ip = ?")
+            params.append(db.canon_ip(q))
         else:
             like = f"%{q}%"
             w.append("(ic.ip LIKE ? OR ic.node_name LIKE ? OR ic.remarks LIKE ? OR ic.extra LIKE ?"
@@ -707,7 +745,10 @@ def _inventory_query(p, lob_id):
             params += [q + "%", like, like, like] + ([] if version_id else [like])
     filt = ["node_type", "domain", "live", "os", "edr_feasible", "edr_installed"]
     if not version_id:
-        filt += ["verification", "edr_actual", "change_tag", "match_method", "coverage_status", "edr_state"]
+        filt += ["verification", "edr_actual", "change_tag", "match_method", "coverage_status", "edr_state", "feasible", "os_source"]
+        if p.get("os_resolved"):
+            w.append("ic.os_resolved=?")
+            params.append(p["os_resolved"])
         if p.get("type"):
             if p["type"] == "main":
                 w.append("ic.type_id IS NULL")
@@ -720,6 +761,22 @@ def _inventory_query(p, lob_id):
             else:
                 w.append("ic.msp_id=?")
                 params.append(int(p["msp"]))
+        niam_x = "EXISTS (SELECT 1 FROM niam_nodes n WHERE n.present=1 AND n.ip=ic.ip AND COALESCE(ic.ip,'')<>'')"
+        scan_x = "EXISTS (SELECT 1 FROM vuln_scan_hosts s WHERE s.lob_id=ic.lob_id AND s.ip=ic.ip)"
+        if p.get("niam") in ("0", "1"):
+            w.append(niam_x if p["niam"] == "1" else f"NOT {niam_x}")
+        if p.get("scanned") in ("0", "1"):
+            w.append(scan_x if p["scanned"] == "1" else f"NOT {scan_x} AND COALESCE(ic.live,'')<>'Non Live'")
+        gap = p.get("gap")
+        if gap == "edr":
+            w.append("ic.applicable=1 AND ic.edr_state NOT IN ('Online','Offline')")
+        elif gap == "niam":
+            w.append(f"NOT {niam_x}")
+        elif gap == "scan":
+            w.append(f"NOT {scan_x} AND COALESCE(ic.live,'')<>'Non Live'")
+        elif gap == "any":
+            w.append(f"""((ic.applicable=1 AND ic.edr_state NOT IN ('Online','Offline')) OR NOT {niam_x}
+                         OR (NOT {scan_x} AND COALESCE(ic.live,'')<>'Non Live'))""")
         if p.get("pending") == "1":
             w.append("ic.applicable=1 AND ic.edr_state IN ('Not Installed','Hidden','Removed')")
         if p.get("installed") == "1":
@@ -759,10 +816,25 @@ def _inventory_query(p, lob_id):
         params.append(int(p["lob"]))
     if p.get("dup") == "file":
         w.append("ic.file_dups>0")
-    if p.get("applicable") == "1" or p.get("in_scope") == "1":
-        w.append("COALESCE(ic.live,'')<>'Non Live' AND COALESCE(ic.edr_feasible,'')<>'No'")
+    if p.get("applicable") in ("0", "1") or p.get("in_scope") == "1":
+        if version_id:  # snapshots keep only the inventory sheet's own feasibility column
+            ok = "COALESCE(ic.edr_feasible,'')<>'No'"
+            w.append(ok if p.get("applicable") != "0" else f"NOT ({ok})")
+        else:
+            w.append("ic.applicable=?")
+            params.append(0 if p.get("applicable") == "0" else 1)
     if p.get("mismatch") == "1" and not version_id:
         w.append("ic.verification IN ('Claimed - Not Found','Claimed - Removed from Console','Installed - Marked No','Installed - Marked Not Feasible')")
+    # offline split: the agent is in the console, it left the console, or it is only in the old EDR upload
+    ok = p.get("offline_kind")
+    if ok in ("console", "removed", "import"):
+        w.append("ic.applicable=1 AND ic.edr_state='Offline'")
+        if ok == "console":
+            w.append("ic.edr_actual IN ('Offline','Inactive')")
+        else:
+            w.append("ic.edr_actual IN ('Removed','Hidden')")
+            w.append(("EXISTS" if ok == "import" else "NOT EXISTS")
+                     + " (SELECT 1 FROM hosts hx WHERE hx.aid=ic.matched_aid AND hx.removal_type='imported')")
     sort = INV_SORTS.get(p.get("sort") or "", "ic.rowid")
     if version_id and sort.startswith(("(ic.file_dups", "ic.verification", "ic.edr_actual", "ic.change_tag", "ic.cs_")):
         sort = "ic.rowid"
@@ -786,7 +858,8 @@ def inventory_facets(lob: int = 0, msp: str = ""):
         def dist(col):
             return db.rows(c, f"SELECT COALESCE(NULLIF({col},''),'(blank)') label, COUNT(*) n FROM inventory_current {where} "
                               "GROUP BY 1 ORDER BY n DESC", params)
-        out = {k: dist(k) for k in ("coverage_status", "live", "edr_feasible", "edr_installed", "node_type", "domain", "os")}
+        out = {k: dist(k) for k in ("coverage_status", "live", "edr_feasible", "edr_installed", "node_type", "domain", "os",
+                                    "os_resolved", "feasible", "os_source")}
         d = db.one(c, f"""SELECT COUNT(*) total, SUM(file_dups>0 OR dup_ip>1 OR dup_name>1) any_dup, SUM(file_dups>0) file_dup,
                           SUM(dup_ip>1) ip_dup, SUM(dup_name>1) name_dup FROM inventory_current {where}""", params)
     out["dup"] = {k: d[k] or 0 for k in ("any_dup", "file_dup", "ip_dup", "name_dup")}
@@ -821,6 +894,7 @@ def lob_inventory_export(lob_id: int, request: Request):
             if k not in extra_keys:
                 extra_keys.append(k)
             r["x::" + k] = ex[k]
+        r["niam_text"] = "Yes" if r.get("niam_ne_ids") else "No"
     columns = INV_BASE_COLS + ([] if p.get("version_id") else INV_STATUS_COLS) + [("x::" + k, k) for k in extra_keys]
     return xlsx_response([("Inventory", columns, rows)], f"inventory_{name}".replace(" ", "_"))
 
@@ -1064,6 +1138,17 @@ def download_template(tid: int):
 
 # ------------------------------------------------------------------ extra routes + UI
 app.include_router(extra_router)
+app.include_router(vulns.router)
+app.include_router(legacy.router)
+app.include_router(asset360.router)
+app.include_router(niam.router)
+app.include_router(posture.router)
+app.include_router(registry.router)
+app.include_router(filetemplates.router)
+app.include_router(sod.router)
+app.include_router(commatrix.router)
+app.include_router(feasibility.router)
+app.include_router(sensor_support.router)
 
 FRONTEND = config.BASE_DIR / "frontend" / "out"
 

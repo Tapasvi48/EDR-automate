@@ -1,70 +1,84 @@
 "use client";
 import * as React from "react";
+import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
+import { Radio, ScanSearch, ShieldCheck } from "lucide-react";
 import { api } from "@/lib/api";
-import { useMeta, useUrlState } from "@/lib/hooks";
+import { useRouter } from "next/navigation";
+import { useMeta } from "@/lib/hooks";
 import { fmtN, pct } from "@/lib/format";
-import { Card, CardHeader, Kpi, KpiGrid, Loading, PageHeader, Segmented } from "@/components/ui";
-import { COLORS, HBars, Legend } from "@/components/charts";
-import { InventoryTable } from "@/components/inventory-table";
+import { cn } from "@/lib/utils";
+import { Card, CardHeader, Loading, PageHeader, Segmented } from "@/components/ui";
+import { StackBar } from "@/components/charts";
 import { CoverageTable } from "@/components/coverage-table";
 
-const FILTERS = ["applicable", "installed", "pending", "coverage_status", "claimed_missing", "marked_no", "cross_msp_dup"];
 
 export default function Coverage() {
-  const [state, set, replaceAll] = useUrlState();
+  const router = useRouter();
   const { data: meta } = useMeta();
-  const [mode, setMode] = React.useState<"lob" | "msp">("msp");
-  const { data } = useQuery({ queryKey: ["coverage"], queryFn: () => api<any>("/api/coverage") });
-  if (!data) return <Loading />;
+  const [mode, setMode] = React.useState<"lob" | "msp">("lob");
+  const { data, error, refetch } = useQuery({ queryKey: ["coverage"], queryFn: () => api<any>("/api/coverage") });
+  const { data: reg } = useQuery({ queryKey: ["registry-summary"], queryFn: () => api<any>("/api/registry/summary") });
+  if (!data) return <Loading error={error} retry={() => refetch()} />;
   const t = data.lobs.reduce((a: any, l: any) => {
-    ["nodes", "applicable", "installed", "online", "offline", "not_installed", "hidden", "removed", "not_feasible", "non_live", "unlisted", "claimed_missing", "marked_no"].forEach((k) => (a[k] = (a[k] || 0) + (l[k] || 0)));
+    ["nodes", "applicable", "installed", "online", "offline", "pending", "in_niam", "not_in_niam", "live_nodes", "scanned_live", "never_scanned"].forEach((k) => (a[k] = (a[k] || 0) + (l[k] || 0)));
     return a;
   }, {} as Record<string, number>);
-  const only = (patch: Record<string, string>) => set({ ...Object.fromEntries(FILTERS.map((f) => [f, undefined])), ...patch });
-  const is = (k: string, v = "1") => state[k] === v;
+  const pick = (gap: string) => router.push(`/inventory/?gap=${gap}`);
+  const gaps = [
+    { k: "edr", icon: ShieldCheck, title: "EDR", gap: t.pending, of: t.applicable, have: t.installed, haveLabel: "Installed (online + offline)", missLabel: "Not installed",
+      sub: "EDR-applicable nodes (Live & feasible) with no CrowdStrike agent" },
+    { k: "niam", icon: Radio, title: "NIAM", gap: t.not_in_niam, of: t.nodes, have: t.in_niam, haveLabel: "In NIAM", missLabel: "Not in NIAM",
+      sub: "Inventory nodes whose IP is not in the latest NIAM dump" },
+    { k: "scan", icon: ScanSearch, title: "Vulnerability scan", gap: t.never_scanned, of: t.live_nodes, have: t.scanned_live, haveLabel: "Scanned", missLabel: "Never scanned",
+      sub: "Live nodes whose IP has never appeared in an uploaded scan" },
+  ];
   return (
     <div>
       <PageHeader title="Coverage gaps"
-        sub="Every LOB inventory reconciled against Falcon. Applicable = Live and EDR feasible. Installed = an agent for the node is in the console (online or offline). Pending = applicable but not installed, or its agent was removed / hidden." />
-      <KpiGrid className="grid-cols-[repeat(auto-fill,minmax(145px,1fr))]">
-        <Kpi label="Total nodes" value={t.nodes} tone="info" active={!FILTERS.some((f) => state[f])} onClick={() => only({})} />
-        <Kpi label="Applicable" value={t.applicable} active={is("applicable")} onClick={() => only({ applicable: "1" })} />
-        <Kpi label="Installed" value={t.installed} tone="good" foot={`${pct(t.installed, t.applicable)}% coverage`} active={is("installed")} onClick={() => only({ installed: "1" })} />
-        <Kpi label="Online" value={t.online} tone="good" active={is("coverage_status", "Online")} onClick={() => only({ coverage_status: "Online" })} />
-        <Kpi label="Offline" value={t.offline} tone="warn" active={is("coverage_status", "Offline")} onClick={() => only({ coverage_status: "Offline" })} />
-        <Kpi label="Pending install" value={t.not_installed + t.hidden + t.removed} tone="crit" foot={`${fmtN(t.not_installed)} not installed · ${fmtN(t.hidden + t.removed)} removed/hidden`} active={is("pending")} onClick={() => only({ pending: "1" })} />
-        <Kpi label="Not feasible" value={t.not_feasible} active={is("coverage_status", "Not Feasible")} onClick={() => only({ coverage_status: "Not Feasible" })} />
-        <Kpi label="Non Live" value={t.non_live} active={is("coverage_status", "Non Live")} onClick={() => only({ coverage_status: "Non Live" })} />
-        <Kpi label="Not in inventory" value={t.unlisted} tone="violet" foot="agents on EDR, missing from inventory" href="/assets/?unlisted=1" />
-        <Kpi label="Unmapped agents" value={data.unmapped} tone="violet" foot="in no LOB" href="/assets/?unmapped=1" />
-      </KpiGrid>
-
-      <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,2.2fr)_minmax(0,1fr)]">
-        <Card>
-          <CardHeader title="Coverage by LOB / MSP" right={<Segmented value={mode} onChange={setMode} options={[["msp", "By MSP"], ["lob", "By LOB"]]} />} />
-          <CoverageTable rows={mode === "lob" ? data.lobs : data.msps} mode={mode} maxHeight="380px" />
-        </Card>
-        <Card>
-          <CardHeader title="Node type" hint="applicable nodes" />
-          <div className="px-4 pb-4">
-            <Legend series={[{ key: "i", label: "Installed", color: COLORS.good }, { key: "o", label: "Offline", color: COLORS.warn }, { key: "p", label: "Pending", color: COLORS.crit }]} />
-            <HBars items={data.by_node_type.filter((r: any) => r.applicable > 0).map((r: any) => ({
-              label: r.label, n: r.applicable, href: `/coverage/?node_type=${encodeURIComponent(r.label)}&applicable=1`,
-              title: `${r.label}: ${r.installed}/${r.applicable} installed, ${r.pending} pending`,
-              parts: [{ n: r.installed - r.offline, color: COLORS.good }, { n: r.offline, color: COLORS.warn }, { n: r.pending, color: COLORS.crit }],
-            }))} />
-            <div className="mt-4 rounded-lg bg-surface-2 p-3 text-[12px] text-fg-2">
-              Inventory accuracy: <button className="font-semibold text-crit-fg hover:underline" onClick={() => only({ claimed_missing: "1" })}>{fmtN(t.claimed_missing)}</button> say “Yes” with no agent,
-              {" "}<button className="font-semibold text-serious-fg hover:underline" onClick={() => only({ marked_no: "1" })}>{fmtN(t.marked_no)}</button> say “No” while an agent runs.
-            </div>
-          </div>
-        </Card>
+        sub="Every LOB inventory node checked against the three sources: a CrowdStrike agent, the NIAM dump and a vulnerability scan. Click a gap to open those nodes in All inventory." />
+      <div className="grid gap-4 md:grid-cols-3">
+        {gaps.map((g) => {
+          const on = false;
+          return (
+            <Card key={g.k} className={cn("cursor-pointer p-5 transition-colors hover:border-accent", on && "border-accent ring-2 ring-accent/20")} onClick={() => pick(g.k)}>
+              <div className="flex items-center gap-2 text-[13px] font-medium text-fg-2"><g.icon className="size-4" /> {g.title} gap</div>
+              <div className="mt-2 flex items-baseline gap-2">
+                <span className="text-[32px] font-semibold leading-none tracking-tight text-crit-fg">{fmtN(g.gap)}</span>
+                <span className="text-[13px] text-muted">of {fmtN(g.of)} · {g.of ? `${pct(g.have, g.of)}% covered` : "–"}</span>
+              </div>
+              <div className="mt-1 text-[12px] text-muted">{g.sub}</div>
+              <StackBar className="mt-4" parts={[{ label: g.haveLabel, n: g.have, color: "var(--good)" }, { label: g.missLabel, n: g.gap, color: "var(--crit)" }]} />
+            </Card>
+          );
+        })}
       </div>
 
-      <div className="mt-4">
-        <InventoryTable lobId={0} showLob lobs={meta?.lobs} state={state} set={set} reset={() => replaceAll({})} />
-      </div>
+      <Card className="mt-4">
+        <CardHeader title="Assets in no LOB inventory" hint="found by CrowdStrike, a VA scan or the NIAM dump, but in no uploaded inventory · EDR applicability is unknown for these; NIAM applies to all" />
+        <div className="grid gap-3 px-4 pb-4 sm:grid-cols-2 xl:grid-cols-5">
+          {[
+            ["Not in any inventory", reg?.not_in_inventory, "/inventory/?missing=inventory", "var(--violet)", "total, one per IP"],
+            ["Found by CrowdStrike", reg?.not_inv_edr, "/inventory/?missing=inventory&has=edr", "var(--fg)", "agent in the console or EDR history"],
+            ["Found by a VA scan", reg?.not_inv_scan, "/inventory/?missing=inventory&has=scan", "var(--fg)", "scanned IP (NAT IPs of inventory nodes excluded)"],
+            ["In the NIAM dump", reg?.not_inv_niam, "/inventory/?missing=inventory&has=niam", "var(--fg)", "network element not in any LOB"],
+            ["Also missing from NIAM", reg?.not_inv_not_niam, "/inventory/?missing=inventory|niam", "var(--crit)", "NIAM gap outside the inventories"],
+          ].map(([l, n, href, color, foot]) => (
+            <Link key={l as string} href={href as string} className="rounded-xl border border-border p-3 transition-colors hover:border-accent">
+              <div className="text-[12px] font-medium text-fg-2">{l}</div>
+              <div className="mt-1 text-[24px] font-semibold leading-none tabular" style={{ color: color as string }}>{reg ? fmtN((n as number) || 0) : "–"}</div>
+              <div className="mt-1 text-[11px] text-muted">{foot}</div>
+            </Link>
+          ))}
+        </div>
+      </Card>
+
+      <Card className="mt-4">
+        <CardHeader title={mode === "lob" ? "Coverage by LOB" : "Coverage by MSP"} hint="hover a bar for numbers · click a number to open those nodes"
+          right={<Segmented value={mode} onChange={setMode} options={[["lob", "By LOB"], ["msp", "By MSP"]]} />} />
+        <CoverageTable rows={mode === "lob" ? data.lobs : data.msps} mode={mode} showMspCount={false} maxHeight="420px" days={meta?.settings.auto_remove_days} />
+      </Card>
+
     </div>
   );
 }

@@ -72,10 +72,8 @@ def norm_live(v):
 
 
 def norm_ip(v):
-    s = str(v or "").strip()
-    # cells sometimes hold "10.1.1.1, 10.1.1.2" or "10.1.1.1 / eth0" -> first IP
-    m = re.search(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", s)
-    return m.group(0) if m else s
+    # IPv4 / IPv6 in one canonical form; "10.1.1.1, 10.1.1.2" or "10.1.1.1 / eth0" -> first IP
+    return db.canon_ip(v)
 
 
 # ------------------------------------------------------------------ parsing
@@ -160,10 +158,12 @@ def suggest_mapping(headers, template=None):
                     mapping[f] = h
                     used.add(h)
                     break
+    from .filetemplates import custom_aliases
+    custom = custom_aliases("inventory")
     for f in FIELDS:
         if f in mapping:
             continue
-        for alias in ALIASES[f]:
+        for alias in [*(_hnorm(n) for n in custom.get(f, [])), *ALIASES[f]]:
             hit = next((h for h in headers if h not in used and norm[h] == alias), None)
             if hit:
                 mapping[f] = hit
@@ -445,7 +445,12 @@ def compare_versions(c, lob_id, v_old, v_new):
 PRESENT = ("Online", "Offline", "Inactive")
 INSTALLED_STATES = ("Online", "Offline")
 # edr_actual (detailed) -> edr_state (what the dashboards count)
-EDR_STATE = {"Online": "Online", "Offline": "Offline", "Inactive": "Offline", "Hidden": "Hidden", "Removed": "Removed",
+# bumped when matching / state rules change so stored results are recomputed on startup
+MATCH_REV = "12"
+# EDR has two states: Online, or Offline - offline in the console, or an agent that has left the console (removed by the
+# inactivity policy, deleted, hidden, or known only from an old EDR inventory upload). Only a node with no agent at all is
+# "Not Installed". edr_actual keeps the detail.
+EDR_STATE = {"Online": "Online", "Offline": "Offline", "Inactive": "Offline", "Hidden": "Offline", "Removed": "Offline",
              "Not Found": "Not Installed", "IP Used by Other Host": "Not Installed"}
 
 
@@ -465,15 +470,17 @@ def _verify(feasible, claim, actual):
     return "Found - No Claim" if present else "Not Found - No Claim"
 
 
-def is_applicable(live, feasible):
-    return (live or "") != "Non Live" and (feasible or "") != "No"
-
-
-def coverage_status(live, feasible, edr_state):
-    if (live or "") == "Non Live":
-        return "Non Live"
+def coverage_status(feasible, edr_state):
+    """EDR status of an inventory node: Online / Offline / Not Installed, or Not Feasible / Legacy OS / To Be Decided
+    when no agent can (or may) go on it. Live / Non Live does not matter: feasibility depends only on the OS and node type."""
+    if edr_state in INSTALLED_STATES:
+        return edr_state
     if (feasible or "") == "No":
         return "Not Feasible"
+    if (feasible or "") == "Legacy":
+        return "Legacy OS"
+    if (feasible or "") == "To be decided":
+        return "To Be Decided"
     return edr_state
 
 
@@ -502,13 +509,14 @@ def refresh_matches(c, lob_id=None):
     hosts = {}
     by_ip, by_hn, by_hist = {}, {}, {}
     for r in c.execute("""SELECT aid, hostname, hostname_norm, local_ip, console_state, online_state, last_seen,
-                          agent_version, os_version FROM hosts"""):
+                          agent_version, os_version FROM hosts WHERE console_state<>'hidden'"""):
         hosts[r["aid"]] = r
         if r["local_ip"]:
             by_ip.setdefault(r["local_ip"], []).append(r["aid"])
         if r["hostname_norm"]:
             by_hn.setdefault(r["hostname_norm"], []).append(r["aid"])
-    for r in c.execute("SELECT DISTINCT ip, aid FROM ip_history WHERE kind='local'"):
+    for r in c.execute("""SELECT DISTINCT ih.ip, ih.aid FROM ip_history ih JOIN hosts h ON h.aid=ih.aid
+                          WHERE ih.kind='local' AND h.console_state<>'hidden'"""):
         by_hist.setdefault(r["ip"], set()).add(r["aid"])
 
     def rank(aid):
@@ -516,8 +524,21 @@ def refresh_matches(c, lob_id=None):
         return ({"active": 0, "hidden": 1}.get(h["console_state"], 2), -(_ts_num(h["last_seen"])))
 
     where, params = ("WHERE lob_id=?", (lob_id,)) if lob_id else ("", ())
-    items = db.rows(c, f"SELECT lob_id, item_key, ip, node_name, live, edr_feasible, edr_installed FROM inventory_current {where}", params)
+    items = db.rows(c, f"""SELECT lob_id, item_key, ip, node_name, live, edr_feasible, edr_installed, os, node_type, domain
+                            FROM inventory_current {where}""", params)
+    from . import feasibility
+    from .vulns import scan_os
+    decide, va_os = feasibility.decider(c), scan_os(c)
     updates = []
+
+    def decided(it, state, edr_os):
+        os_, os_src = feasibility.resolve_os(edr_os, it["os"], va_os.get(ip))
+        installed = state in INSTALLED_STATES
+        feasible, why, os_status = decide(it["lob_id"], it["item_key"], installed=installed, os_=os_,
+                                          node_type=it["node_type"], domain=it["domain"], inv_feasible=it["edr_feasible"])
+        applicable = 1 if feasibility.is_applicable(feasible, installed) else 0
+        return applicable, coverage_status(feasible, state), feasible, why, os_, os_src, os_status
+
     for it in items:
         ip, hn = (it["ip"] or "").strip(), db.norm_hostname(it["node_name"])
         cip = set(by_ip.get(ip, [])) if ip else set()
@@ -532,7 +553,6 @@ def refresh_matches(c, lob_id=None):
             method, pool = ("ip (hostname differs)" if hn else "ip"), cip
         elif ip and ip in by_hist:
             method, pool = "ip_history", set(by_hist[ip])
-        applicable = 1 if is_applicable(it["live"], it["edr_feasible"]) else 0
         if pool:
             best = sorted(pool, key=rank)[0]
             h = hosts[best]
@@ -555,20 +575,32 @@ def refresh_matches(c, lob_id=None):
             updates.append((best, method, active_cnt, h["hostname"], h["console_state"], h["online_state"], h["last_seen"],
                             h["agent_version"], h["os_version"], actual,
                             _verify(it["edr_feasible"], it["edr_installed"], "Not Found" if weak else actual),
-                            applicable, state, coverage_status(it["live"], it["edr_feasible"], state),
+                            state, *decided(it, state, None if weak else h["os_version"]),
                             it["lob_id"], it["item_key"]))
         else:
             updates.append((None, None, 0, None, None, None, None, None, None, "Not Found",
                             _verify(it["edr_feasible"], it["edr_installed"], "Not Found"),
-                            applicable, "Not Installed", coverage_status(it["live"], it["edr_feasible"], "Not Installed"),
+                            "Not Installed", *decided(it, "Not Installed", None),
                             it["lob_id"], it["item_key"]))
     c.executemany(
         """UPDATE inventory_current SET matched_aid=?, match_method=?, match_count=?, cs_hostname=?, cs_console_state=?,
            cs_online_state=?, cs_last_seen=?, cs_agent_version=?, cs_os=?, edr_actual=?, verification=?,
-           applicable=?, edr_state=?, coverage_status=?
+           edr_state=?, applicable=?, coverage_status=?, feasible=?, feasible_reason=?, os_resolved=?, os_source=?, os_support=?
            WHERE lob_id=? AND item_key=?""", updates)
     tag_duplicates(c, lob_id)
     rebuild_host_map(c)
+    from .queries import compute_gone  # EDR history: one row per device that left the console
+    compute_gone(c)
+    from .sod import apply as apply_exceptions  # SOD: accept / reopen findings before anything counts them
+    apply_exceptions(c)
+    from .vulns import refresh_assets  # scanned IPs take their MSP / EDR status from inventory + Falcon
+    refresh_assets(c, lob_id)
+    from . import niam  # NIAM nodes take LOB / EDR / vulnerability status from the same data
+    niam.refresh(c)
+    from . import posture  # risk scores, scan ages and today's MSP scorecard snapshot
+    posture.refresh(c)
+    from . import registry  # every IP from every source, joined (All inventory, Internet exposed, coverage gaps)
+    registry.refresh(c)
 
 
 def tag_duplicates(c, lob_id=None):
@@ -613,13 +645,14 @@ def resolve_agents(c, values):
                 v = norm[r["hostname_norm"]]
                 if out[v] is None:
                     out[v] = r["aid"]
-        ipv = [v for v in ch if out[v] is None and db.ip_to_num(v) is not None]
+        ipv = {db.canon_ip(v): v for v in ch if out[v] is None and db.is_ip(v)}
         if ipv:
             ph3 = ",".join("?" * len(ipv))
             for r in c.execute(f"""SELECT aid, local_ip FROM hosts WHERE local_ip IN ({ph3})
-                                   ORDER BY console_state='active' DESC, last_seen DESC""", ipv):
-                if out.get(r["local_ip"]) is None:
-                    out[r["local_ip"]] = r["aid"]
+                                   ORDER BY console_state='active' DESC, last_seen DESC""", list(ipv)):
+                v = ipv[r["local_ip"]]
+                if out.get(v) is None:
+                    out[v] = r["aid"]
     return out
 
 
@@ -645,10 +678,10 @@ def tag_rows(c, lob_id, parsed, id_col, msp_col=None, msp_id=None):
         aid = resolved.get(val)
         if msp and msp.lower() not in msps:
             new_msps.add(msp)
-        rows.append({"value": val, "aid": aid, "msp": msp, "status": "Not found in Falcon" if not aid else ("Already in inventory" if aid in inv else "Not in inventory")})
+        rows.append({"value": val, "aid": aid, "msp": msp, "status": "Not found in Falcon" if not aid else ("Already in inventory" if aid in inv else "EDR only")})
     summary = {"total": len(rows), "resolved": sum(1 for r in rows if r["aid"]), "unresolved": sum(1 for r in rows if not r["aid"]),
                "in_inventory": sum(1 for r in rows if r["status"] == "Already in inventory"),
-               "unlisted": sum(1 for r in rows if r["status"] == "Not in inventory"), "new_msps": sorted(new_msps)}
+               "unlisted": sum(1 for r in rows if r["status"] == "EDR only"), "new_msps": sorted(new_msps)}
     return rows, summary
 
 

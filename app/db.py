@@ -1,5 +1,6 @@
 import ipaddress
 import json
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -58,6 +59,8 @@ CREATE TABLE IF NOT EXISTS hosts (
     nic_checked_at TEXT,
     device_key TEXT,                -- agents sharing a (non-excluded) IP form one device
     is_primary INTEGER NOT NULL DEFAULT 1,   -- the agent that represents its device in counts
+    source TEXT DEFAULT 'falcon',   -- falcon | import (old EDR inventory upload)
+    import_id INTEGER,
     db_first_synced TEXT,
     db_last_synced TEXT,
     raw TEXT
@@ -268,8 +271,166 @@ CREATE TABLE IF NOT EXISTS inventory_current (
 CREATE INDEX IF NOT EXISTS ix_inv_aid ON inventory_current(matched_aid);
 CREATE INDEX IF NOT EXISTS ix_inv_ip ON inventory_current(ip);
 CREATE INDEX IF NOT EXISTS ix_inv_msp ON inventory_current(lob_id, msp_id);
+
+-- ---------- Vulnerabilities (Nessus-style exports, per LOB) ----------
+CREATE TABLE IF NOT EXISTS vuln_scans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    lob_id INTEGER NOT NULL,
+    filename TEXT, note TEXT, uploaded_by TEXT, uploaded_at TEXT,
+    scan_date TEXT,                 -- latest "Last Observed" in the file (else upload time)
+    rows INTEGER, hosts INTEGER,
+    new_findings INTEGER, fixed_findings INTEGER, reopened INTEGER, still_open INTEGER,
+    mapping TEXT, warnings TEXT
+);
+
+-- One row per (LOB, IP, plugin, port, protocol). Status tracks open -> fixed across scans.
+CREATE TABLE IF NOT EXISTS vuln_findings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    lob_id INTEGER NOT NULL,
+    finding_key TEXT NOT NULL,
+    ip TEXT, ip_num INTEGER,
+    plugin_id TEXT, name TEXT, severity TEXT, sev_rank INTEGER,
+    protocol TEXT, port TEXT,
+    synopsis TEXT, description TEXT, solution TEXT, plugin_text TEXT, see_also TEXT, cve TEXT,
+    exploit_ease TEXT, first_discovered TEXT, last_observed TEXT, vuln_pub_date TEXT, patch_pub_date TEXT,
+    remarks TEXT, extra TEXT,
+    status TEXT NOT NULL DEFAULT 'open',   -- open | fixed
+    first_scan_id INTEGER, last_scan_id INTEGER, fixed_scan_id INTEGER, fixed_at TEXT, reopened INTEGER DEFAULT 0,
+    UNIQUE (lob_id, finding_key)
+);
+CREATE INDEX IF NOT EXISTS ix_vf_ip ON vuln_findings(ip);
+CREATE INDEX IF NOT EXISTS ix_vf_lob ON vuln_findings(lob_id, status, sev_rank);
+CREATE INDEX IF NOT EXISTS ix_vf_plugin ON vuln_findings(plugin_id);
+
+-- Last scan that covered each IP of a LOB
+CREATE TABLE IF NOT EXISTS vuln_scan_hosts (
+    lob_id INTEGER NOT NULL,
+    ip TEXT NOT NULL,
+    scan_id INTEGER,
+    scanned_at TEXT,
+    PRIMARY KEY (lob_id, ip)
+);
+
+-- Every IP a LOB's scans covered, joined to inventory + EDR (rebuilt after scans, uploads and syncs)
+CREATE TABLE IF NOT EXISTS vuln_assets (
+    lob_id INTEGER NOT NULL,
+    ip TEXT NOT NULL,
+    ip_num INTEGER,
+    last_scan_id INTEGER, last_scanned_at TEXT,
+    crit INTEGER DEFAULT 0, high INTEGER DEFAULT 0, med INTEGER DEFAULT 0, low INTEGER DEFAULT 0, info INTEGER DEFAULT 0,
+    fixed INTEGER DEFAULT 0,
+    in_inventory INTEGER DEFAULT 0, item_key TEXT, node_name TEXT, msp TEXT, msp_id INTEGER, node_type TEXT, live TEXT,
+    aid TEXT, hostname TEXT, edr_status TEXT,    -- Online | Offline | Hidden | Removed | Not Installed
+    PRIMARY KEY (lob_id, ip)
+);
+CREATE INDEX IF NOT EXISTS ix_va_ip ON vuln_assets(ip);
+
+-- Old EDR inventory imports (history of what was imported; the hosts themselves go into `hosts`)
+CREATE TABLE IF NOT EXISTS edr_imports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    filename TEXT, note TEXT, uploaded_by TEXT, uploaded_at TEXT,
+    rows INTEGER, added INTEGER, already_known INTEGER, live_now INTEGER, mapping TEXT
+);
+
+-- NIAM dump uploads (Host -> NE ID); each upload is a full snapshot
+CREATE TABLE IF NOT EXISTS niam_uploads (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    filename TEXT, note TEXT, uploaded_by TEXT, uploaded_at TEXT,
+    rows INTEGER, added INTEGER, removed INTEGER, changed INTEGER, mapping TEXT, warnings TEXT
+);
+
+-- One row per (NE ID, host). Nodes missing from a later dump stay with present=0. Match columns are rebuilt by niam.refresh().
+CREATE TABLE IF NOT EXISTS niam_nodes (
+    ne_id TEXT NOT NULL DEFAULT '',
+    host_key TEXT NOT NULL,          -- canonical IP, or lower-case host when it is not an IP
+    host TEXT, ip TEXT, ip_num INTEGER, hostname_norm TEXT, extra TEXT,
+    upload_id INTEGER, first_upload_id INTEGER, first_seen_at TEXT, last_seen_at TEXT,
+    present INTEGER NOT NULL DEFAULT 1, removed_at TEXT,
+    in_inventory INTEGER DEFAULT 0, lobs TEXT, msps TEXT, node_name TEXT, node_type TEXT, inv_status TEXT,
+    aid TEXT, hostname TEXT, edr_status TEXT, edr_last_seen TEXT,
+    crit INTEGER DEFAULT 0, high INTEGER DEFAULT 0, med INTEGER DEFAULT 0, low INTEGER DEFAULT 0, last_scan TEXT,
+    PRIMARY KEY (ne_id, host_key)
+);
+CREATE INDEX IF NOT EXISTS ix_niam_ip ON niam_nodes(ip);
+
+-- One row per asset of a LOB (inventory node or scanned IP): risk score and scan age. Rebuilt by posture.refresh().
+CREATE TABLE IF NOT EXISTS asset_risk (
+    lob_id INTEGER NOT NULL,
+    asset_key TEXT NOT NULL,          -- canonical IP, or name:<node> for inventory rows without an IP
+    ip TEXT, ip_num INTEGER, item_key TEXT, node_name TEXT, node_type TEXT, msp TEXT, msp_id INTEGER, live TEXT,
+    applicable INTEGER, in_inventory INTEGER, coverage_status TEXT,
+    aid TEXT, hostname TEXT, edr_status TEXT, edr_last_seen TEXT,
+    crit INTEGER, high INTEGER, med INTEGER, low INTEGER, exploitable INTEGER,
+    last_scan TEXT, scan_age_days INTEGER, scan_bucket TEXT,    -- 0-30 | 31-60 | 61-90 | 90+ | never
+    score INTEGER, level TEXT, factors TEXT,                     -- factors: JSON [[label, points], ...]
+    PRIMARY KEY (lob_id, asset_key)
+);
+CREATE INDEX IF NOT EXISTS ix_risk_score ON asset_risk(score);
+CREATE INDEX IF NOT EXISTS ix_risk_ip ON asset_risk(ip);
+
+-- Every IP from every source (inventory, CrowdStrike, VA scans, NIAM), joined. Rebuilt by registry.refresh().
+CREATE TABLE IF NOT EXISTS asset_registry (
+    asset_key TEXT PRIMARY KEY, ip TEXT, ip_num INTEGER, name TEXT,
+    lobs TEXT, lob_ids TEXT, msps TEXT, msp_ids TEXT, node_type TEXT, live TEXT, edr_applicable INTEGER,
+    in_inventory INTEGER, in_edr INTEGER, in_scan INTEGER, in_niam INTEGER,
+    edr_status TEXT, edr_detail TEXT, aid TEXT, cs_hostname TEXT, edr_last_seen TEXT,
+    last_scan TEXT, crit INTEGER, high INTEGER, med INTEGER, low INTEGER, ne_ids TEXT,
+    exposed INTEGER, exposure TEXT, exposure_src TEXT, public_ips TEXT, nat_of TEXT, is_public INTEGER, sources TEXT,
+    os TEXT, os_source TEXT, feasibility TEXT, feasibility_reason TEXT
+);
+
+-- Falcon sensor builds per platform with their N / N-1 / N-2 tag (Sensor update policies API), replaced on each fetch
+CREATE TABLE IF NOT EXISTS sensor_builds (
+    platform TEXT, sensor_version TEXT, build TEXT, tag TEXT, stage TEXT, fetched_at TEXT
+);
+-- Linux distributions / versions CrowdStrike supports, summarised from the supported-kernel list
+CREATE TABLE IF NOT EXISTS linux_support (
+    distro TEXT, version TEXT, kernels INTEGER, newest_sensor TEXT, oldest_sensor TEXT, n2_supported INTEGER, fetched_at TEXT,
+    PRIMARY KEY (distro, version)
+);
+
+-- Manual EDR feasibility decisions for inventory nodes (win over the feasibility rules)
+CREATE TABLE IF NOT EXISTS feasibility_overrides (
+    lob_id INTEGER NOT NULL, item_key TEXT NOT NULL, feasible TEXT NOT NULL, note TEXT, set_at TEXT,
+    PRIMARY KEY (lob_id, item_key)
+);
+CREATE INDEX IF NOT EXISTS ix_reg_ip ON asset_registry(ip_num);
+
+-- Vulnerability exceptions (SOD). The uploaded sheet is the full register; each upload replaces it.
+CREATE TABLE IF NOT EXISTS vuln_exceptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    exception_id TEXT, scope TEXT, target TEXT, lob TEXT, plugin_id TEXT, cve TEXT, name TEXT, port TEXT,
+    justification TEXT, control TEXT, approved_by TEXT, approval_date TEXT, valid_till TEXT, ticket TEXT, remarks TEXT,
+    upload_id INTEGER, matched INTEGER DEFAULT 0, created_at TEXT
+);
+CREATE TABLE IF NOT EXISTS sod_uploads (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, filename TEXT, note TEXT, uploaded_by TEXT, uploaded_at TEXT,
+    rows INTEGER, added INTEGER, removed INTEGER, mapping TEXT, warnings TEXT
+);
+
+-- Communication matrix (firewall / NAT flows). The uploaded sheet is the full matrix; each upload replaces it.
+CREATE TABLE IF NOT EXISTS comm_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_id TEXT, direction TEXT, src_zone TEXT, src TEXT, src_nat TEXT, isp TEXT, firewall TEXT, fw_rule TEXT, dst_zone TEXT,
+    dst_nat TEXT, dst TEXT, protocol TEXT, ports TEXT, service TEXT, action TEXT, cr TEXT, valid_till TEXT, remarks TEXT,
+    inbound_internet INTEGER DEFAULT 0, upload_id INTEGER
+);
+CREATE TABLE IF NOT EXISTS comm_uploads (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, filename TEXT, note TEXT, uploaded_by TEXT, uploaded_at TEXT,
+    rows INTEGER, replaced INTEGER, mapping TEXT, warnings TEXT
+);
+
+-- Daily per-MSP snapshot for scorecard trends (msp_id 0 = unassigned)
+CREATE TABLE IF NOT EXISTS msp_daily (
+    day TEXT NOT NULL, lob_id INTEGER NOT NULL, msp_id INTEGER NOT NULL,
+    nodes INTEGER, applicable INTEGER, installed INTEGER, online INTEGER, offline INTEGER, pending INTEGER, coverage REAL,
+    crit INTEGER, high INTEGER, crit_high_no_edr INTEGER, live_nodes INTEGER, scanned_recent INTEGER, never_scanned INTEGER,
+    risk_critical INTEGER, risk_high INTEGER,
+    PRIMARY KEY (day, lob_id, msp_id)
+);
 """
 
+# NIAM dump: Host (IP) -> NE ID. Full snapshot per upload; nodes missing from a later dump keep present=0.
 # columns added after the first release: (table, column, type)
 MIGRATIONS = [
     ("inventory_rows", "msp", "TEXT"),
@@ -287,6 +448,22 @@ MIGRATIONS = [
     ("inventory_current", "file_dups", "INTEGER DEFAULT 0"),
     ("inventory_current", "dup_ip", "INTEGER DEFAULT 0"),
     ("inventory_current", "dup_name", "INTEGER DEFAULT 0"),
+    ("hosts", "source", "TEXT DEFAULT 'falcon'"),     # falcon | import (old EDR inventory)
+    ("hosts", "import_id", "INTEGER"),
+    ("vuln_findings", "exception_ref", "TEXT"),        # SOD exception that accepted this finding
+    ("hosts", "gone_primary", "INTEGER DEFAULT 0"),   # representative agent of a device in EDR history
+    ("hosts", "gone_group", "INTEGER"),               # agents of that device (duplicates merged)
+    ("hosts", "gone_source", "TEXT"),                 # console (removed, seen by sync) | import (old EDR upload only)
+    ("inventory_current", "feasible", "TEXT"),        # EDR feasibility decided by the rules / manual override: Yes | No
+    ("inventory_current", "feasible_reason", "TEXT"),
+    ("inventory_current", "os_resolved", "TEXT"),     # OS from Falcon, else the inventory OS column, else the VA scan
+    ("inventory_current", "os_source", "TEXT"),       # edr | inventory | scan
+    ("inventory_current", "os_support", "TEXT"),      # Supported | Legacy | Not supported (OS support catalog), NULL = unknown
+    ("vuln_findings", "os", "TEXT"),                  # Operating System column of the scan export, if any
+    ("asset_registry", "os", "TEXT"),
+    ("asset_registry", "os_source", "TEXT"),
+    ("asset_registry", "feasibility", "TEXT"),        # Yes | No | Unidentified
+    ("asset_registry", "feasibility_reason", "TEXT"),
 ]
 
 
@@ -294,14 +471,145 @@ def now_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def ip_to_num(ip):
-    if not ip:
+_TS_FORMATS = [
+    "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M",
+    "%Y-%m-%d", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d", "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%d/%m/%Y", "%d-%m-%Y",
+    "%m/%d/%Y %H:%M:%S", "%m/%d/%Y %I:%M:%S %p", "%m/%d/%Y", "%b %d, %Y %H:%M:%S", "%b %d, %Y %I:%M:%S %p",
+    "%b %d, %Y", "%d %b %Y %H:%M:%S", "%d %b %Y", "%d-%b-%Y", "%B %d, %Y",
+]
+
+
+def parse_ts(v):
+    """Best-effort parse of export timestamps (Nessus, CrowdStrike, Excel) -> ISO UTC string, or '' if unknown."""
+    s = str(v or "").strip()
+    if not s or s in ("-", "N/A", "n/a"):
+        return ""
+    s = s.replace(" UTC", "").replace(" GMT", "").replace("+00:00", "Z")
+    for f in _TS_FORMATS:
+        try:
+            return datetime.strptime(s, f).replace(tzinfo=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return ""
+
+
+_V4_PORT = re.compile(r"(\d{1,3}(?:\.\d{1,3}){3})(?::\d{1,5})?")
+_BR_V6 = re.compile(r"\[([0-9A-Fa-f:.%\w]+)\](?::\d{1,5})?")
+
+
+def _parse_ip(tok):
+    """One token -> canonical IP string or None. Handles IPv4 (leading zeros, :port, /prefix),
+    IPv6 (any case / compression, [addr]:port, %zone, /prefix) and IPv4-mapped IPv6."""
+    t = str(tok or "").strip().strip("\"'()<>")
+    if not t:
+        return None
+    m = _BR_V6.fullmatch(t)
+    if m:
+        t = m.group(1)
+    t = t.split("%", 1)[0].split("/", 1)[0]
+    m = _V4_PORT.fullmatch(t)
+    if m:
+        parts = [int(x) for x in m.group(1).split(".")]
+        return ".".join(map(str, parts)) if all(p <= 255 for p in parts) else None
+    if ":" not in t:
         return None
     try:
-        a = ipaddress.ip_address(ip.strip())
-        return int(a) if a.version == 4 else None
+        a = ipaddress.ip_address(t)
     except ValueError:
         return None
+    if a.version == 6 and a.ipv4_mapped:
+        return str(a.ipv4_mapped)
+    return a.compressed.lower()
+
+
+def canon_ip(v):
+    """Canonical form used for every IP stored or compared, so 010.001.001.005 == 10.1.1.5 and
+    2001:DB8:0:0::1 == 2001:db8::1. Cells holding several IPs ("10.1.1.1, 10.1.1.2" / "10.1.1.1 eth0")
+    give the first one; values that are not IPs come back trimmed and unchanged."""
+    s = str(v or "").strip()
+    if not s:
+        return ""
+    ip = _parse_ip(s)
+    if ip:
+        return ip
+    for tok in re.split(r"[\s,;|]+", s):
+        ip = _parse_ip(tok)
+        if ip:
+            return ip
+    return s
+
+
+def is_ip(v):
+    return _parse_ip(v) is not None
+
+
+def all_ips(v):
+    """Every IP in a cell, canonical, in order."""
+    out = []
+    for tok in re.split(r"[\s,;|]+", str(v or "")):
+        ip = _parse_ip(tok)
+        if ip and ip not in out:
+            out.append(ip)
+    return out
+
+
+def ip_to_num(ip):
+    """Integer for IPv4 (used for fast range queries). IPv6 has no number column; ranges use ip_in()."""
+    ip = _parse_ip(ip)
+    if not ip or ":" in ip:
+        return None
+    return int(ipaddress.IPv4Address(ip))
+
+
+def parse_net(text):
+    """'10.1.0.0/16', '2001:db8::/32', a single IP, or an IPv4 prefix like '10.1.' / '10.1' -> ip_network or None."""
+    t = str(text or "").strip()
+    if not t:
+        return None
+    if "/" in t:
+        try:
+            return ipaddress.ip_network(t.split("/")[0].strip("[]") + "/" + t.split("/")[1], strict=False)
+        except ValueError:
+            return None
+    m = re.fullmatch(r"(\d{1,3})(?:\.(\d{1,3}))?(?:\.(\d{1,3}))?\.?", t)
+    if m:
+        octs = [int(x) for x in m.groups() if x is not None]
+        if all(o <= 255 for o in octs):
+            return ipaddress.ip_network(".".join(map(str, octs + [0] * (4 - len(octs)))) + f"/{8 * len(octs)}")
+    return None
+
+
+def is_range_query(text):
+    """CIDR ('10.1.0.0/16', '2001:db8::/48') or IPv4 prefix ('10.1.'). A plain IP is not a range."""
+    t = str(text or "").strip()
+    if not t:
+        return False
+    if "/" in t:
+        return parse_net(t) is not None
+    return not is_ip(t) and parse_net(t) is not None
+
+
+_NET_CACHE = {}
+
+
+def ip_in(ip, net):
+    """SQLite function ip_in(ip, 'cidr'): works for IPv4 and IPv6."""
+    if not ip or not net:
+        return 0
+    n = _NET_CACHE.get(net)
+    if n is None:
+        n = _NET_CACHE[net] = parse_net(net) or False
+        if len(_NET_CACHE) > 500:
+            _NET_CACHE.clear()
+    if not n:
+        return 0
+    try:
+        return 1 if ipaddress.ip_address(ip) in n else 0
+    except ValueError:
+        return 0
 
 
 def norm_hostname(name):
@@ -309,7 +617,7 @@ def norm_hostname(name):
         return ""
     n = str(name).strip().lower()
     # FQDN -> short name, but keep plain IP-looking values intact
-    if "." in n and ip_to_num(n) is None:
+    if "." in n and not is_ip(n):
         n = n.split(".", 1)[0]
     return n
 
@@ -323,6 +631,7 @@ def connect():
         except OSError:
             pass
     conn.row_factory = sqlite3.Row
+    conn.create_function("ip_in", 2, ip_in, deterministic=True)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -357,6 +666,9 @@ def init_db():
         if rebuild:
             c.execute("ALTER TABLE inventory_versions RENAME TO _inventory_versions_old")
         c.executescript(SCHEMA)
+        for table, col, typ in MIGRATIONS:  # fresh databases: tables were just created without the later columns
+            if col not in {r[1] for r in c.execute(f"PRAGMA table_info({table})")}:
+                c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
         if rebuild:
             cols = [r[1] for r in c.execute("PRAGMA table_info(_inventory_versions_old)")]
             new_cols = {r[1] for r in c.execute("PRAGMA table_info(inventory_versions)")}
@@ -365,10 +677,39 @@ def init_db():
             c.execute("DROP TABLE _inventory_versions_old")
         for k, v in config.DEFAULT_SETTINGS.items():
             c.execute("INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)", (k, v))
+        if not c.execute("SELECT 1 FROM settings WHERE key='ip_canon_v1'").fetchone():
+            if canonicalize_ips(c):
+                c.execute("DELETE FROM settings WHERE key='match_rev'")  # recompute matches on startup
+            c.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('ip_canon_v1', '1')")
         c.execute("""INSERT OR IGNORE INTO templates(name, description, key_field, mapping, created_at, updated_at)
                      VALUES (?,?,?,?,?,?)""",
                   (config.STANDARD_TEMPLATE, "Default inventory layout: IP, Node Name, MSP, Node Type, Domain, Live/Non Live, "
                    "OS, EDR Feasible, EDR Installed, Remarks", "ip", json.dumps(dict(config.INVENTORY_FIELDS)), now_iso(), now_iso()))
+
+
+# (table, ip column, ip number column or None)
+IP_COLUMNS = [("hosts", "local_ip", "local_ip_num"), ("hosts", "external_ip", None), ("hosts", "connection_ip", None),
+              ("ip_history", "ip", "ip_num"), ("inventory_current", "ip", None), ("inventory_rows", "ip", None),
+              ("vuln_findings", "ip", "ip_num"), ("vuln_scan_hosts", "ip", None), ("niam_nodes", "ip", "ip_num")]
+
+
+def canonicalize_ips(c):
+    """One-time rewrite of stored IPs into canon_ip() form (IPv4 leading zeros, IPv6 case/compression,
+    IPv4-mapped IPv6). Returns the number of values changed."""
+    changed = 0
+    for table, col, num in IP_COLUMNS:
+        if not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+            continue
+        fix = []
+        for r in c.execute(f"SELECT rowid, {col} FROM {table} WHERE {col} IS NOT NULL AND {col}<>''"):
+            v = canon_ip(r[1])
+            if v != r[1]:
+                fix.append((v, ip_to_num(v), r[0]) if num else (v, r[0]))
+        if fix:
+            sql = f"UPDATE OR IGNORE {table} SET {col}=?{f', {num}=?' if num else ''} WHERE rowid=?"
+            c.executemany(sql, fix)
+            changed += len(fix)
+    return changed
 
 
 def standard_template_id(conn):

@@ -9,18 +9,16 @@ const REPORTS: { title: string; desc: string; path: string; params?: Record<stri
   { title: "Offline over 7 days", desc: "Active hosts that have not checked in for more than a week.", path: "/api/hosts/export", params: { online: "offline", seen_bucket: "gt7d", sort: "last_seen", dir: "asc" } },
   { title: "Went offline this week", desc: "Hosts currently offline whose last check-in was in the last 7 days.", path: "/api/hosts/export", params: { online: "offline", last_from: daysAgo(7) } },
   { title: "Online but stale last seen", desc: "Connected per Falcon, but not checking in normally.", path: "/api/hosts/export", params: { online: "online", stale_online: "1" } },
-  { title: "New installs · 30 days", desc: "Agents first seen in the last 30 days, with reinstall flags.", path: "/api/hosts/export", params: { state: "all", first_from: daysAgo(30) } },
-  { title: "Reinstalls · 30 days", desc: "New agents that replaced an older agent with the same IP/hostname.", path: "/api/hosts/export", params: { state: "all", reinstall: "1", first_from: daysAgo(30) } },
+  { title: "New installs · 30 days", desc: "Agents first seen in the last 30 days.", path: "/api/hosts/export", params: { state: "all", first_from: daysAgo(30) } },
   { title: "Removed from console", desc: "Auto-removed, deleted and hidden hosts retained in the database.", path: "/api/hosts/export", params: { state: "removed" } },
   { title: "Duplicate IPs", desc: "Every agent in every duplicate-IP group.", path: "/api/duplicates/export", params: { by: "ip" } },
   { title: "Duplicate hostnames", desc: "Every agent in every duplicate-hostname group.", path: "/api/duplicates/export", params: { by: "hostname" } },
   { title: "Unmapped agents", desc: "Agents in the console that no LOB inventory or agent tag claims.", path: "/api/hosts/export", params: { unmapped: "1" } },
-  { title: "Not in inventory", desc: "Agents tagged to a LOB/MSP but missing from its inventory.", path: "/api/hosts/export", params: { unlisted: "1" } },
+  { title: "EDR only (not in inventory)", desc: "Agents tagged to a LOB/MSP but missing from its inventory.", path: "/api/hosts/export", params: { unlisted: "1" } },
   { title: "Pending install (all LOBs)", desc: "Applicable inventory nodes that are not installed, removed or hidden.", path: "/api/lobs/0/inventory/export", params: { pending: "1" } },
   { title: "Outdated sensors", desc: "Hosts older than the three newest sensor versions per platform.", path: "/api/hosts/export", params: { outdated: "1" } },
   { title: "All LOB inventories + verification", desc: "Every inventory row across LOBs with the Falcon verification result.", path: "/api/lobs/0/inventory/export" },
   { title: "Inventory says Yes · no agent", desc: "Inventory claims EDR installed but Falcon has no agent.", path: "/api/lobs/0/inventory/export", params: { claimed_missing: "1" } },
-  { title: "Activity log", desc: "All detected changes: installs, removals, IP changes, reinstalls…", path: "/api/events/export" },
 ];
 
 export default function Reports() {
@@ -31,7 +29,7 @@ export default function Reports() {
         <div className="grid size-11 place-items-center rounded-xl bg-accent text-white"><FileSpreadsheet className="size-5" /></div>
         <div className="min-w-0 flex-1">
           <div className="text-[15px] font-semibold">Executive workbook</div>
-          <div className="text-[12.5px] text-fg-2">One file with KPI summary, LOB and MSP coverage, pending & offline nodes, stale and offline agents, new installs, reinstalls, removals, duplicates, unlisted and unmapped agents, and outdated sensors.</div>
+          <div className="text-[12.5px] text-fg-2">One file with KPI summary, LOB and MSP coverage, pending & offline nodes, stale and offline agents, new installs, removals, duplicates, unlisted and unmapped agents, and outdated sensors.</div>
         </div>
         <Button variant="primary" onClick={() => downloadExcel("/api/reports/executive")}><Download /> Download</Button>
       </Card>

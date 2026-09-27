@@ -65,6 +65,7 @@ export function usePrevious<T>(v: T) {
 
 export type Meta = {
   connected: boolean;
+  demo?: boolean;
   inventory_fields: [string, string][];
   key_fields: Record<string, string>;
   platforms: string[];

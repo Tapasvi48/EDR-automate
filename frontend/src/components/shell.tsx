@@ -6,8 +6,9 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Command } from "cmdk";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
-  Activity, AlertTriangle, Building2, Copy, Network, FileSpreadsheet, FileText, Globe, LayoutDashboard, ListChecks, Menu, Monitor,
-  Moon, PackagePlus, PlugZap, RefreshCw, Search, Settings, ShieldCheck, Sun, Target, WifiOff,
+  BadgeCheck, Boxes, Flame, Globe2, Waypoints, History, Radar, ShieldAlert, Upload,
+  AlertTriangle, Building2, Copy, Network, FileSpreadsheet, FileText, Globe, LayoutDashboard, Menu, Monitor,
+  Moon, PackagePlus, PlugZap, RefreshCw, Search, Settings, ShieldCheck, Sun, Target, WifiOff, ShieldQuestion,
 } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
@@ -21,23 +22,33 @@ import { nextSyncLabel, useSyncStatus } from "./sync-progress";
 const NAV: { section?: string; items: { href: string; label: string; icon: React.ElementType }[] }[] = [
   { items: [
     { href: "/", label: "Overview", icon: LayoutDashboard },
-    { href: "/assets/", label: "All assets", icon: Monitor },
-    { href: "/ip-search/", label: "IP & NIC search", icon: Globe },
-    { href: "/lookup/", label: "Bulk lookup", icon: ListChecks },
+    { href: "/ip-search/", label: "Asset 360 search", icon: Globe },
   ] },
-  { section: "Hygiene", items: [
+  { section: "CrowdStrike", items: [
+    { href: "/assets/", label: "CrowdStrike assets", icon: Monitor },
     { href: "/health/", label: "Offline & stale", icon: WifiOff },
+    { href: "/edr-history/", label: "EDR history", icon: History },
     { href: "/duplicates/", label: "Duplicates", icon: Copy },
     { href: "/routing/", label: "Routing conflicts", icon: Network },
     { href: "/installs/", label: "New installs", icon: PackagePlus },
-    { href: "/activity/", label: "Activity log", icon: Activity },
+    { href: "/feasibility/", label: "EDR feasibility", icon: ShieldQuestion },
   ] },
   { section: "Inventory", items: [
+    { href: "/inventory/", label: "All inventory", icon: Boxes },
     { href: "/lobs/", label: "LOB inventory", icon: Building2 },
+    { href: "/exposure/", label: "Internet exposed", icon: Globe2 },
+    { href: "/matrix/", label: "Communication matrix", icon: Waypoints },
     { href: "/coverage/", label: "Coverage gaps", icon: Target },
     { href: "/templates/", label: "Templates", icon: FileText },
   ] },
+  { section: "Vulnerability", items: [
+    { href: "/vulnerabilities/", label: "Vulnerabilities", icon: ShieldAlert },
+    { href: "/scan-gaps/", label: "Scan coverage", icon: Radar },
+    { href: "/risk/", label: "Risk ranking", icon: Flame },
+    { href: "/exceptions/", label: "Exceptions (SOD)", icon: BadgeCheck },
+  ] },
   { section: "System", items: [
+    { href: "/upload/", label: "Upload center", icon: Upload },
     { href: "/reports/", label: "Reports", icon: FileSpreadsheet },
     { href: "/settings/", label: "Sync & settings", icon: Settings },
   ] },
@@ -123,7 +134,9 @@ export function Shell({ children }: { children: React.ReactNode }) {
           ))}
         </nav>
         <div className="border-t border-white/10 p-3 text-[11.5px]">
-          {status && !status.configured ? (
+          {status?.demo ? (
+            <div className="rounded-lg bg-white/5 px-2 py-1.5 text-center text-white/70">Sample data · syncing off</div>
+          ) : status && !status.configured ? (
             <Link href="/settings/" className="flex w-full items-center justify-center gap-1.5 rounded-lg bg-[var(--accent)] py-1.5 font-medium text-white hover:brightness-110">
               <PlugZap className="size-3.5" /> Connect CrowdStrike
             </Link>
@@ -155,7 +168,8 @@ export function Shell({ children }: { children: React.ReactNode }) {
           </button>
           <div className="flex-1" />
           {status?.running && <Link href="/settings/"><Badge tone="info"><RefreshCw className="size-3 animate-spin" /> {status.stage}</Badge></Link>}
-          {status && !status.configured && <Link href="/settings/"><Badge tone="warn">Not connected</Badge></Link>}
+          {status?.demo && <Badge tone="violet" title="Started with --demo: sample data in data/demo.db, syncing off. Your real database is not used.">Sample data</Badge>}
+          {status && !status.configured && !status.demo && <Link href="/settings/"><Badge tone="warn">Not connected</Badge></Link>}
           <ThemeToggle />
         </header>
         <div className="mx-auto w-full max-w-[1720px] px-4 pb-16 pt-5 lg:px-6">{children}</div>
@@ -206,7 +220,7 @@ function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenChange: (
             <Command.List className="max-h-[420px] overflow-y-auto p-2 scroll-thin">
               {dq.length >= 2 && (
                 <Command.Group heading="Actions" className="text-[11px] text-muted [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5">
-                  {looksIp && <PaletteItem onSelect={() => go(`/ip-search/?q=${encodeURIComponent(dq)}`)} icon={<Globe />}>Search IP / NIC history for <b>{dq}</b></PaletteItem>}
+                  {looksIp && <PaletteItem onSelect={() => go(`/ip-search/?q=${encodeURIComponent(dq)}`)} icon={<Globe />}>Asset 360 for <b>{dq}</b></PaletteItem>}
                   <PaletteItem onSelect={() => go(`/assets/?q=${encodeURIComponent(dq)}&state=all`)} icon={<Monitor />}>Show all assets matching <b>{dq}</b></PaletteItem>
                 </Command.Group>
               )}

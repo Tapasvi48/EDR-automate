@@ -9,7 +9,7 @@ import { cn } from "@/lib/utils";
 import { Badge, Button, Card, Checkbox, Field, KV, Loading, SearchInput, Select, Sheet, SectionTitle } from "./ui";
 import { DataTable, SimpleTable, type Column } from "./data-table";
 import { useMeta } from "@/lib/hooks";
-import { ActualBadge, ChangeTag, DupBadge, dupReasons, CoverageBadge, COVERAGE_HELP, HostLink, Live, Mono, VERIFICATION_HELP, VerifBadge, When, YN } from "./badges";
+import { ActualBadge, ChangeTag, FeasibleBadge, OsCell, DupBadge, dupReasons, CoverageBadge, COVERAGE_HELP, HostLink, Live, Mono, VERIFICATION_HELP, VerifBadge, When, YN } from "./badges";
 
 export const VERIFICATIONS = Object.keys(VERIFICATION_HELP);
 export const COVERAGE_STATUSES = Object.keys(COVERAGE_HELP);
@@ -23,12 +23,21 @@ export function inventoryColumns(showLob: boolean, historical: boolean): Column[
     { key: "ip", label: "IP", render: (r: any) => <Mono>{r.ip}</Mono> },
     { key: "node_name", label: "Node name", render: (r: any) => <b>{r.node_name}</b> },
     { key: "msp", label: "MSP", render: (r: any) => r.msp || <span className="text-muted">Unassigned</span> },
-    ...(historical ? [] : [{ key: "coverage_status", label: "EDR status", render: (r: any) => <CoverageBadge v={r.coverage_status} /> }]),
+    ...(historical ? [] : ([
+      { key: "coverage_status", label: "EDR status", render: (r: any) => <CoverageBadge v={r.coverage_status} /> },
+      { key: "niam", label: "NIAM", sort: false, render: (r: any) => r.niam_ne_ids ? <Badge tone="good" title={`NE ID ${r.niam_ne_ids}`}>Yes</Badge> : <span className="text-muted">No</span> },
+      { key: "last_scan", label: "Last scan", sort: false, render: (r: any) => r.last_scan ? <span title={r.last_scan}>{String(r.last_scan).slice(0, 10)}</span> : <span className="text-muted">Never</span> },
+    ] as Column[])),
     { key: "node_type", label: "Node type" },
     { key: "domain", label: "Domain", hidden: true },
     { key: "live", label: "Live / Non Live", render: (r: any) => <Live v={r.live} /> },
-    { key: "os", label: "OS" },
-    { key: "edr_feasible", label: "EDR feasible", render: (r: any) => <YN v={r.edr_feasible} /> },
+    ...(historical
+      ? [{ key: "os", label: "OS" }, { key: "edr_feasible", label: "EDR feasible", render: (r: any) => <YN v={r.edr_feasible} /> }]
+      : [{ key: "os_resolved", label: "OS", render: (r: any) => <OsCell os={r.os_resolved} src={r.os_source} /> },
+         { key: "feasible", label: "EDR feasible", render: (r: any) => <span className="inline-flex items-center gap-1.5"><FeasibleBadge v={r.feasible} reason={r.feasible_reason} />
+           {r.feasible_reason && !/^(No rule matched|EDR installed)/.test(r.feasible_reason) && <span className="text-[11px] text-muted">{r.feasible_reason.replace(/ rule:/, ":")}</span>}</span> },
+         { key: "edr_feasible", label: "EDR feasible (sheet)", hidden: true, render: (r: any) => <YN v={r.edr_feasible} /> },
+         { key: "os", label: "OS (sheet)", hidden: true }]),
     { key: "edr_installed", label: "EDR installed (inventory)", render: (r: any) => <YN v={r.edr_installed} /> },
     { key: "remarks", label: "Remarks", wrap: true, hidden: true },
   ];
@@ -53,7 +62,7 @@ type Facets = Record<string, any> & { dup?: Record<string, number>; total?: numb
 
 const STATUS_MAIN: [string, string][] = [["", "All"], ["Online", "Online"], ["Offline", "Offline"], ["Not Installed", "Not installed"]];
 const CHECKS: [string, string][] = [
-  ["applicable", "Applicable only (Live & feasible)"],
+  ["applicable", "EDR applicable only (Live & feasible)"],
   ["claimed_missing", "Inventory says Yes · no agent"],
   ["marked_no", "Inventory says No · agent running"],
 ];
@@ -64,14 +73,15 @@ const DUPS: [string, string, string][] = [
 ];
 /** labels for the active-filter pills (params can also arrive from dashboard links) */
 const PILL: Record<string, string> = {
-  coverage_status: "EDR status", node_type: "Node type", os: "OS", domain: "Domain", live: "Live / Non Live", edr_feasible: "EDR feasible",
+  coverage_status: "EDR status", node_type: "Node type", os: "OS", os_resolved: "OS", feasible: "EDR feasible", os_source: "OS from", domain: "Domain", live: "Live / Non Live", edr_feasible: "EDR feasible",
   edr_installed: "EDR installed (inventory)", dup: "Duplicates", change_tag: "Change", verification: "Claim check", edr_actual: "Falcon detail",
-  match_method: "Matched by", edr_state: "Agent state", applicable: "Applicable only", installed: "Installed", pending: "Not installed / removed / hidden",
+  match_method: "Matched by", edr_state: "Agent state", applicable: "EDR applicable only", installed: "Installed", pending: "Not installed or removed",
   claimed_missing: "Inventory says Yes · no agent", marked_no: "Inventory says No · agent running", installed_na: "Not applicable · agent running",
   cross_msp_dup: "IP in more than one MSP", in_scope: "Applicable only", mismatch: "Inventory claim mismatch",
+  niam: "In NIAM", scanned: "Scanned", gap: "Coverage gap",
 };
-const MORE_KEYS = ["live", "edr_feasible", "edr_installed", "domain", "dup", "change_tag", "applicable", "claimed_missing", "marked_no",
-  "installed", "pending", "installed_na", "cross_msp_dup", "verification", "edr_actual", "match_method", "edr_state", "in_scope", "mismatch"];
+const MORE_KEYS = ["live", "feasible", "os_source", "edr_feasible", "edr_installed", "domain", "dup", "change_tag", "applicable", "claimed_missing", "marked_no",
+  "installed", "pending", "installed_na", "cross_msp_dup", "verification", "edr_actual", "match_method", "edr_state", "in_scope", "mismatch", "niam", "scanned", "gap"];
 const isMainStatus = (v?: string) => STATUS_MAIN.some(([s]) => s && s === v);
 
 export function InventoryTable({ lobId, state, set, reset, versions, showLob, lobs, types }: {
@@ -97,6 +107,9 @@ export function InventoryTable({ lobId, state, set, reset, versions, showLob, lo
     if (v === "1") return null;
     if (k === "dup") return DUPS.find(([d]) => d === v)?.[1] || v;
     if (k === "change_tag") return v === "new" ? "New in latest version" : v === "modified" ? "Modified in latest version" : v;
+    if (k === "niam" || k === "scanned") return v === "1" ? "Yes" : "No";
+    if (k === "applicable" && v === "0") return "No (not feasible or legacy OS)";
+    if (k === "gap") return ({ edr: "EDR not installed", niam: "Not in NIAM", scan: "Never scanned", any: "Any gap" } as any)[v] || v;
     return v.split("|").join(", ");
   };
   const clearAll = () => set(Object.fromEntries(Object.keys(PILL).map((k) => [k, undefined])));
@@ -110,7 +123,7 @@ export function InventoryTable({ lobId, state, set, reset, versions, showLob, lo
         state={state}
         setState={set}
         omit={["tab", "id"]}
-        storageKey={"inv3" + (showLob ? "all" : "")}
+        storageKey={"inv4" + (showLob ? "all" : "")}
         noun="items"
         defaultSize={100}
         rowKey={(r: any) => `${r.lob_id || ""}|${r.item_key}`}
@@ -139,7 +152,9 @@ export function InventoryTable({ lobId, state, set, reset, versions, showLob, lo
           )}
           {!historical && <MspSelect lobId={scopeLob} value={state.msp} onChange={(v) => set({ msp: v })} />}
           <Select value={state.node_type} onChange={(v) => set({ node_type: v })} placeholder="All node types" options={opts("node_type")} />
-          <Select value={state.os} onChange={(v) => set({ os: v })} placeholder="All OS" options={opts("os")} />
+          {historical
+            ? <Select value={state.os} onChange={(v) => set({ os: v })} placeholder="All OS" options={opts("os")} />
+            : <Select value={state.os_resolved} onChange={(v) => set({ os_resolved: v })} placeholder="All OS" options={opts("os_resolved")} />}
           <Popover.Root>
             <Popover.Trigger asChild>
               <Button variant={moreActive ? "soft" : "default"}>
@@ -157,7 +172,18 @@ export function InventoryTable({ lobId, state, set, reset, versions, showLob, lo
                   <Field label="Live / Non Live">
                     <Select className="max-w-none" value={state.live} onChange={(v) => set({ live: v })} placeholder="Any" options={opts("live", ["Live", "Non Live", "(blank)"])} />
                   </Field>
-                  <Field label="EDR feasible">
+                  {!historical && (
+                    <Field label="EDR feasible (rules)">
+                      <Select className="max-w-none" value={state.feasible} onChange={(v) => set({ feasible: v })} placeholder="Any" options={opts("feasible", ["Yes", "No"])} />
+                    </Field>
+                  )}
+                  {!historical && (
+                    <Field label="OS from">
+                      <Select className="max-w-none" value={state.os_source} onChange={(v) => set({ os_source: v })} placeholder="Any"
+                        options={[["edr", "CrowdStrike agent"], ["inventory", "Inventory sheet"], ["scan", "VA scan"]]} />
+                    </Field>
+                  )}
+                  <Field label={historical ? "EDR feasible" : "EDR feasible (inventory sheet)"}>
                     <Select className="max-w-none" value={state.edr_feasible} onChange={(v) => set({ edr_feasible: v })} placeholder="Any" options={opts("edr_feasible", ["Yes", "No", "(blank)"])} />
                   </Field>
                   <Field label="EDR installed (inventory)">
@@ -228,7 +254,9 @@ function ItemSheet({ lobId, item, onClose }: { lobId: number; item: any; onClose
             <div className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted">Inventory record</div>
             <KV items={[
               ["IP", <Mono key="i">{cur.ip}</Mono>], ["Node name", cur.node_name], ["MSP", cur.msp || "Unassigned"], ["Node type", cur.node_type], ["Domain", cur.domain],
-              ["Live / Non Live", <Live key="l" v={cur.live} />], ["OS", cur.os], ["EDR feasible", <YN key="f" v={cur.edr_feasible} />],
+              ["Live / Non Live", <Live key="l" v={cur.live} />], ["OS (sheet)", cur.os || "–"], ...(cur.os_resolved !== undefined ? [["OS (resolved)", <OsCell key="o" os={cur.os_resolved} src={cur.os_source} />] as [string, React.ReactNode]] : []),
+              ...(cur.feasible ? [["EDR feasible (decided)", <span key="fd" className="inline-flex items-center gap-1.5"><FeasibleBadge v={cur.feasible} reason={cur.feasible_reason} /><span className="text-xs text-muted">{cur.feasible_reason}</span></span>] as [string, React.ReactNode]] : []),
+              ["EDR feasible (sheet)", <YN key="f" v={cur.edr_feasible} />],
               ["EDR installed (inventory)", <YN key="e" v={cur.edr_installed} />], ["Remarks", cur.remarks],
               ...(dupReasons({ ...item, ...cur }).length
                 ? [["Duplicate", <span key="d" className="text-serious-fg">{dupReasons({ ...item, ...cur }).join(" · ")}</span>] as [string, React.ReactNode]]

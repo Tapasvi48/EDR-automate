@@ -26,11 +26,11 @@ const TEXT: Record<Kind, { title: string; sub: string; noun: string; member: str
 };
 
 function Members({ kind, group, includeRemoved }: { kind: Kind; group: any; includeRemoved: string }) {
-  const { data } = useQuery({
+  const { data, error: dataErr, refetch: dataRetry } = useQuery({
     queryKey: ["dupm", group.connection_ip, group.local_ip, includeRemoved],
     queryFn: () => api<any>("/api/duplicates/members", { params: { connection_ip: group.connection_ip, local_ip: group.local_ip, include_removed: includeRemoved } }),
   });
-  if (!data) return <Loading />;
+  if (!data) return <Loading error={dataErr} retry={() => dataRetry()} />;
   const rows = data.rows;
   const rec = (x: any) => {
     if (x.console_state !== "active") return <Badge>Already {x.console_state}</Badge>;
@@ -42,7 +42,7 @@ function Members({ kind, group, includeRemoved }: { kind: Kind; group: any; incl
       <div className="mb-2 text-xs text-muted">{rows.length} agents · {TEXT[kind].member}</div>
       <div className="overflow-hidden rounded-lg border border-border bg-surface">
         <SimpleTable rows={rows} columns={[
-          { key: "hostname", label: "Hostname", render: (x: any) => <span><HostLink aid={x.aid}><b>{x.hostname}</b></HostLink>{x.is_reinstall ? <Badge tone="violet" className="ml-1.5">REINSTALL</Badge> : null}</span> },
+          { key: "hostname", label: "Hostname", render: (x: any) => <span><HostLink aid={x.aid}><b>{x.hostname}</b></HostLink></span> },
           { key: "aid", label: "Agent ID", render: (x: any) => <Mono>{x.aid}</Mono> },
           { key: "st", label: "Status", render: (x: any) => <HostStatus r={x} /> },
           { key: "first_seen", label: "Installed", render: (x: any) => fmtDt(x.first_seen) },
