@@ -12,7 +12,8 @@ from . import config, db
 
 FIELDS = config.INVENTORY_FIELD_KEYS
 ALIASES = {
-    "ip": ["ip", "ipaddress", "ipaddr", "hostip", "serverip", "primaryip", "managementip", "nodeip", "privateip", "ipv4"],
+    "ip": ["ip", "ipaddress", "ipaddr", "hostip", "serverip", "primaryip", "managementip", "mgmtip", "mgmtipaddress", "deviceip", "oamip",
+           "loopbackip", "nodeip", "privateip", "ipv4", "ipv6", "assetip", "systemip"],
     "node_name": ["nodename", "hostname", "host", "servername", "computername", "devicename", "assetname", "machinename", "name", "node", "server"],
     "msp": ["msp", "mspname", "managedby", "managedserviceprovider", "serviceprovider", "vendor", "supportvendor", "partner", "supportpartner"],
     "node_type": ["nodetype", "type", "assettype", "devicetype", "servertype", "role", "category", "hosttype"],
@@ -430,12 +431,61 @@ def scoped_items(c, lob, parsed, mapping, key_field, scope_msp=None, type_id=Non
     return prev, items, warnings
 
 
-def preview_upload(c, lob_id, token, mapping, key_field, sheet=None, header_row=None, scope_msp=None, type_id=None):
-    parsed = parse_upload(token, sheet, header_row)
+def multi_items(c, lob, token, sheets, key_field, scope_msp=None, type_id=None):
+    """Several sheets of one workbook, each with its own header row and mapping, merged into one set of items.
+    With more than one sheet every row keeps its sheet name (extra column "Sheet"). The same key on two sheets: an exact copy
+    is merged; a different row is kept under key#sheet."""
+    t = get_type(c, lob["id"], type_id)
+    items, warnings = OrderedDict(), []
+    use = [s for s in sheets if s.get("include", True)]
+    for sh in use:
+        mapping = {k: v for k, v in (sh.get("mapping") or {}).items() if v}
+        if "ip" not in mapping and "node_name" not in mapping:
+            raise ValueError(f"Sheet '{sh['sheet']}': map at least the IP or Node Name column")
+        parsed = parse_upload(token, sh["sheet"], sh.get("header_row"))
+        got, w = build_items(parsed, mapping, key_field, forced_msp=scope_msp, forced_type=t and t["name"], key_prefix=type_key_prefix(type_id))
+        warnings += [f"{sh['sheet']}: {x}" for x in w] if len(use) > 1 else w
+        for k, it in got.items():
+            if len(use) > 1:
+                it["extra"] = {**(it.get("extra") or {}), "Sheet": sh["sheet"]}
+            if k in items:
+                if _hash({**it, "extra": {x: y for x, y in (it.get("extra") or {}).items() if x != "Sheet"}}) == \
+                        _hash({**items[k], "extra": {x: y for x, y in (items[k].get("extra") or {}).items() if x != "Sheet"}}):
+                    items[k]["file_dups"] = (items[k].get("file_dups") or 0) + 1
+                    continue
+                k = f"{k}#{sh['sheet'].lower()}"
+            items[k] = it
+    prev = load_version_items(c, stream_version_id(c, lob, type_id))
+    if scope_msp:
+        items = merge_scope(prev, items, scope_msp)
+    return prev, items, warnings
+
+
+def sheets_info(token, template=None):
+    """Every sheet of an uploaded workbook: header row, columns, sample, suggested mapping and whether it looks like inventory."""
+    first = parse_upload(token)
+    out = []
+    for name in first["sheets"]:
+        try:
+            p = parse_upload(token, name)
+        except Exception as e:  # noqa: BLE001
+            out.append({"sheet": name, "error": str(e), "include": False, "row_count": 0})
+            continue
+        m = suggest_mapping(p["headers"], template)
+        out.append({"sheet": name, "header_row": p["header_row"], "headers": p["headers"], "row_count": len(p["rows"]), "sample": p["rows"][:8],
+                    "mapping": m, "include": bool(p["rows"]) and ("ip" in m or "node_name" in m)})
+    return out
+
+
+def preview_upload(c, lob_id, token, mapping, key_field, sheet=None, header_row=None, scope_msp=None, type_id=None, sheets=None):
     lob = db.one(c, "SELECT * FROM lobs WHERE id=?", (lob_id,))
     if not lob:
         raise ValueError("LOB not found")
-    prev, items, warnings = scoped_items(c, lob, parsed, mapping, key_field, scope_msp, type_id)
+    if sheets:
+        prev, items, warnings = multi_items(c, lob, token, sheets, key_field, scope_msp, type_id)
+    else:
+        parsed = parse_upload(token, sheet, header_row)
+        prev, items, warnings = scoped_items(c, lob, parsed, mapping, key_field, scope_msp, type_id)
     cur_vid = stream_version_id(c, lob, type_id)
     prev_key = db.one(c, "SELECT key_field FROM inventory_versions WHERE id=?", (cur_vid,)) if cur_vid else None
     if prev_key and prev_key["key_field"] != key_field:

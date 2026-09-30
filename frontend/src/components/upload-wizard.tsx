@@ -33,6 +33,8 @@ export function UploadWizard({ lob, open, onOpenChange, mspId, typeId }: { lob: 
   };
   const [parsed, setParsed] = React.useState<any>(null);
   const [mapping, setMapping] = React.useState<Record<string, string>>({});
+  // several sheets in one workbook: each sheet keeps its own header row and mapping; parsed / mapping hold the sheet on screen
+  const [sheetList, setSheetList] = React.useState<any[] | null>(null);
   const [keyField, setKeyField] = React.useState("ip");
   const [templateId, setTemplateId] = React.useState("");
   const [saveTpl, setSaveTpl] = React.useState(false);
@@ -73,6 +75,13 @@ export function UploadWizard({ lob, open, onOpenChange, mspId, typeId }: { lob: 
       setTask(reading);
       const r = await api<any>(`/api/uploads/${up.token}/parse`, { method: "POST", body: { lob_id: lob.id } });
       applyParse(r);
+      setSheetList(null);
+      if (r.sheets.length > 1) {
+        const sl = (await api<any>(`/api/uploads/${up.token}/sheets`, { method: "POST", body: { lob_id: lob.id } })).sheets;
+        setSheetList(sl);
+        const first = sl.find((x: any) => x.include) || sl[0];
+        if (first && first.sheet !== r.sheet) showSheet(r, first);
+      }
       setTplName(`${lob.name} inventory`);
       setStep(1);
     } catch (e: any) {
@@ -82,6 +91,20 @@ export function UploadWizard({ lob, open, onOpenChange, mspId, typeId }: { lob: 
       if (fileRef.current) fileRef.current.value = "";
     }
   };
+  /** put one sheet of the workbook on screen (its own headers, sample and mapping) */
+  const showSheet = (base: any, sh: any) => {
+    setParsed({ ...base, sheet: sh.sheet, header_row: sh.header_row, headers: sh.headers, sample: sh.sample, row_count: sh.row_count });
+    setMapping(sh.mapping || {});
+  };
+  const saveCurrent = (list: any[]) => list.map((x) => (x.sheet === parsed?.sheet ? { ...x, mapping, header_row: parsed.header_row, headers: parsed.headers, sample: parsed.sample, row_count: parsed.row_count } : x));
+  const pickSheet = (name: string) => {
+    if (!sheetList) return;
+    const list = saveCurrent(sheetList);
+    setSheetList(list);
+    const sh = list.find((x) => x.sheet === name);
+    if (sh) showSheet(parsed, sh);
+  };
+  const toggleSheet = (name: string, on: boolean) => setSheetList((l) => l && saveCurrent(l).map((x) => (x.sheet === name ? { ...x, include: on } : x)));
   const reparse = (patch: { sheet?: string; header_row?: number; template_id?: string }) =>
     run("Re-reading the file", async () => {
       const r = await api<any>(`/api/uploads/${parsed.token}/parse`, {
@@ -89,11 +112,17 @@ export function UploadWizard({ lob, open, onOpenChange, mspId, typeId }: { lob: 
         body: { sheet: patch.sheet ?? parsed.sheet, header_row: patch.header_row ?? parsed.header_row, template_id: patch.template_id !== undefined ? (patch.template_id ? +patch.template_id : null) : (templateId ? +templateId : null), lob_id: lob.id },
       });
       applyParse(r);
+      if (sheetList) setSheetList((l) => l && l.map((x) => (x.sheet === r.sheet ? { ...x, header_row: r.header_row, headers: r.headers, sample: r.sample, row_count: r.row_count, mapping: r.mapping } : x)));
       if (patch.template_id !== undefined) setTemplateId(patch.template_id);
     });
-  const body = () => ({ token: parsed.token, sheet: parsed.sheet, header_row: parsed.header_row, mapping: scope ? { ...mapping, msp: "" } : mapping, key_field: keyField, scope_msp_id: scope ? +scope : null, type_id: invType ? +invType : null });
+  const clean = (m: Record<string, string>) => (scope ? { ...m, msp: "" } : m);
+  const body = () => ({
+    token: parsed.token, sheet: parsed.sheet, header_row: parsed.header_row, mapping: clean(mapping), key_field: keyField,
+    scope_msp_id: scope ? +scope : null, type_id: invType ? +invType : null,
+    ...(sheetList ? { sheets: saveCurrent(sheetList).filter((x) => x.include).map((x) => ({ sheet: x.sheet, header_row: x.header_row, mapping: clean(x.mapping || {}), include: true })) } : {}),
+  });
   const doPreview = () =>
-    run(`Comparing ${fmtN(parsed.row_count)} rows with the current version`, async () => {
+    run(`Comparing ${fmtN(sheetList ? saveCurrent(sheetList).filter((x) => x.include).reduce((a, x) => a + (x.row_count || 0), 0) : parsed.row_count)} rows with the current version`, async () => {
       setPreview(await api(`/api/lobs/${lob.id}/upload/preview`, { method: "POST", body: body() }));
       setStep(2);
     });
@@ -117,7 +146,9 @@ export function UploadWizard({ lob, open, onOpenChange, mspId, typeId }: { lob: 
     const i = parsed.headers.indexOf(h);
     return parsed.sample.map((r: string[]) => r[i]).filter(Boolean).slice(0, 3);
   };
-  const keyOk = keyField === "node_name" ? !!mapping.node_name : keyField === "ip" ? !!(mapping.ip || mapping.node_name) : !!(mapping.ip && mapping.node_name);
+  const keyOkFor = (m: Record<string, string>) => keyField === "node_name" ? !!m.node_name : keyField === "ip" ? !!(m.ip || m.node_name) : !!(m.ip && m.node_name);
+  const liveList = sheetList ? saveCurrent(sheetList) : null;
+  const keyOk = liveList ? liveList.some((x) => x.include) && liveList.filter((x) => x.include).every((x) => keyOkFor(x.mapping || {})) : keyOkFor(mapping);
 
   return (
     <Modal open={open} onOpenChange={onOpenChange} wide title={<span>Upload inventory · <span className="text-accent-fg">{lob.name}</span></span>}
@@ -180,13 +211,37 @@ export function UploadWizard({ lob, open, onOpenChange, mspId, typeId }: { lob: 
       {step === 1 && parsed && (
         <div className={busy ? "pointer-events-none opacity-60" : ""}>
           <div className="mb-4 flex flex-wrap items-end gap-3">
-            <div className="flex items-center gap-2 rounded-lg bg-surface-2 px-3 py-2 text-[13px]"><FileSpreadsheet className="size-4 text-good" /><b>{parsed.filename}</b><span className="text-muted">· {fmtN(parsed.row_count)} data rows</span></div>
-            {parsed.sheets.length > 1 && <Field label="Sheet"><Select value={parsed.sheet} onChange={(v) => reparse({ sheet: v })} options={parsed.sheets} /></Field>}
+            <div className="flex items-center gap-2 rounded-lg bg-surface-2 px-3 py-2 text-[13px]"><FileSpreadsheet className="size-4 text-good" /><b>{parsed.filename}</b>
+              <span className="text-muted">· {sheetList ? `sheet ${parsed.sheet} · ` : ""}{fmtN(parsed.row_count)} data rows</span></div>
+            {parsed.sheets.length > 1 && !sheetList && <Field label="Sheet"><Select value={parsed.sheet} onChange={(v) => reparse({ sheet: v })} options={parsed.sheets} /></Field>}
             <Field label="Header row"><Input type="number" min={1} className="w-20" value={parsed.header_row} onChange={(e) => e.target.value && reparse({ header_row: +e.target.value })} /></Field>
             <Field label="Template"><Select value={templateId} onChange={(v) => reparse({ template_id: v })} placeholder="Auto-detect columns" options={(meta?.templates || []).map((t) => ({ value: t.id, label: t.name }))} /></Field>
             <Field label="Key field (row identity across versions)"><Select value={keyField} onChange={setKeyField} options={Object.entries(meta?.key_fields || {})} /></Field>
             <Field label="This file contains"><Select value={scope} onChange={setScope} placeholder="All MSPs (use MSP column)" options={lobMsps.map((m) => ({ value: m.id, label: `Only ${m.name}'s nodes` }))} /></Field>
           </div>
+          {liveList && (
+            <div className="mb-4 rounded-xl border border-border p-3">
+              <div className="mb-2 flex items-center gap-2 text-[12.5px] font-semibold">Sheets in this workbook
+                <span className="font-normal text-muted">tick the sheets that hold inventory · click one to map its columns · the ticked sheets become one version</span></div>
+              <div className="flex flex-wrap gap-2">
+                {liveList.map((x) => {
+                  const ok = keyOkFor(x.mapping || {});
+                  return (
+                    <div key={x.sheet} onClick={() => !x.error && pickSheet(x.sheet)}
+                      className={cn("flex min-w-[170px] cursor-pointer items-start gap-2 rounded-lg border px-2.5 py-2 text-[12.5px]",
+                        x.sheet === parsed.sheet ? "border-accent bg-accent-soft/50" : "border-border hover:border-border-strong", x.error && "opacity-50")}>
+                      <input type="checkbox" className="mt-0.5" checked={!!x.include} disabled={!!x.error} onClick={(e) => e.stopPropagation()} onChange={(e) => toggleSheet(x.sheet, e.target.checked)} />
+                      <span className="min-w-0">
+                        <span className="block truncate font-medium">{x.sheet}</span>
+                        <span className="block text-[11px] text-muted">{x.error ? "cannot read" : `${fmtN(x.row_count)} rows`}
+                          {x.include && !x.error && <span className={ok ? "text-good-fg" : "text-crit-fg"}> · {ok ? "mapped" : "map IP / Node Name"}</span>}</span>
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
           {invType && (
             <Callout className="mb-4">Uploading into type <b>{typeName}</b> — every row gets node type <b>{typeName}</b> and is compared with the current {typeName} version only. The main inventory and other types are not touched.</Callout>
           )}

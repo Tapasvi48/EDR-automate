@@ -1138,6 +1138,18 @@ def _parse_response(token, sheet=None, header_row=None, template_id=None, lob_id
             "key_field": template["key_field"] if template else "ip"}
 
 
+@app.post("/api/uploads/{token}/sheets")
+def upload_sheets(token: str, data: dict = Body(default={})):
+    """Every sheet of the workbook with its own suggested mapping; sheets that look like inventory are pre-selected."""
+    with db.get_conn() as c:
+        tid = data.get("template_id")
+        if not tid and data.get("lob_id"):
+            lob = db.one(c, "SELECT default_template_id FROM lobs WHERE id=?", (data["lob_id"],))
+            tid = (lob and lob["default_template_id"]) or db.standard_template_id(c)
+        template = db.one(c, "SELECT * FROM templates WHERE id=?", (tid,)) if tid else None
+    return {"sheets": inventory.sheets_info(token, template)}
+
+
 @app.post("/api/uploads/{token}/parse")
 def reparse(token: str, data: dict = Body(default={})):
     return _parse_response(token, data.get("sheet"), data.get("header_row"), data.get("template_id"), data.get("lob_id"))
@@ -1147,7 +1159,8 @@ def reparse(token: str, data: dict = Body(default={})):
 def upload_preview(lob_id: int, data: dict = Body(...)):
     with db.get_conn() as c:
         return inventory.preview_upload(c, lob_id, data["token"], data.get("mapping") or {}, data.get("key_field") or "ip",
-                                        data.get("sheet"), data.get("header_row"), _scope_name(c, lob_id, data), data.get("type_id"))
+                                        data.get("sheet"), data.get("header_row"), _scope_name(c, lob_id, data), data.get("type_id"),
+                                        sheets=data.get("sheets"))
 
 
 def _scope_name(c, lob_id, data):
@@ -1163,15 +1176,24 @@ def _scope_name(c, lob_id, data):
 def upload_commit(lob_id: int, data: dict = Body(...)):
     mapping = {k: v for k, v in (data.get("mapping") or {}).items() if v}
     key_field = data.get("key_field") or "ip"
-    if "ip" not in mapping and "node_name" not in mapping:
+    sheets = [s for s in (data.get("sheets") or []) if s.get("include", True)]
+    if sheets:  # several sheets of one workbook, each with its own mapping
+        mapping = {k: v for k, v in (sheets[0].get("mapping") or {}).items() if v}
+    elif "ip" not in mapping and "node_name" not in mapping:
         raise ValueError("Map at least the IP or Node Name column before committing")
-    parsed = inventory.parse_upload(data["token"], data.get("sheet"), data.get("header_row"))
+    parsed = inventory.parse_upload(data["token"], sheets[0]["sheet"] if sheets else data.get("sheet"),
+                                    sheets[0].get("header_row") if sheets else data.get("header_row"))
     with db.get_conn() as c:
         lob = db.one(c, "SELECT * FROM lobs WHERE id=?", (lob_id,))
         if not lob:
             raise HTTPException(404, "LOB not found")
         scope = _scope_name(c, lob_id, data)
-        _, items, warnings = inventory.scoped_items(c, lob, parsed, mapping, key_field, scope, data.get("type_id"))
+        if sheets:
+            _, items, warnings = inventory.multi_items(c, lob, data["token"], sheets, key_field, scope, data.get("type_id"))
+            if len(sheets) > 1:
+                warnings.insert(0, f"{len(sheets)} sheets merged: " + ", ".join(s["sheet"] for s in sheets))
+        else:
+            _, items, warnings = inventory.scoped_items(c, lob, parsed, mapping, key_field, scope, data.get("type_id"))
         if not items:
             raise ValueError("No usable rows found with this mapping")
         template_id = data.get("template_id")

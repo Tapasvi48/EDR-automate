@@ -153,6 +153,15 @@ Assets in no inventory:
 
 An asset is internet-exposed when an inventory facing / zone / public-IP column, a VA scan of a public IP, or an inbound
 Internet / ISP rule in the communication matrix says so, or its own IP is public and comes from an inventory, the NIAM dump or a scan.
+**Shadow exposure** (Internet exposed → Shadow exposure tab) lists public IPv4s the communication matrix does not account for:
+- ports a VA scan found open on a public IP that no inbound rule allows;
+- public CrowdStrike connection IPs that no inbound rule covers at all;
+- known IPs inside the **Shadow ranges** you add on that tab (e.g. your own public ranges) that no inbound rule covers.
+
+Each row says what saw it (VA scan / CrowdStrike connection IP / shadow range). Whitelisted, CGNAT and indirect-range addresses are left out.
+The same applies to exposure: a public connection IP makes the asset internet exposed unless it is whitelisted, CGNAT or in an
+indirect range.
+
 **IPv6:** a global IPv6 address is **not** exposure evidence on its own, since IPv6 has no NAT and most addresses are global. An IPv6 asset is
 exposed only when one of these says so:
 - a communication-matrix row (inbound rule, NAT list, pool, register, source NAT)
@@ -366,6 +375,10 @@ Cells with several IPs use the first one. Searches accept exact IPs, IPv4 prefix
      `MNRA` vs `MNRA1` / `MNRA2` / `MNRA3` is rejected): **not** a match. It is listed on **CrowdStrike → Possible matches** for review
      and counted nowhere.
   A NIC IP on a differently named agent is shown as "IP Used by Other Host" and never counted as installed.
+- **Workbooks with several sheets**: the upload lists every sheet and pre-ticks the ones that look like inventory (an IP or node-name
+  column is found). Tick or untick sheets, then click a sheet to set its header row and map its columns; each sheet keeps its own
+  mapping. The ticked sheets become **one** new version, and every row keeps its sheet name in an extra "Sheet" column. When two sheets
+  share a key, an exact copy is merged and a different row is kept.
 - **Same IP on several rows**: every row is kept. The second row's key adds its node name, and all of them are tagged under Duplicates.
   Only exact copies of a row are merged.
 - **NIAM Integrated / NE ID columns** (standard template): when filled, they are what the console shows and counts for the node. When

@@ -54,7 +54,7 @@ export default function Exposure() {
         <Kpi label="No EDR agent" value={s.no_edr} tone="crit" foot="exposed and unprotected" active={state.edr_status === "Not Installed"} onClick={() => only({ edr_status: "Not Installed" })} />
         <Kpi label="Crit / high vulns" value={s.crit_high} tone="serious" active={state.vulns === "crit_high"} onClick={() => only({ vulns: "crit_high" })} />
         <Kpi label="Not in any inventory" value={s.not_in_inventory} tone="violet" active={state.missing === "inventory"} onClick={() => only({ missing: "inventory" })} />
-        <Kpi label="Shadow ports" value={sh?.shadow ?? "–"} tone="serious" foot={sh ? `on ${fmtN(sh.shadow_ips)} public IPs · no rule allows them` : "open on a public IP, no rule"} active={tab === "shadow"} onClick={() => replaceAll({ tab: "shadow" })} />
+        <Kpi label="Shadow exposure" value={sh?.shadow_ips ?? "–"} tone="serious" foot={sh ? `public IPs · ${fmtN(sh.shadow)} ports / IPs no matrix rule covers` : "public IPs no matrix rule covers"} active={tab === "shadow"} onClick={() => replaceAll({ tab: "shadow" })} />
         <Kpi label="Indirectly exposed" value={s.cgnat} foot="CGNAT + your telecom ranges" active={tab === "cgnat"} onClick={() => replaceAll({ tab: "cgnat" })} />
       </KpiGrid>
 
@@ -93,6 +93,8 @@ export default function Exposure() {
 }
 
 const LISTS = {
+  shadow: { title: "Shadow ranges", ok: "Shadow ranges saved",
+    text: "IPs and subnets to watch for shadow exposure, e.g. your own public ranges. Every known IP inside them (inventory, CrowdStrike, VA scan, NIAM) that no inbound rule of the communication matrix covers is listed on the Shadow exposure tab. Whitelisted, CGNAT and indirect ranges are left out." },
   manual: { title: "Mark internet exposed", ok: "Exposed list saved",
     text: "IPs and subnets you know are reachable from the internet but no upload says so. In the note, say where it comes from (e.g. MP firewall export, pentest report); it shows in the Exposed by column." },
   whitelist: { title: "Exposure whitelist", ok: "Whitelist saved", text: "IPs and subnets here are never listed as internet exposed. They stay visible on the Whitelisted tab." },
@@ -100,7 +102,7 @@ const LISTS = {
     text: "Telecom ranges reachable from the internet only through another network (CGNAT pools, partner / NNI / roaming interconnects, core links). Every asset whose IP or NAT IP is inside them shows on the Indirectly exposed tab. CGNAT (100.64.0.0/10) is always included." },
 };
 /** Editable IP / subnet list: the whitelist or the indirectly exposed ranges. */
-function ListDialog({ kind, open, onOpenChange, entries }: { kind: "whitelist" | "indirect" | "manual"; open: boolean; onOpenChange: (v: boolean) => void; entries: any[] }) {
+function ListDialog({ kind, open, onOpenChange, entries }: { kind: "whitelist" | "indirect" | "manual" | "shadow"; open: boolean; onOpenChange: (v: boolean) => void; entries: any[] }) {
   const L = LISTS[kind];
   const qc = useQueryClient();
   const [rows, setRows] = React.useState<any[]>(entries);
@@ -109,7 +111,7 @@ function ListDialog({ kind, open, onOpenChange, entries }: { kind: "whitelist" |
   const save = async () => {
     setBusy(true);
     try {
-      const r = await api<any>(`/api/exposure/${kind}`, { method: "PUT", body: { entries: rows } });
+      const r = await api<any>(`/api/exposure/${kind === "shadow" ? "shadow-ranges" : kind}`, { method: "PUT", body: { entries: rows } });
       toast.success(`${L.ok} · ${fmtN(r.entries.length)} entr${r.entries.length === 1 ? "y" : "ies"}`);
       qc.invalidateQueries();
       onOpenChange(false);
@@ -138,25 +140,31 @@ const SEV = ["Info", "Low", "Medium", "High", "Critical"];
 /** Ports the VA scan found open on a public IP, against the inbound Internet / ISP rules of the communication matrix. */
 function ShadowTable({ data }: { data: any }) {
   const [all, setAll] = React.useState(false);
+  const [rangesOpen, setRangesOpen] = React.useState(false);
   if (!data) return <Loading />;
   const rows = all ? data.rows : data.rows.filter((r: any) => r.shadow);
   return (
     <Card>
       <div className="flex flex-wrap items-center gap-2 px-4 py-3 text-[12.5px] text-fg-2">
-        A shadow port is reachable from the internet (the scanner reached it on a public IP) but no active inbound rule in the communication matrix allows it —
-        undocumented exposure, or a matrix that is out of date.
-        <Button size="sm" variant={all ? "soft" : "ghost"} className="ml-auto" onClick={() => setAll(!all)}>{all ? "Show shadow ports only" : `Show all ${fmtN(data.ports)} public ports`}</Button>
+        <span className="max-w-[760px]">Public IPv4s the communication matrix does not account for: ports a VA scan found open on a public IP that no inbound rule allows,
+          and public CrowdStrike connection IPs or IPs in your shadow ranges that no inbound rule covers at all. Undocumented exposure, or a matrix that is out of date.</span>
+        <span className="ml-auto flex gap-1.5">
+          <Button size="sm" onClick={() => setRangesOpen(true)}>Shadow ranges ({fmtN(data.ranges?.length || 0)})</Button>
+          <Button size="sm" variant={all ? "soft" : "ghost"} onClick={() => setAll(!all)}>{all ? "Show shadow only" : `Show all ${fmtN(data.ports)} checked`}</Button>
+        </span>
       </div>
       <SimpleTable rows={rows} maxHeight="60vh" empty="No shadow ports: every port the scanner saw on a public IP is allowed by a rule" columns={[
         { key: "ip", label: "Public IP", render: (x: any) => <Link className="font-mono text-[12px] text-accent-fg hover:underline" href={`/ip-search/?q=${encodeURIComponent(x.internal_ip || x.ip)}`}>{x.ip}</Link> },
         { key: "asset", label: "Asset", render: (x: any) => <span>{x.asset || "–"}{x.internal_ip && <span className="ml-1 text-[11.5px] text-muted">({x.internal_ip})</span>}</span> },
         { key: "lobs", label: "LOB" },
-        { key: "port", label: "Port", render: (x: any) => <b className="font-mono">{x.port}/{x.protocol}</b> },
+        { key: "port", label: "Port", render: (x: any) => x.whole_ip ? <span className="text-[12px] text-muted">whole IP{x.scanned ? "" : " · not scanned"}</span> : <b className="font-mono">{x.port}/{x.protocol}</b> },
+        { key: "seen_by", label: "Seen by", render: (x: any) => <span className="text-[12px]">{x.seen_by}</span> },
         { key: "max_rank", label: "Worst open finding", render: (x: any) => x.max_rank >= 0 ? <SeverityBadge s={SEV[x.max_rank]} /> : <span className="text-muted">none open</span> },
         { key: "names", label: "Findings", wrap: true, render: (x: any) => <span className="text-[12px] text-fg-2">{x.names.join(" · ")}</span> },
         { key: "rules", label: "Allowed by", render: (x: any) => x.shadow ? <Badge tone="crit">Shadow — no rule</Badge> : <span className="text-[12px]">{x.rules}</span> },
         { key: "rules_on_ip", label: "Rules on this IP", num: true },
       ]} />
+      <ListDialog kind="shadow" open={rangesOpen} onOpenChange={setRangesOpen} entries={data.ranges || []} />
     </Card>
   );
 }

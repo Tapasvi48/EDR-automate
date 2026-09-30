@@ -51,7 +51,7 @@ def is_cgnat(ip):
     return a.version == 4 and a in CGNAT
 
 
-LIST_KEYS = {"whitelist": "exposure_whitelist", "indirect": "exposure_indirect", "manual": "exposure_manual"}
+LIST_KEYS = {"whitelist": "exposure_whitelist", "indirect": "exposure_indirect", "manual": "exposure_manual", "shadow": "exposure_shadow_ranges"}
 
 
 def ip_list(c, kind):
@@ -573,25 +573,50 @@ def exposure_summary():
 
 @router.get("/api/exposure/shadow")
 def exposure_shadow():
-    """Every public IP the VA scan covered: open ports and whether an inbound Internet / ISP rule allows them.
-    Ports no rule allows are shadow exposure."""
+    """Shadow exposure: public IPv4s we can see that the communication matrix does not account for.
+    Checked: every public IP a VA scan covered (port by port: open ports no inbound rule allows), every public CrowdStrike
+    connection IP, and every known IP inside the Shadow ranges you list (e.g. your own public ranges). An IP no inbound
+    rule covers at all is shadow as a whole. Whitelisted, CGNAT and indirect-range addresses are left out."""
     from .commatrix import shadow_ports
     out = []
     with db.get_conn() as c:
-        owners = {}
-        for r in db.rows(c, "SELECT ip, name, nat_of, lobs FROM asset_registry"):
-            owners[r["ip"]] = r
-        for ip in sorted({r["ip"] for r in c.execute("SELECT DISTINCT ip FROM vuln_findings") if exposed_by_itself(r["ip"])}):
+        owners = {r["ip"]: r for r in db.rows(c, "SELECT ip, name, nat_of, lobs FROM asset_registry")}
+        listed, indirect, ranges = _whitelisted_fn(c), _net_fn(ip_list(c, "indirect")), _net_fn(ip_list(c, "shadow"))
+        seen = {}
+
+        def add(ip, why):
+            if exposed_by_itself(ip) and not listed(ip) and not is_cgnat(ip) and not indirect(ip):
+                seen.setdefault(ip, set()).add(why)
+        for r in c.execute("SELECT DISTINCT ip FROM vuln_findings"):
+            add(r["ip"], "VA scan")
+        for r in c.execute("SELECT DISTINCT connection_ip ip FROM hosts WHERE console_state='active' AND COALESCE(connection_ip,'')<>''"):
+            add(r["ip"], "CrowdStrike connection IP")
+        if ip_list(c, "shadow"):
+            for ip in owners:
+                if ip and ranges(ip):
+                    add(ip, f"In shadow range {ranges(ip)}")
+        scanned = {r["ip"] for r in c.execute("SELECT DISTINCT ip FROM vuln_findings")}
+        for ip in sorted(seen, key=lambda x: db.ip_to_num(x) or 0):
             o = owners.get(ip) or {}
             inner = [x for x in (o.get("nat_of") or "").split(", ") if x]
             ports, rules = shadow_ports(c, ip, inner)
-            for p in ports:
-                internal = inner[0] if inner else None
-                io = owners.get(internal) or {} if internal else {}
-                out.append({**p, "asset": io.get("name") or o.get("name"), "internal_ip": internal, "lobs": io.get("lobs") or o.get("lobs"),
-                            "rules_on_ip": len(rules), "rules": ", ".join(p["rules"])})
+            internal = inner[0] if inner else None
+            io = owners.get(internal) or {} if internal else {}
+            base = {"asset": io.get("name") or o.get("name"), "internal_ip": internal, "lobs": io.get("lobs") or o.get("lobs"),
+                    "rules_on_ip": len(rules), "seen_by": ", ".join(sorted(seen[ip]))}
+            if ports:
+                for p in ports:
+                    out.append({**p, **base, "rules": ", ".join(p["rules"])})
+            else:  # no port data for this IP: shadow when no inbound rule covers the IP at all
+                out.append({"ip": ip, "port": None, "protocol": None, "findings": 0, "open": 0, "max_rank": -1, "names": [],
+                            **base, "rules": ", ".join(rules), "shadow": not rules, "whole_ip": True, "scanned": ip in scanned})
     return {"rows": out, "shadow": sum(1 for p in out if p["shadow"]), "ports": len(out),
-            "ips": len({p["ip"] for p in out}), "shadow_ips": len({p["ip"] for p in out if p["shadow"]})}
+            "ips": len({p["ip"] for p in out}), "shadow_ips": len({p["ip"] for p in out if p["shadow"]}), "ranges": ip_list_public("shadow")}
+
+
+def ip_list_public(kind):
+    with db.get_conn() as c:
+        return ip_list(c, kind)
 
 
 def whitelist_list():
@@ -644,3 +669,10 @@ def exposure_indirect_save(data: dict = Body(...)):
 def exposure_manual_save(data: dict = Body(...)):
     """IPs / subnets marked internet exposed by hand; the note says where that comes from (e.g. 'MP firewall export')."""
     return _save_list("manual", data)
+
+
+@router.put("/api/exposure/shadow-ranges")
+def exposure_shadow_ranges_save(data: dict = Body(...)):
+    """IPs / subnets to watch for shadow exposure (e.g. your own public ranges): any known IP in them that no inbound matrix
+    rule covers is listed on the Shadow exposure tab."""
+    return _save_list("shadow", data)
