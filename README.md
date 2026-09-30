@@ -170,6 +170,17 @@ One workbook may hold several sheets of different kinds. The upload lists every 
 
 The type is guessed from the headers and can be changed. A new upload replaces the earlier rows of the same workbook, or the whole matrix if chosen.
 
+- **Template:** Communication matrix → Template downloads a workbook with one example sheet per type and a How to fill sheet (`/api/comm/template`).
+- **Page tabs:**
+  - Rows: one view for every sheet type; each source / public / destination / port cell is split into separate chips, and small ranges are expanded.
+  - IPs: the matrix IP register.
+  - Sheets: every workbook / sheet with its rows and internet-facing count. Delete a sheet or a whole workbook; exposure is recomputed.
+- **Mark internet-facing by hand:** click the Internet badge on a row. The mark is stored per workbook / sheet / row and survives re-uploads; "Back to automatic" removes it.
+- **Internet exposed page:**
+  - "Exposed by" column: the source of each exposure (Inventory · LOB, Matrix · sheet, VA scan, Public IP, Manual · note). The full evidence is in the tooltip.
+  - "Mark exposed" list: IPs, ranges or subnets you know are exposed, with a note saying where from (e.g. MP firewall export).
+  - The whitelist and indirect-range lists accept the same address formats.
+
 **Address cells** (`app/addrparse.py`):
 - single IPs, and lists separated by `,` `;` `|` `/`, spaces or new lines
 - ranges: `10.1.1.10-10.1.1.20` or `10.1.1.10-20`

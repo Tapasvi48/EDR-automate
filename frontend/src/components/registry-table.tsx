@@ -72,6 +72,11 @@ export function RegistryTable({ state, set, reset, fixed, storageKey = "registry
     { key: "crit", label: "Crit / High / Med / Low", render: (r) => r.in_scan ? <SevCounts c={r.crit} h={r.high} m={r.med} l={r.low} /> : null },
     { key: "ne_ids", label: "NIAM", sort: false, render: (r) => r.in_niam ? <span className="text-xs">{r.ne_ids || "Yes"}</span> : <span className="text-muted">No</span> },
     ...(hideExposure ? [] : [{ key: "exposed", label: "Internet", render: (r: any) => <ExposureBadge r={r} /> }]),
+    { key: "exposed_by", label: "Exposed by", sort: false, hidden: !hideExposure, render: (r) => {
+      const by = Array.from(new Set((r.exposure || []).filter((e: any) => e.src !== "indirect").map((e: any) => e.where || e.src))) as string[];
+      const tone = (w: string) => w.startsWith("Inventory") ? "info" : w.startsWith("Matrix") ? "violet" : w.startsWith("Manual") || w.startsWith("Marked") ? "warn" : w === "VA scan" ? "serious" : "neutral";
+      return <span className="flex max-w-[260px] flex-wrap gap-1">{by.map((w) => <Badge key={w} tone={tone(w) as any} title={(r.exposure || []).filter((e: any) => (e.where || e.src) === w).map((e: any) => e.text).join("\n")}>{w}</Badge>)}</span>;
+    } },
     { key: "public_ips", label: "Public / NAT IP", sort: false, hidden: !hideExposure, render: (r) => <Mono>{r.public_ips || r.nat_of ? r.public_ips || `NAT of ${r.nat_of}` : ""}</Mono> },
     { key: "exposure", label: "Exposure evidence", sort: false, wrap: true, hidden: !hideExposure, render: (r) => (
       <ul className="space-y-0.5 text-[12px]">{(r.exposure || []).map((e: any) => <li key={e.text}><Badge tone="outline" className="mr-1 text-[10px]">{e.src}</Badge>{e.text}</li>)}</ul>) },

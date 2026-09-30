@@ -621,6 +621,7 @@ def seed_matrix_and_sod(c, rng, nat_map):
                     (wbn, "Sample matrix workbook", "demo.user", now, len(rules))).lastrowid
     c.executemany(f"INSERT INTO comm_rules({', '.join(cols)}, upload_id) VALUES ({','.join('?' * (len(cols) + 1))})",
                   [(*[r.get(k) for k in cols], uid) for r in rules])
+    commatrix.apply_overrides(c)
     heads = [col[0] for col in TEMPLATES["sod"][3]]
     rows = [["SOD-2026-001", "LOB", "", "Network Core", "51192", "", "SSL Certificate Cannot Be Trusted", "", "Internal CA trusted on all OAM clients",
              "Access limited to OAM VLAN", "CISO", "2026-06-01", "2027-03-31", "RISK-4411", ""],

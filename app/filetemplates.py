@@ -69,9 +69,10 @@ TEMPLATES = {
         ("Vendor", "", "", "Cisco", "Nokia"),
         ("Circle", "", "Circle / region", "Mumbai", "Delhi"),
     ]),
-    "comm_matrix": ("Communication matrix", "Firewall / NAT flows for the telecom environment: which sources may reach which destinations, "
-                    "through which firewall, NAT and ISP link. Inbound Allow rules from Internet / ISP mark the destination internet-exposed "
-                    "on those ports; every rule shows as a flow in Asset 360.", "live", [
+    "comm_matrix": ("Communication matrix", "A workbook with one sheet per kind of list: firewall rules, public IP pool, public ↔ private NAT "
+                    "list, SOD / NAT rules and an exposure register (the download has an example of each and a How to fill sheet). "
+                    "On upload you pick each sheet's type and match its columns. Internet-facing rows make the addresses they name "
+                    "internet-exposed; any row can also be marked by hand on the Communication matrix page.", "live", [
         ("Rule ID", "yes", "Unique rule / flow ID", "FW-DMZ-0142", "FW-CORE-0077"),
         ("Direction", "yes", "Inbound (from internet / ISP) / Outbound / Internal", "Inbound", "Internal"),
         ("Source Zone", "", "Internet, ISP, Partner, DMZ, Core, OAM…", "Internet", "OAM"),
@@ -203,6 +204,9 @@ def file_template_reset(kind: str):
 
 @router.get("/api/file-templates/{kind}")
 def file_template(kind: str):
+    if kind == "comm_matrix":  # a workbook with one example sheet per sheet type
+        from .commatrix import comm_template
+        return comm_template()
     t = TEMPLATES.get(kind)
     if not t:
         raise HTTPException(404, "Unknown template")

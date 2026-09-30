@@ -49,7 +49,7 @@ def is_cgnat(ip):
     return a.version == 4 and a in CGNAT
 
 
-LIST_KEYS = {"whitelist": "exposure_whitelist", "indirect": "exposure_indirect"}
+LIST_KEYS = {"whitelist": "exposure_whitelist", "indirect": "exposure_indirect", "manual": "exposure_manual"}
 
 
 def ip_list(c, kind):
@@ -62,9 +62,15 @@ def whitelist(c):
     return ip_list(c, "whitelist")
 
 
+def _nets(v):
+    """An IP-list entry -> networks: IP, subnet, range, last-octet shorthand, several separated by , ; (addrparse)."""
+    from .addrparse import parse_addresses
+    return list(parse_addresses(v)[1])
+
+
 def _net_fn(entries):
     """ip -> the matching entry's label (or None)."""
-    nets = [(n, e) for n, e in ((db.parse_net(e.get("value")), e) for e in entries) if n]
+    nets = [(n, e) for e in entries for n in _nets(e.get("value"))]
 
     def hit(ip):
         try:
@@ -76,6 +82,14 @@ def _net_fn(entries):
                 return e.get("value") + (f" ({e['note']})" if e.get("note") else "")
         return None
     return hit
+
+
+def _in_net(ip, net):
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return a.version == net.version and a in net
 
 
 def _whitelisted_fn(c):
@@ -128,9 +142,13 @@ def refresh(c):
         if n and n not in s["names"]:
             s["names"].append(n)
 
-    def reason(s, src, text):
+    WHERE = {"inventory": "Inventory", "matrix": "Communication matrix", "scan": "VA scan", "ip": "Public IP", "indirect": "Indirect range",
+             "manual": "Marked manually"}
+
+    def reason(s, src, text, where=None):
+        """where: short label of the source for the 'Exposed by' column (Inventory · LOB, Matrix · workbook › sheet…)."""
         if text not in [r["text"] for r in s["reasons"]]:
-            s["reasons"].append({"src": src, "text": text})
+            s["reasons"].append({"src": src, "text": text, "where": where or WHERE.get(src, src)})
             s["exp_src"].add(src)
 
     nat_pairs = []
@@ -160,10 +178,10 @@ def refresh(c):
                 s.update(aid=r["matched_aid"], cs_hostname=r["cs_hostname"], edr_last_seen=r["cs_last_seen"], in_edr=1)
         facing, nat = inventory_exposure(db.jloads(r["extra"], {}))
         if facing:
-            reason(s, "inventory", f"Inventory ({r['lob']}): {facing}")
+            reason(s, "inventory", f"Inventory ({r['lob']}): {facing}", f"Inventory · {r['lob']}")
         for p in nat:
             if r["ip"] and p != r["ip"]:
-                nat_pairs.append((key, p, "inventory", f"Inventory ({r['lob']})"))
+                nat_pairs.append((key, p, "inventory", f"Inventory ({r['lob']})", f"Inventory · {r['lob']}"))
     # --- CrowdStrike: agents in the console and devices in EDR history (hidden hosts ignored)
     for h in db.rows(c, """SELECT aid, hostname, local_ip, console_state, online_state, last_seen, removal_type, os_version FROM hosts
                           WHERE local_ip<>'' AND (console_state='active' OR (console_state='removed' AND gone_primary=1))
@@ -244,18 +262,19 @@ def refresh(c):
                     + (f" → {rule['dst']}" if rule["dst"] else "") + (f" · {svc}" if rule["ports"] else "")
                     + (f" · {who}" if who else "") + (f" · firewall {rule['firewall']}" if rule["firewall"] else ""))
         for k in inner | publ:
-            reason(reg[k], "matrix", text)
+            reason(reg[k], "matrix", text, "Matrix · " + (rule.get("sheet") or rule.get("workbook") or "rules"))
         for k in inner:
             for p in pubs:
                 if p != reg[k]["ip"]:
-                    nat_pairs.append((k, p, "matrix", f"{KIND.get(st, 'Matrix')} {rule['rule_id']}"))
+                    nat_pairs.append((k, p, "matrix", f"{KIND.get(st, 'Matrix')} {rule['rule_id']}",
+                                      "Matrix · " + (rule.get("sheet") or rule.get("workbook") or "rules")))
     # --- public / NAT IPs (inventory columns and matrix destination NAT)
-    for key, p, src, label in nat_pairs:
+    for key, p, src, label, where in nat_pairs:
         s = reg[key]
         if p in s["public_ips"]:  # same public IP from the inventory and the matrix: one reason is enough
             continue
         s["public_ips"].add(p)
-        reason(s, src, f"{label}: public / NAT IP {p}")
+        reason(s, src, f"{label}: public / NAT IP {p}", where)
         ps = reg.get(p)
         if ps:
             ps["nat_of"].add(s["ip"])
@@ -278,6 +297,18 @@ def refresh(c):
             s.update(feasible=None, feasible_reason="Public / NAT IP of an inventory node")
         else:
             s.update(feasible="Unidentified", feasible_reason="Not in any inventory and no EDR: feasibility unknown")
+    # --- marked exposed by hand (Internet exposed → Mark exposed): IPs / subnets, each with a note saying where it comes from
+    for e in ip_list(c, "manual"):
+        note = e.get("note") or "no note"
+        hit = []
+        for net in _nets(e.get("value")):
+            got = [s for s in reg.values() if s["ip"] and _in_net(s["ip"], net)]
+            if not got and net.num_addresses == 1:  # an address no source knows: add it so it is listed
+                ip = str(net.network_address)
+                got = [slot(ip, ip)]
+            hit += got
+        for s in hit:
+            reason(s, "manual", f"Marked internet exposed by hand: {e['value']} ({note})", f"Manual · {note}"[:60])
     listed = _whitelisted_fn(c)
     indirect = _net_fn(ip_list(c, "indirect"))
     rows = []
@@ -485,7 +516,8 @@ def exposure_summary():
     with db.get_conn() as c:
         s = db.one(c, """SELECT SUM(exposed) exposed, SUM(exposed AND exposure_src LIKE '%,inventory,%') by_inventory,
             SUM(exposed AND exposure_src LIKE '%,scan,%') by_scan,
-            SUM(exposed AND exposure_src LIKE '%,ip,%') by_ip, SUM(exposed AND exposure_src LIKE '%,matrix,%') by_matrix, SUM(exposed AND edr_status='Not Installed') no_edr,
+            SUM(exposed AND exposure_src LIKE '%,ip,%') by_ip, SUM(exposed AND exposure_src LIKE '%,matrix,%') by_matrix, SUM(exposed AND exposure_src LIKE '%,manual,%') by_manual,
+            SUM(exposed AND edr_status='Not Installed') no_edr,
             SUM(exposed AND (crit + high) > 0) crit_high, SUM(exposed AND in_inventory=0) not_in_inventory,
             SUM(exposed AND in_inventory=1) in_inventory,
             SUM(exposed AND edr_status='Offline') edr_offline,
@@ -499,10 +531,10 @@ def exposure_summary():
         know = db.one(c, """SELECT
             SUM(exposed AND (exposure_src LIKE '%,scan,%' OR exposure_src LIKE '%,ip,%')) by_scan,
             SUM(exposed AND exposure_src LIKE '%,inventory,%') by_inventory,
-            SUM(exposed AND exposure_src LIKE '%,matrix,%') by_matrix FROM asset_registry""")
+            SUM(exposed AND exposure_src LIKE '%,matrix,%') by_matrix, SUM(exposed AND exposure_src LIKE '%,manual,%') by_manual FROM asset_registry""")
         extra = db.one(c, "SELECT SUM(cgnat) cgnat, SUM(whitelisted) whitelisted FROM asset_registry")
     return {**{k: (v or 0) for k, v in s.items()}, **{k: (v or 0) for k, v in extra.items()},
-            "know": {k: (v or 0) for k, v in know.items()}, "whitelist": whitelist_list(), "indirect": indirect_list()}
+            "know": {k: (v or 0) for k, v in know.items()}, "whitelist": whitelist_list(), "indirect": indirect_list(), "manual": manual_list()}
 
 
 @router.get("/api/exposure/shadow")
@@ -533,6 +565,11 @@ def whitelist_list():
         return whitelist(c)
 
 
+def manual_list():
+    with db.get_conn() as c:
+        return ip_list(c, "manual")
+
+
 def indirect_list():
     with db.get_conn() as c:
         return ip_list(c, "indirect")
@@ -544,7 +581,7 @@ def _save_list(kind, data):
         v = str(e.get("value") or "").strip()
         if not v:
             continue
-        if not db.parse_net(v):
+        if not _nets(v):
             bad.append(v)
             continue
         out.append({"value": v, "note": str(e.get("note") or "").strip()})
@@ -567,3 +604,9 @@ def exposure_indirect_save(data: dict = Body(...)):
     """[{value, note}] - telecom ranges reachable only indirectly (partner / NNI / roaming / core links), shown on the
     Indirectly exposed tab with CGNAT; every asset inside them is listed there."""
     return _save_list("indirect", data)
+
+
+@router.put("/api/exposure/manual")
+def exposure_manual_save(data: dict = Body(...)):
+    """IPs / subnets marked internet exposed by hand; the note says where that comes from (e.g. 'MP firewall export')."""
+    return _save_list("manual", data)

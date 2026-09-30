@@ -22,6 +22,16 @@ const VIEWS: [string, string, string][] = [
 /** Every address in the communication matrix: is it ours, what role does it play, and do we know it (inventory / EDR)? */
 export default function MatrixIps() {
   const [state, set, replaceAll] = useUrlState();
+  return (
+    <div>
+      <PageHeader title="Matrix IP register"
+        sub="Every IP, subnet and host name in the communication matrix: whether it is ours, what it does (reached from the internet, public / NAT IP, talks out to the internet), and whether inventory and EDR know it." />
+      <MatrixIpsPanel state={state} set={set} replaceAll={replaceAll} />
+    </div>
+  );
+}
+
+export function MatrixIpsPanel({ state, set, replaceAll, keep = {} }: { state: Record<string, string>; set: any; replaceAll: any; keep?: Record<string, string> }) {
   const view = state.view || "exposed";
   const [why, setWhy] = React.useState(false);
   const { data, error, refetch } = useQuery({ queryKey: ["comm-ips-counts"], queryFn: () => api<any>("/api/comm/ips", { params: { view: "all", size: "1" } }) });
@@ -50,10 +60,8 @@ export default function MatrixIps() {
   ];
   return (
     <div>
-      <PageHeader title="Matrix IP register"
-        sub="Every IP, subnet and host name in the communication matrix: whether it is ours, what it does (reached from the internet, public / NAT IP, talks out to the internet), and whether inventory and EDR know it." />
       <KpiGrid className="mb-4 grid-cols-[repeat(auto-fill,minmax(165px,1fr))]">
-        {VIEWS.slice(0, 5).map(([id, label, tone]) => <Kpi key={id} label={label} value={c[id]} tone={tone} active={view === id} onClick={() => replaceAll({ view: id })} />)}
+        {VIEWS.slice(0, 5).map(([id, label, tone]) => <Kpi key={id} label={label} value={c[id]} tone={tone} active={view === id} onClick={() => replaceAll({ ...keep, view: id })} />)}
       </KpiGrid>
       <Card className="mb-4">
         <button className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-[12.5px] font-medium" onClick={() => setWhy(!why)}>
@@ -83,9 +91,9 @@ export default function MatrixIps() {
         )}
       </Card>
       <DataTable key={view} endpoint="/api/comm/ips" exportPath="/api/comm/ips/export" state={{ ...state, view }} setState={set} noun="addresses" storageKey="comm-ips"
-        rowKey={(r: any) => `${r.kind}|${r.address}`} onReset={() => replaceAll({ view })} sortable={false} columns={cols}
+        rowKey={(r: any) => `${r.kind}|${r.address}`} onReset={() => replaceAll({ ...keep, view })} sortable={false} columns={cols}
         filters={<>
-          <FilterSelect label="Show" value={view} onChange={(v) => replaceAll({ view: v || "exposed" })} options={VIEWS.map(([id, l]) => [id, l]) as [string, string][]} />
+          <FilterSelect label="Show" value={view} onChange={(v) => replaceAll({ ...keep, view: v || "exposed" })} options={VIEWS.map(([id, l]) => [id, l]) as [string, string][]} />
           <SearchInput className="w-72" value={state.q || ""} onChange={(v) => set({ q: v })} placeholder="IP, subnet, name, application, owner, sheet…" />
           <FilterSelect label="Kind" value={state.kind} onChange={(v) => set({ kind: v })} any="All" options={[["ip", "IPs"], ["subnet", "Subnets / ranges"], ["name", "Host names"]]} />
         </>} />

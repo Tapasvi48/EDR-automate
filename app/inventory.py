@@ -468,7 +468,7 @@ PRESENT = ("Online", "Offline", "Inactive")
 INSTALLED_STATES = ("Online", "Offline")
 # edr_actual (detailed) -> edr_state (what the dashboards count)
 # bumped when matching / state rules change so stored results are recomputed on startup
-MATCH_REV = "16"
+MATCH_REV = "17"
 # EDR has two states: Online, or Offline - offline in the console, or an agent that has left the console (removed by the
 # inactivity policy, deleted, hidden, or known only from an old EDR inventory upload). Only a node with no agent at all is
 # "Not Installed". edr_actual keeps the detail.

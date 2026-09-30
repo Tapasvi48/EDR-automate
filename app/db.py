@@ -487,6 +487,12 @@ CREATE TABLE IF NOT EXISTS comm_uploads (
     rows INTEGER, replaced INTEGER, mapping TEXT, warnings TEXT
 );
 
+-- Manual "internet-facing" decisions on matrix rows, kept across re-uploads of the same workbook / sheet / row
+CREATE TABLE IF NOT EXISTS comm_overrides (
+    workbook TEXT NOT NULL DEFAULT '', sheet TEXT NOT NULL DEFAULT '', rule_id TEXT NOT NULL, inbound INTEGER NOT NULL, note TEXT, set_at TEXT,
+    PRIMARY KEY (workbook, sheet, rule_id)
+);
+
 -- Daily per-MSP snapshot for scorecard trends (msp_id 0 = unassigned)
 CREATE TABLE IF NOT EXISTS msp_daily (
     day TEXT NOT NULL, lob_id INTEGER NOT NULL, msp_id INTEGER NOT NULL,
@@ -540,6 +546,7 @@ MIGRATIONS = [
     ("comm_rules", "lob", "TEXT"), ("comm_rules", "domain", "TEXT"), ("comm_rules", "msp", "TEXT"), ("comm_rules", "location", "TEXT"),
     ("comm_rules", "workbook", "TEXT"), ("comm_rules", "sheet", "TEXT"), ("comm_rules", "sheet_type", "TEXT"),
     ("comm_uploads", "sheets", "TEXT"),               # JSON: [{sheet, type, rows}]
+    ("comm_rules", "inbound_auto", "INTEGER"),        # internet-facing as computed from the row; inbound_internet may be a manual override
 ]
 
 

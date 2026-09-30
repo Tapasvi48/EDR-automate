@@ -241,7 +241,14 @@ def shadow_ports(c, public_ip, extra_ips=()):
 
 
 # ------------------------------------------------------------------ routes
-ROW_COLS = KEYS + ["inbound_internet", "workbook", "sheet", "sheet_type"]
+ROW_COLS = KEYS + ["inbound_internet", "workbook", "sheet", "sheet_type", "inbound_auto"]
+
+
+def apply_overrides(c):
+    """Manual internet-facing marks win over the computed value (they survive re-uploads of the same workbook / sheet / row)."""
+    c.execute("UPDATE comm_rules SET inbound_auto=inbound_internet WHERE inbound_auto IS NULL")
+    c.execute("""UPDATE comm_rules SET inbound_internet=COALESCE((SELECT o.inbound FROM comm_overrides o WHERE o.workbook=COALESCE(comm_rules.workbook,'')
+                 AND o.sheet=COALESCE(comm_rules.sheet,'') AND o.rule_id=comm_rules.rule_id), inbound_auto)""")
 
 
 def _load(data):
@@ -355,7 +362,8 @@ def _store(rows, fname, data, warnings, per, replace_all):
         else:  # replace this workbook's rows (and rows of uploads made before workbooks were tracked)
             c.execute("DELETE FROM comm_rules WHERE workbook=? OR workbook IS NULL", (fname,))
         c.executemany(f"INSERT INTO comm_rules({', '.join(ROW_COLS)}, upload_id) VALUES ({','.join('?' * (len(ROW_COLS) + 1))})",
-                      [(*[r.get(k) for k in ROW_COLS], uid) for r in rows])
+                      [(*[r.get(k) if k != "inbound_auto" else r["inbound_internet"] for k in ROW_COLS], uid) for r in rows])
+        apply_overrides(c)
         inventory.refresh_matches(c)  # re-join: exposure from the matrix
         exposed = c.execute("SELECT COUNT(*) FROM asset_registry WHERE exposure_src LIKE '%,matrix,%'").fetchone()[0]
     return {"message": f"{len(rows):,} rows from {len(per) or 1} sheet(s) loaded · {exposed:,} assets internet-exposed through the matrix",
@@ -389,8 +397,14 @@ def comm_commit(data: dict = Body(...)):
 
 def _query(p):
     w, params = [], []
-    if p.get("inbound") == "1":
-        w.append("inbound_internet=1")
+    if p.get("inbound") in ("0", "1"):
+        w.append("inbound_internet=?")
+        params.append(int(p["inbound"]))
+    if p.get("sheet"):
+        w.append("sheet=?")
+        params.append(p["sheet"])
+    if p.get("manual") == "1":
+        w.append("inbound_auto IS NOT NULL AND inbound_internet<>inbound_auto")
     if p.get("firewall"):
         w.append("firewall=?")
         params.append(p["firewall"])
@@ -423,7 +437,41 @@ def comm_rules(request: Request):
         rows = db.rows(c, f"SELECT * FROM comm_rules {where} ORDER BY inbound_internet DESC, rule_id LIMIT ? OFFSET ?", params + [size, (page - 1) * size])
     for r in rows:
         r["active"] = active(r, now)
+        for col in ("src", "dst", "dst_nat", "src_nat"):
+            r[col + "_list"] = split_display(r[col])
+        r["port_list"] = port_display(r["ports"], r["protocol"])
+        r["manual"] = r.get("inbound_auto") is not None and r["inbound_internet"] != r["inbound_auto"]
     return {"total": total, "rows": rows}
+
+
+def split_display(text, cap=40):
+    """One cell -> the separate addresses for display: IPs (small ranges / shorthand expanded), subnets, names, Any."""
+    anyv, nets, names = parse_addresses(text)
+    out = ["Any"] if anyv else []
+    for n in nets:
+        if n.num_addresses == 1:
+            out.append(str(n.network_address))
+        elif n.version == 4 and n.num_addresses <= 16 and str(n) not in str(text):  # a range / shorthand: one chip per IP
+            out += [str(a) for a in n]
+        else:
+            out.append(str(n))
+    out += list(names)
+    if len(out) > cap:
+        out = out[:cap] + [f"+{len(out) - cap} more"]
+    return out
+
+
+def port_display(ports, protocol=""):
+    from .addrparse import parse_ports
+    t = parse_ports(ports)
+    if t is None:
+        return ["any"]
+    proto = (protocol or "").lower()
+    out = []
+    for lo, hi, p in t:
+        pp = p or (proto if proto in ("tcp", "udp", "sctp") else "")
+        out.append(f"{pp + '/' if pp else ''}{lo}{'-' + str(hi) if hi != lo else ''}")
+    return list(dict.fromkeys(out)) or ([ports] if ports else ["any"])
 
 
 @router.get("/api/comm/rules/export")
@@ -450,7 +498,8 @@ def comm_summary():
             "inbound": sum(1 for r in act if r["inbound_internet"]), "exposed_assets": exposed,
             "firewalls": sorted({r["firewall"] for r in rows if r["firewall"]}), "last_upload": last,
             "workbooks": sorted({(r.get("workbook") or "", r.get("sheet") or "", r.get("sheet_type") or "rules") for r in rows}),
-            "sheet_types": {k: v["label"] for k, v in SHEET_TYPES.items()}}
+            "sheet_types": {k: v["label"] for k, v in SHEET_TYPES.items()},
+            "manual": sum(1 for r in rows if r.get("inbound_auto") is not None and r["inbound_internet"] != r["inbound_auto"])}
 
 
 @router.delete("/api/comm")
@@ -640,3 +689,103 @@ def comm_ips_export(request: Request):
         r["inv_text"] = ("Yes" if r["in_inventory"] else "No") if r["kind"] != "subnet" else f"{r['in_inventory']} of {r['assets']} known"
         r["edr_text"] = r["edr_status"] or (f"{r['in_edr']} with EDR" if r["kind"] == "subnet" else "")
     return xlsx_response([("Matrix IPs", IPS_EXPORT, rows)], "matrix_ip_register")
+
+
+
+# ------------------------------------------------------------------ manage: sheets, delete, manual internet-facing marks
+@router.get("/api/comm/sheets")
+def comm_sheets():
+    """Every workbook / sheet loaded, with its type, rows, internet-facing rows, manual marks and upload time."""
+    with db.get_conn() as c:
+        rows = db.rows(c, """SELECT COALESCE(r.workbook,'') workbook, COALESCE(r.sheet,'') sheet, COALESCE(r.sheet_type,'rules') sheet_type,
+            COUNT(*) rows, SUM(r.inbound_internet) inbound, SUM(r.inbound_auto IS NOT NULL AND r.inbound_internet<>r.inbound_auto) manual,
+            MAX(u.uploaded_at) uploaded_at, MAX(u.uploaded_by) uploaded_by
+            FROM comm_rules r LEFT JOIN comm_uploads u ON u.id=r.upload_id GROUP BY 1, 2, 3 ORDER BY 1, 2""")
+    for r in rows:
+        r["type_label"] = SHEET_TYPES.get(r["sheet_type"], {}).get("label", r["sheet_type"])
+    return {"rows": rows}
+
+
+@router.delete("/api/comm/sheet")
+def comm_delete_sheet(workbook: str = "", sheet: str = ""):
+    """Delete one sheet (workbook + sheet) or, with sheet empty, the whole workbook. Exposure is recomputed."""
+    with db.get_conn() as c:
+        if sheet:
+            n = c.execute("DELETE FROM comm_rules WHERE COALESCE(workbook,'')=? AND COALESCE(sheet,'')=?", (workbook, sheet)).rowcount
+        else:
+            n = c.execute("DELETE FROM comm_rules WHERE COALESCE(workbook,'')=?", (workbook,)).rowcount
+        inventory.refresh_matches(c)
+    _IPS_CACHE.clear()
+    return {"ok": True, "deleted": n, "message": f"{n:,} rows deleted" + (f" (sheet {sheet})" if sheet else f" (workbook {workbook or 'without name'})")}
+
+
+@router.patch("/api/comm/rules/{rule_pk}")
+def comm_mark(rule_pk: int, data: dict = Body(...)):
+    """Mark a matrix row internet-facing (1) or not (0), or back to automatic (null). Kept across re-uploads."""
+    v = data.get("inbound")
+    with db.get_conn() as c:
+        r = db.one(c, "SELECT * FROM comm_rules WHERE id=?", (rule_pk,))
+        if not r:
+            raise HTTPException(404, "Row not found")
+        key = (r["workbook"] or "", r["sheet"] or "", r["rule_id"])
+        if v is None or v == "" or (r["inbound_auto"] is not None and int(v) == r["inbound_auto"]):
+            c.execute("DELETE FROM comm_overrides WHERE workbook=? AND sheet=? AND rule_id=?", key)
+        else:
+            c.execute("INSERT OR REPLACE INTO comm_overrides VALUES (?,?,?,?,?,?)", (*key, 1 if int(v) else 0, data.get("note") or "", db.now_iso()))
+        apply_overrides(c)
+        from . import registry
+        registry.refresh(c)
+        r = db.one(c, "SELECT inbound_internet, inbound_auto FROM comm_rules WHERE id=?", (rule_pk,))
+    _IPS_CACHE.clear()
+    return {"ok": True, "inbound_internet": r["inbound_internet"], "manual": r["inbound_internet"] != r["inbound_auto"]}
+
+
+
+# ------------------------------------------------------------------ template workbook: one sheet per sheet type
+TEMPLATE_SHEETS = [
+    ("Firewall rules", "rules", ["Rule ID", "Name", "Direction", "Source Zone", "Source Address", "Source NAT IP", "ISP / Link", "Firewall",
+                                 "Destination Zone", "Destination NAT IP (Public)", "Destination Address", "Protocol", "Service / Port",
+                                 "Application", "APPLICATION OWNER", "Action", "Change / CR No.", "Valid Till", "Remarks"],
+     [["FW-DMZ-0142", "web-in", "Inbound", "OUTSIDE", "any", "", "ISP-A", "DMZ-FW-01", "DMZ", "198.51.100.21", "h-10.10.4.21; h-10.10.4.22",
+       "tcp", "tcp_443;tcp_8443", "Internet banking", "Digital Channels", "Allow", "CR-2026-0931", "", ""],
+      ["FW-CORE-0077", "dns-out", "Outbound", "DNS BIND", "10.1.55.194/195/200/201", "203.0.113.200", "", "CORE-FW-02", "OUTSIDE", "",
+       "any", "udp", "dns_udp, dns_tcp", "DNS resolvers", "NetOps", "Allow", "CR-2026-1102", "2026-12-31", ""],
+      ["FW-APP-0003", "web-to-app", "Internal", "DMZ", "10.10.4.0/24", "", "", "CORE-FW-01", "APP", "", "10.20.0.10-20, APP-SRV-01",
+       "tcp", "8080", "App tier", "App team", "Allow", "CR-2026-1200", "", ""]]),
+    ("Public IP pool", "public_pool", ["S.NO", "PUBLIC IP POOL", "USE", "APPLICATION", "APPLICATION OWNER"],
+     [["1", "198.51.100.0/28", "Internet banking VIPs", "NetBanking", "Digital Channels"],
+      ["2", "203.0.113.10/11/12", "Mail gateways", "Email", "IT Messaging"]]),
+    ("NAT list", "nat_map", ["S.NO", "PUBLIC IP", "PRIVATE-IP", "APPLICATION", "APPLICATION OWNER", "Which firewall details exposed to this IP"],
+     [["1", "198.51.100.21", "10.10.4.21", "Internet banking", "Digital Channels", "DMZ-FW-01"],
+      ["2", "198.51.100.30", "10.1.55.194/195", "Partner API", "API team", "EDGE-FW-02"]]),
+    ("SOD NAT", "sod_nat", ["SODdetails", "dest_nat_ip", "destination_ip", "fwl", "location", "nat_ip", "port", "protocol", "rule", "source_ip"],
+     [["SOD-2026-041", "198.51.100.40", "10.30.0.10", "EDGE-FW-02", "DC-Mumbai", "", "22", "tcp", "NAT-12", "203.0.113.5"]]),
+    ("Exposure register", "exposure", ["S.NO", "Public IP", "Internal IP", "Port", "Service Details", "Destination IP", "REMARK",
+                                       "Source Contact Details", "Planner", "Host Status", "LOB", "Domain", "MS Partner", "Subnet", "Service Owner",
+                                       "Which firewall details exposed to this IP"],
+     [["1", "198.51.100.50", "10.40.0.5", "443/tcp, 8443", "Partner API", "", "", "noc@example.com", "Q4", "Live", "Payments", "Core", "Wipro",
+       "10.40.0.0/24", "Payments API owner", "DMZ-FW-01"]]),
+]
+TEMPLATE_GUIDE = [
+    ("Sheets", "Keep one sheet per kind of list, or delete the ones you do not use. On upload you pick each sheet's type and match its columns; "
+               "the types are guessed from these headers. Extra columns are fine."),
+    ("Firewall rules", "Source / destination addresses and ports. A row is internet-facing when its source is Internet / ISP / untrust / "
+                       "outside / any, or a public IP."),
+    ("Public IP pool", "Our public IPs. Every row counts as internet-facing."),
+    ("NAT list", "Public IP → private IP. The private IP (and the asset behind it) is internet exposed."),
+    ("SOD NAT", "Approved NAT rules: dest_nat_ip (public) → destination_ip (internal)."),
+    ("Exposure register", "Public IP → internal IP with owner, LOB and firewall."),
+    ("Address cells", "One IP; lists split by , ; | / space or new line; ranges 10.1.1.10-10.1.1.20 or 10.1.1.10-20; subnets 10.1.0.0/24; "
+                      "last-octet shorthand 10.1.55.194/195/200; h-10.1.1.5, n-10.1.0.0/24, 10.1.1.5_nat, 10.1.1.5_vm; IPv6 2101:3900:3d5a::/48; "
+                      "host / object names (matched to inventory hostnames); Any."),
+    ("Port cells", "443 · 80,443 · 8000-8100 · tcp/443 · 443/tcp · tcp_8443 · udp-53 · dns_tcp · https · any."),
+    ("Mark by hand", "After upload, any row can be marked internet-facing or not on the Communication matrix page; the mark is kept when "
+                     "the same workbook / sheet / row is uploaded again."),
+]
+
+
+@router.get("/api/comm/template")
+def comm_template():
+    sheets = [(name, [(f"c{i}", h) for i, h in enumerate(hd)], [{f"c{i}": v for i, v in enumerate(r)} for r in rows]) for name, _, hd, rows in TEMPLATE_SHEETS]
+    sheets.append(("How to fill", [("k", "Topic"), ("v", "How")], [{"k": k, "v": v} for k, v in TEMPLATE_GUIDE]))
+    return xlsx_response(sheets, "template_communication_matrix")

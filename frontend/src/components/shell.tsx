@@ -44,7 +44,6 @@ const NAV: { section?: string; items: { href: string; label: string; icon: React
     { href: "/inventory-sources/", label: "Inventory sources", icon: Database },
     { href: "/exposure/", label: "Internet exposed", icon: Globe2 },
     { href: "/matrix/", label: "Communication matrix", icon: Waypoints },
-    { href: "/matrix-ips/", label: "Matrix IP register", icon: ListTree },
     { href: "/coverage/", label: "Coverage gaps", icon: Target },
     { href: "/templates/", label: "Templates", icon: FileText },
   ] },

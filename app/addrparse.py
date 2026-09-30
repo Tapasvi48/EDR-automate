@@ -11,8 +11,9 @@ Addresses (source / destination / NAT / public IP columns). A cell may hold any 
   2101:3900:3d5a::/48, 2001:db8::10  IPv6 addresses and prefixes, with the same separators
   WEB-SRV-01, dns_servers           host / object names (kept as names; matched to inventory hostnames)
   Any, all, *, internet, 0.0.0.0/0   anything
-A "/" after an IPv4 address is read as a prefix length when it is 0-24, or 25-32 on a network boundary (10.1.1.192/26);
-otherwise it is the last-octet shorthand (10.1.55.194/195 = .194 and .195).
+A "/" after an IPv4 address is a prefix length when it is on a network boundary (10.1.1.192/26, 10.1.0.0/16), or 0-24 and not
+just above the last octet (10.1.1.1/24). Otherwise it is last-octet shorthand: 10.1.55.194/195 = .194 and .195, 10.1.1.10/11 =
+.10 and .11; a chain of numbers (a/b/c) is always shorthand.
 
 Ports (service column): 443 · 80,443 · 8000-8100 · tcp/443 · 443/tcp · tcp_8443 · udp-53 · dns_tcp · https · any.
 Service names map to their well-known ports (SERVICE_PORTS); tokens naming only a protocol (icmp, ping) carry no port."""
@@ -56,10 +57,13 @@ def _parse_v4_chunk(chunk):
         ip = _v4(p)
         if ip:
             nxt = parts[i + 1] if i + 1 < len(parts) else ""
-            if nxt.isdigit() and "-" not in nxt:
+            chain = len(parts) > i + 2 and all(x.isdigit() or "-" in x for x in parts[i + 1:])  # a/b/c/d = last-octet list
+            if nxt.isdigit() and "-" not in nxt and not chain:
                 n = int(nxt)
+                last_oct = int(str(ip).rsplit(".", 1)[1])
                 aligned = n <= 32 and int(ip) & ((1 << (32 - n)) - 1) == 0
-                if n <= 24 or (n <= 32 and aligned):
+                near = not aligned and last_oct < n <= last_oct + 16  # 10.1.1.10/11 = .10 and .11
+                if (n <= 24 and not near) or (n <= 32 and aligned):
                     out.append(ipaddress.IPv4Network(f"{ip}/{n}", strict=False))
                     last, i = ip, i + 2
                     continue

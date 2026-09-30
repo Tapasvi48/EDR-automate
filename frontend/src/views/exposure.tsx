@@ -3,7 +3,7 @@ import * as React from "react";
 import Link from "next/link";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { ChevronDown, Network, Plus, ShieldOff, Trash2 } from "lucide-react";
+import { ChevronDown, Network, Pin, Plus, ShieldOff, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { useUrlState } from "@/lib/hooks";
 import { fmtN } from "@/lib/format";
@@ -16,8 +16,9 @@ import { RegistryTable } from "@/components/registry-table";
 const RULES: [string, string, string][] = [
   ["inventory", "LOB inventory", "An “Internet Facing” / “Exposure” / “Zone” column says Yes, DMZ or Internet, or a “Public IP” / “NAT IP” column gives the node a public address."],
   ["scan", "VA scan", "A scan covered a public IP: the asset's own public IP, or the public / NAT IP of an inventory node (its findings are what the internet can see)."],
-  ["matrix", "Communication matrix", "An active Allow rule from Internet / ISP (inbound, source Any / a public IP, or an internet / ISP zone or link) reaches the asset's IP or subnet — on the rule's ports."],
+  ["matrix", "Communication matrix", "An internet-facing row of any matrix sheet (inbound rule from Internet / ISP / any, public IP pool, NAT list, SOD NAT, exposure register) names the asset's private IP, public / NAT IP, subnet, range or host name. Rows can be marked internet-facing by hand."],
   ["ip", "Public IP", "The asset's own IP is globally routable and comes from an inventory, the NIAM dump or a VA scan. A CrowdStrike interface IP alone is not evidence."],
+  ["manual", "Marked by hand", "The IP or its subnet is on the Mark exposed list, with a note saying where you know it from."],
 ];
 const TABS = [["exposed", "Directly exposed"], ["cgnat", "Indirectly exposed"], ["shadow", "Shadow exposure"], ["whitelisted", "Whitelisted"]] as const;
 
@@ -26,6 +27,7 @@ export default function Exposure() {
   const [how, setHow] = React.useState(false);
   const [wlOpen, setWlOpen] = React.useState(false);
   const [indOpen, setIndOpen] = React.useState(false);
+  const [manOpen, setManOpen] = React.useState(false);
   const tab = (state.tab as string) || "exposed";
   const { data: s, error, refetch } = useQuery({ queryKey: ["exposure-summary"], queryFn: () => api<any>("/api/exposure/summary") });
   const { data: sh } = useQuery({ queryKey: ["exposure-shadow"], queryFn: () => api<any>("/api/exposure/shadow") });
@@ -37,6 +39,7 @@ export default function Exposure() {
       <PageHeader title="Internet exposed"
         sub="Assets reachable from the internet, with the evidence for each: LOB inventory, the communication matrix, a VA scan of a public IP, or a public IP from an inventory / NIAM / scan."
         actions={<>
+          <Button onClick={() => setManOpen(true)}><Pin /> Mark exposed ({fmtN(s.manual?.length || 0)})</Button>
           <Button onClick={() => setIndOpen(true)}><Network /> Indirect ranges ({fmtN(s.indirect?.length || 0)})</Button>
           <Button onClick={() => setWlOpen(true)}><ShieldOff /> Whitelist ({fmtN(s.whitelist?.length || 0)})</Button>
         </>} />
@@ -44,7 +47,8 @@ export default function Exposure() {
         <Kpi label="Exposed assets" value={s.exposed} tone="crit" active={tab === "exposed" && !Object.keys(state).some((k) => !["page", "size", "sort", "dir", "tab"].includes(k))} onClick={() => only({})} />
         <Kpi label="From inventory" value={s.by_inventory} foot="facing column / public IP" active={state.exposure_src === "inventory"} onClick={() => only({ exposure_src: "inventory" })} />
         <Kpi label="From VA scan" value={s.by_scan} foot="public IP was scanned" active={state.exposure_src === "scan"} onClick={() => only({ exposure_src: "scan" })} />
-        <Kpi label="From comm. matrix" value={s.by_matrix} foot="inbound Internet / ISP rule" active={state.exposure_src === "matrix"} onClick={() => only({ exposure_src: "matrix" })} />
+        <Kpi label="From comm. matrix" value={s.by_matrix} foot="internet-facing matrix row" active={state.exposure_src === "matrix"} onClick={() => only({ exposure_src: "matrix" })} />
+        <Kpi label="Marked by hand" value={s.by_manual} tone="warn" foot="Mark exposed list" active={state.exposure_src === "manual"} onClick={() => only({ exposure_src: "manual" })} />
         <Kpi label="No EDR agent" value={s.no_edr} tone="crit" foot="exposed and unprotected" active={state.edr_status === "Not Installed"} onClick={() => only({ edr_status: "Not Installed" })} />
         <Kpi label="Crit / high vulns" value={s.crit_high} tone="serious" active={state.vulns === "crit_high"} onClick={() => only({ vulns: "crit_high" })} />
         <Kpi label="Not in any inventory" value={s.not_in_inventory} tone="violet" active={state.missing === "inventory"} onClick={() => only({ missing: "inventory" })} />
@@ -81,17 +85,20 @@ export default function Exposure() {
 
       <ListDialog kind="whitelist" open={wlOpen} onOpenChange={setWlOpen} entries={s.whitelist || []} />
       <ListDialog kind="indirect" open={indOpen} onOpenChange={setIndOpen} entries={s.indirect || []} />
+      <ListDialog kind="manual" open={manOpen} onOpenChange={setManOpen} entries={s.manual || []} />
     </div>
   );
 }
 
 const LISTS = {
+  manual: { title: "Mark internet exposed", ok: "Exposed list saved",
+    text: "IPs and subnets you know are reachable from the internet but no upload says so. In the note, say where it comes from (e.g. MP firewall export, pentest report); it shows in the Exposed by column." },
   whitelist: { title: "Exposure whitelist", ok: "Whitelist saved", text: "IPs and subnets here are never listed as internet exposed. They stay visible on the Whitelisted tab." },
   indirect: { title: "Indirectly exposed ranges", ok: "Indirect ranges saved",
     text: "Telecom ranges reachable from the internet only through another network (CGNAT pools, partner / NNI / roaming interconnects, core links). Every asset whose IP or NAT IP is inside them shows on the Indirectly exposed tab. CGNAT (100.64.0.0/10) is always included." },
 };
 /** Editable IP / subnet list: the whitelist or the indirectly exposed ranges. */
-function ListDialog({ kind, open, onOpenChange, entries }: { kind: "whitelist" | "indirect"; open: boolean; onOpenChange: (v: boolean) => void; entries: any[] }) {
+function ListDialog({ kind, open, onOpenChange, entries }: { kind: "whitelist" | "indirect" | "manual"; open: boolean; onOpenChange: (v: boolean) => void; entries: any[] }) {
   const L = LISTS[kind];
   const qc = useQueryClient();
   const [rows, setRows] = React.useState<any[]>(entries);
