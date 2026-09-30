@@ -91,3 +91,8 @@ input, select, textarea { font: inherit; }
 .recharts-cartesian-grid line { stroke: var(--grid); }
 .recharts-text { fill: var(--muted); font-size: 11px; }
 .recharts-cartesian-axis-line, .recharts-cartesian-axis-tick-line { stroke: var(--border-strong); }
+
+/* attack path graph: marching dashes on the highlighted path */
+@keyframes path-flow { to { stroke-dashoffset: -20; } }
+.path-flow { animation: path-flow 0.9s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .path-flow { animation: none; } }

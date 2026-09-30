@@ -35,7 +35,9 @@ def friendly(code, msg, what):
     if code == 401:
         return f"{what}: authentication failed (HTTP 401). Check the client ID / secret and that the cloud region matches your tenant."
     if code == 403:
-        scope = "Sensor update policies: Read" if what.startswith(("Sensor", "Supported Linux")) else "Hosts: Read"
+        scope = ("Sensor update policies: Read" if what.startswith(("Sensor", "Supported Linux"))
+                 else "Alerts: Read" if what.startswith("Detection") else "Vulnerabilities: Read" if what.startswith("Spotlight")
+                 else "Prevention policies: Read" if what.startswith("Prevention") else "Hosts: Read")
         return f"{what}: access denied (HTTP 403). The API client needs the '{scope}' scope."
     if code == 429:
         return f"{what}: rate limited by CrowdStrike (HTTP 429)."
@@ -79,6 +81,30 @@ class FalconClient:
         self.hosts = Hosts(**kwargs)
         self._kwargs = kwargs
         self._sup = None
+
+    @property
+    def alerts(self):
+        """Alerts: Read - recent detections for Asset 360. Optional scope."""
+        if getattr(self, "_alerts", None) is None:
+            from falconpy import Alerts
+            self._alerts = Alerts(**self._kwargs)
+        return self._alerts
+
+    @property
+    def spotlight(self):
+        """Vulnerabilities: Read - Spotlight. Optional scope."""
+        if getattr(self, "_spot", None) is None:
+            from falconpy import SpotlightVulnerabilities
+            self._spot = SpotlightVulnerabilities(**self._kwargs)
+        return self._spot
+
+    @property
+    def prevention(self):
+        """Prevention policies: Read. Optional scope."""
+        if getattr(self, "_prev", None) is None:
+            from falconpy import PreventionPolicy
+            self._prev = PreventionPolicy(**self._kwargs)
+        return self._prev
 
     @property
     def sensor_policy(self):
@@ -281,6 +307,12 @@ def test_connection(client_id, client_secret, base_url, member_cid=""):
         run("Hosts: online state", online)
         run("Hosts: hidden hosts", hidden, required=False)
         run("Hosts: NIC / IP history", nic, required=False)
+        run("Alerts: recent detections",
+            lambda: f"{((state['c']._call(state['c'].alerts.query_alerts_v2, 'Detections', limit=1).get('meta') or {}).get('pagination') or {}).get('total', 0):,} alerts",
+            required=False)
+        run("Vulnerabilities: Spotlight", lambda: "readable" if state["c"]._call(state["c"].spotlight.query_vulnerabilities,
+            "Spotlight vulnerabilities", limit=1, filter="status:'open'") is not None else "", required=False)
+        run("Prevention policies: read", lambda: f"{len(state['c']._call(state['c'].prevention.query_combined_policies, 'Prevention policies', limit=100).get('resources') or [])} policies", required=False)
         run("Sensor update policies: builds (N / N-1 / N-2)",
             lambda: f"{len(state['c'].sensor_builds('windows'))} Windows sensor builds available", required=False)
     ok = all(c["ok"] for c in checks if c["required"]) and len(checks) >= 2

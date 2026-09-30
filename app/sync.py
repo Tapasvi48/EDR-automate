@@ -19,6 +19,8 @@ STEPS = [
     ("write", "Save to database"),
     ("nic", "Fetch NIC / IP history"),
     ("sensors", "Fetch sensor builds & supported OS"),
+    ("detections", "Fetch recent detections"),
+    ("posture", "Fetch Spotlight vulnerabilities & prevention policies"),
     ("analyze", "Detect duplicates & reinstalls"),
     ("inventory", "Re-verify LOB inventories"),
 ]
@@ -361,6 +363,23 @@ def _do_sync(started, prog):
         prog.done("sensors", refresh_from_falcon(client))
     except Exception as e:  # noqa: BLE001 - optional scope (Sensor update policies: Read)
         prog.warn("sensors", f"Sensor builds skipped: {e}")
+
+    prog.start("detections")
+    try:
+        from .detections import fetch as fetch_detections
+        prog.done("detections", fetch_detections(client, int(settings.get("detections_days") or 30)))
+    except Exception as e:  # noqa: BLE001 - optional scope (Alerts: Read)
+        prog.warn("detections", f"Detections skipped: {e}")
+
+    prog.start("posture")
+    from . import cs_posture
+    msgs = []
+    for fn in (cs_posture.fetch_spotlight, cs_posture.fetch_policies):
+        try:
+            msgs.append(fn(client))
+        except Exception as e:  # noqa: BLE001 - optional scopes
+            msgs.append(f"skipped: {e}")
+    prog.done("posture", " · ".join(msgs))
 
     prog.start("analyze")
     with db.get_conn() as c:

@@ -2,13 +2,16 @@
 import * as React from "react";
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
-import { Download, Search, ShieldAlert, ShieldCheck, ShieldX } from "lucide-react";
+import { Activity, ArrowUpRight, Copy, Crosshair, Download, FileSpreadsheet, Globe2, History, LayoutGrid, Logs, PackageCheck, Printer, Route, Search, Server, ShieldAlert, ShieldCheck, ShieldX, ClipboardCheck } from "lucide-react";
 import { api, downloadExcel } from "@/lib/api";
 import { useUrlState } from "@/lib/hooks";
 import { fmtDt, fmtN, fmtRel } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import { Badge, Button, Card, CardHeader, Loading, PageHeader, SearchInput, Tabs } from "@/components/ui";
+import { Badge, Button, Card, CardHeader, Loading, PageHeader, SearchInput, Segmented, Tabs } from "@/components/ui";
+import { MbssReport } from "@/components/mbss-report";
 import { SimpleTable } from "@/components/data-table";
+import { PathView } from "./attack-paths";
+import { toast } from "sonner";
 import { CoverageBadge, EdrBadge, HostLink, Live, Mono, SevCounts, SeverityBadge, When, YN, removalLabel, RiskBadge, FeasibleBadge, OsCell } from "@/components/badges";
 
 export default function AssetSearch() {
@@ -18,10 +21,13 @@ export default function AssetSearch() {
   return (
     <div>
       <PageHeader title="Asset 360"
-        sub="One answer for an IP, hostname or agent ID: is EDR installed and healthy, which LOB and MSP own it, what the inventory says, open vulnerabilities and when it was last scanned. IPv4 and IPv6 both work. A prefix (10.20.3.) or CIDR (10.20.0.0/16, 2001:db8::/48) lists every asset in the range." />
-      <div className="flex gap-2">
-        <SearchInput big autoFocus className="flex-1" value={q} onChange={(v) => set({ q: v })} placeholder="10.20.34.17  ·  2001:db8::17  ·  CORP-WS-0369  ·  NE ID  ·  10.20.34.  ·  10.20.0.0/16  ·  agent ID" />
-        <Button className="h-11" disabled={!q} onClick={() => downloadExcel("/api/asset/export", { q })}><Download /> Excel</Button>
+        sub="Everything about one asset: search an IP, hostname (or part of one), agent ID, prefix or CIDR." />
+      <div className="flex flex-wrap gap-2">
+        <SearchInput big autoFocus className="min-w-[260px] flex-1" value={q} onChange={(v) => set({ q: v })} placeholder="10.20.34.17  ·  2001:db8::17  ·  CORP-WS-0369  ·  NE ID  ·  10.20.34.  ·  10.20.0.0/16  ·  agent ID" />
+        <Button className="h-11" disabled={!q} onClick={() => downloadExcel("/api/asset/export", { q })}
+          title={r?.mode === "single" ? "Everything on this page in one workbook, for audits and incident tickets" : "Download the list"}>
+          {r?.mode === "single" ? <><FileSpreadsheet /> Evidence pack</> : <><Download /> Excel</>}</Button>
+        {r?.mode === "single" && <Button className="h-11 print:hidden" onClick={() => window.print()} title="Print or save this page as PDF"><Printer /> PDF</Button>}
       </div>
       {!q && (
         <Card className="mt-5 p-8 text-center text-muted">
@@ -43,7 +49,7 @@ function RangeView({ r, q }: { r: any; q: string }) {
   const count = (st: string) => r.rows.filter((x: any) => x.edr_status === st).length;
   return (
     <Card className="mt-5">
-      <CardHeader title={`${fmtN(r.total)} assets in ${q}`}
+      <CardHeader title={r.by_name ? `${fmtN(r.total)} assets whose name contains “${q}”` : `${fmtN(r.total)} assets in ${q}`}
         hint={`${fmtN(count("Online"))} online · ${fmtN(count("Offline"))} offline · ${fmtN(r.rows.filter((x: any) => !["Online", "Offline"].includes(x.edr_status)).length)} without active EDR`} />
       <SimpleTable rows={r.rows} maxHeight="calc(100vh - 320px)" empty="Nothing found in this range" onRowClick={(x: any) => set({ q: x.ip })} columns={[
         { key: "ip", label: "IP", render: (x: any) => <Mono>{x.ip}</Mono> },
@@ -61,126 +67,653 @@ function RangeView({ r, q }: { r: any; q: string }) {
   );
 }
 
-function Verdict({ icon, label, value, sub, tone }: { icon: React.ReactNode; label: string; value: React.ReactNode; sub?: React.ReactNode; tone: string }) {
-  const bg = { good: "bg-good-soft text-good-fg", warn: "bg-warn-soft text-warn-fg", crit: "bg-crit-soft text-crit-fg", info: "bg-accent-soft text-accent-fg", neutral: "bg-surface-3 text-fg-2" }[tone];
+const VIEWS: { id: string; label: string; icon: React.ElementType }[] = [
+  { id: "overview", label: "Overview", icon: LayoutGrid }, { id: "exposure", label: "Exposure", icon: Globe2 },
+  { id: "attack", label: "Attack path", icon: Route }, { id: "detections", label: "Detections", icon: Crosshair },
+  { id: "vulns", label: "Vulnerabilities", icon: ShieldAlert }, { id: "patching", label: "Patches & MBSS", icon: PackageCheck },
+  { id: "edr", label: "EDR & logging", icon: ShieldCheck }, { id: "records", label: "Records", icon: History },
+];
+
+function Profile({ r }: { r: any }) {
+  const s = r.summary;
+  const [state, set] = useUrlState();
+  const view = VIEWS.some((v) => v.id === state.view) ? state.view : "overview";
+  const go = (v: string) => { set({ view: v === "overview" ? undefined : v }); window.scrollTo({ top: 0, behavior: "smooth" }); };
+  const { data: p } = usePosture(s, r);
+  if (!s.found) return <Card className="mt-5 p-8 text-center text-muted">Nothing found for “{s.query}” in CrowdStrike, any inventory, vulnerability scan or the NIAM dump.</Card>;
+  const v = s.vulns;
+  const badge: Record<string, React.ReactNode> = {
+    exposure: r.internet?.verdict === "exposed" ? <Dot tone="crit" /> : null,
+    attack: p?.blast?.weak ? <Count n={p.blast.weak} tone="crit" /> : null,
+    detections: p?.det && (p.det.n + (p.ndr?.n || 0)) ? <Count n={p.det.n + (p.ndr?.n || 0)} tone={p.det.high ? "crit" : "warn"} /> : null,
+    vulns: v.Critical + v.High ? <Count n={v.Critical + v.High} tone={v.Critical ? "crit" : "warn"} /> : null,
+    patching: p?.sat?.compliance_failed || p?.sat?.installable_security ? <Dot tone="warn" /> : null,
+    edr: s.edr_status !== "Online" ? <Dot tone={s.edr_status === "Offline" ? "warn" : "crit"} /> : null,
+  };
   return (
-    <Card className="flex items-start gap-3 p-4">
-      <div className={cn("grid size-10 shrink-0 place-items-center rounded-xl", bg)}>{icon}</div>
-      <div className="min-w-0">
-        <div className="text-xs font-medium text-muted">{label}</div>
-        <div className="text-[16px] font-semibold">{value}</div>
-        {sub && <div className="mt-0.5 text-xs text-muted">{sub}</div>}
+    <div className="mt-4 space-y-4">
+      <Hero s={s} r={r} />
+      <nav className="sticky top-13 z-10 flex gap-0.5 overflow-x-auto border-b border-border bg-bg/90 backdrop-blur scroll-thin print:hidden">
+        {VIEWS.map(({ id, label, icon: Icon }) => (
+          <button key={id} onClick={() => go(id)}
+            className={cn("relative flex shrink-0 items-center gap-1.5 px-3 py-2.5 text-[13px] font-medium transition-colors",
+              view === id ? "text-accent-fg after:absolute after:inset-x-2 after:-bottom-px after:h-0.5 after:rounded-full after:bg-accent" : "text-fg-2 hover:text-fg")}>
+            <Icon className="size-4" />{label}{badge[id]}
+          </button>
+        ))}
+      </nav>
+      {view === "overview" && <Overview s={s} r={r} go={go} />}
+      {view === "exposure" && <div className="space-y-4"><InternetSection i={r.internet} /><Card><CardHeader title="Open ports" hint="from vulnerability scan findings" /><PortsTable rows={r.ports || []} /></Card></div>}
+      {view === "attack" && <AttackCard s={s} r={r} />}
+      {view === "detections" && <DetectionsSection agents={r.agents} ips={s.ips} names={s.hostnames} />}
+      {view === "vulns" && <div className="space-y-4"><Card><CardHeader title="Vulnerabilities" hint={`${v.Critical} critical · ${v.High} high · ${v.Medium} medium · ${v.Low} low open · ${fmtN(v.fixed)} fixed`} /><VulnTable rows={r.vulns} /></Card><ExceptionsCard s={s} agents={r.agents} /></div>}
+      {view === "patching" && <Card><SatellitePanel ips={s.ips} names={s.hostnames} /></Card>}
+      {view === "edr" && <EdrView s={s} r={r} />}
+      {view === "records" && <Records s={s} r={r} />}
+    </div>
+  );
+}
+
+const Dot = ({ tone }: { tone: string }) => <span className={cn("size-1.5 rounded-full", tone === "crit" ? "bg-crit" : "bg-warn")} />;
+const Count = ({ n, tone }: { n: number; tone: string }) => (
+  <span className={cn("rounded-full px-1.5 text-[10.5px] font-semibold", tone === "crit" ? "bg-crit-soft text-crit-fg" : "bg-warn-soft text-warn-fg")}>{n}</span>
+);
+
+function Overview({ s, r, go }: { s: any; r: any; go: (v: string) => void }) {
+  const { data: p } = usePosture(s, r);
+  const max = Math.max(1, ...((p?.factors || []).map((f: any) => f[1])));
+  return (
+    <div className="space-y-4">
+      <PostureTiles s={s} r={r} go={go} />
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Card>
+          <CardHeader title="Why this score" hint="each factor and its points" />
+          <div className="space-y-2 px-4 pb-4">
+            {!p ? <Loading /> : !(p.factors || []).filter((f: any) => f[1]).length ? <div className="text-[13px] text-good-fg">No risk factors found.</div>
+              : p.factors.filter((f: any) => f[1]).map(([n, pts]: any) => (
+                <div key={n} className="grid grid-cols-[minmax(0,1fr)_120px_36px] items-center gap-3 text-[12.5px]">
+                  <span className="truncate">{n}</span>
+                  <span className="h-1.5 overflow-hidden rounded-full bg-surface-3"><span className="block h-full rounded-full bg-serious" style={{ width: `${(100 * pts) / max}%` }} /></span>
+                  <b className="text-right tabular">+{pts}</b>
+                </div>))}
+          </div>
+        </Card>
+        <LastGoodCard s={s} agents={r.agents} />
+      </div>
+    </div>
+  );
+}
+
+function EdrView({ s, r }: { s: any; r: any }) {
+  return (
+    <div className="space-y-4">
+      <Card><CardHeader title="CrowdStrike agents" hint={`${r.agents.length} agent(s) seen for this asset`} /><AgentsTable rows={r.agents} /></Card>
+      <Card><CardHeader title="Prevention policy & Spotlight" hint="CrowdStrike's own view of this host" /><CrowdStrikePanel agents={r.agents} ips={s.ips} /></Card>
+      <Card><CardHeader title="SIEM logging (Splunk)" hint="is this host sending logs?" /><SplunkPanel names={s.hostnames} ips={s.ips} /></Card>
+    </div>
+  );
+}
+
+function Records({ s, r }: { s: any; r: any }) {
+  const [sub, setSub] = React.useState("inventory");
+  const opts: [string, React.ReactNode][] = [["inventory", `Inventory (${r.inventory.length})`], ["scans", `Scans (${r.scans.length})`],
+    ...(r.niam?.length ? [["niam", `NIAM (${r.niam.length})`] as [string, string]] : []), ["related", "Related assets"]];
+  return (
+    <Card>
+      <div className="flex items-center gap-2 border-b border-border px-4 py-2.5"><Segmented value={sub} onChange={setSub} options={opts} /></div>
+      {sub === "inventory" && <><InventorySources /><SimpleTable rows={r.inventory} empty="Not in inventory" columns={[
+        { key: "source", label: "Source", render: (x: any) => <span className="text-[12px]"><Badge tone="info">{x.source?.label || "Manual upload"}</Badge>
+          {x.source?.filename && <span className="ml-1.5 text-muted" title={x.source.filename}>v{x.source.version_no} · {fmtDt(x.source.uploaded_at).slice(0, 10)}</span>}</span> },
+        { key: "lob", label: "LOB", render: (x: any) => <Link className="font-semibold hover:underline" href={`/lob/?id=${x.lob_id}&tab=inventory&q=${encodeURIComponent(x.ip || x.node_name)}`}>{x.lob}</Link> },
+        { key: "msp", label: "MSP", render: (x: any) => x.msp || <span className="text-muted">Unassigned</span> },
+        { key: "ip", label: "IP", render: (x: any) => <Mono>{x.ip}</Mono> }, { key: "node_name", label: "Node name" },
+        { key: "node_type", label: "Node type" }, { key: "live", label: "Live", render: (x: any) => <Live v={x.live} /> },
+        { key: "edr_installed", label: "EDR (inventory)", render: (x: any) => <YN v={x.edr_installed} /> },
+        { key: "coverage_status", label: "EDR status", render: (x: any) => <CoverageBadge v={x.coverage_status} /> },
+        { key: "remarks", label: "Remarks", wrap: true },
+      ]} /></>}
+      {sub === "scans" && <SimpleTable rows={r.scans} empty="Never scanned" columns={[
+        { key: "ip", label: "IP", render: (x: any) => <Mono>{x.ip}</Mono> }, { key: "lob", label: "LOB" },
+        { key: "scanned_at", label: "Last scanned", render: (x: any) => <When ts={x.scanned_at} /> }, { key: "filename", label: "Scan file" },
+      ]} />}
+      {sub === "niam" && <SimpleTable rows={r.niam || []} empty="Not in the NIAM dump" columns={[
+        { key: "ne_id", label: "NE ID", render: (x: any) => <b>{x.ne_id}</b> },
+        { key: "host", label: "Host (as in NIAM)", render: (x: any) => <Mono>{x.host}</Mono> },
+        { key: "present", label: "In latest dump", render: (x: any) => x.present ? <Badge tone="good">Yes</Badge> : <Badge tone="neutral">Dropped {fmtDt(x.removed_at).slice(0, 10)}</Badge> },
+        { key: "extra", label: "NIAM details", wrap: true, render: (x: any) => <span className="text-xs text-fg-2">{Object.entries(x.extra || {}).map(([k, v]) => `${k}: ${v}`).join(" · ")}</span> },
+        { key: "first_seen_at", label: "First in NIAM", render: (x: any) => fmtDt(x.first_seen_at) },
+      ]} />}
+      {sub === "related" && <RelatedAssets s={s} agents={r.agents} />}
+    </Card>
+  );
+}
+
+function VulnTable({ rows }: { rows: any[] }) {
+  return <SimpleTable rows={rows} maxHeight="65vh" empty="No findings for this asset" columns={[
+    { key: "severity", label: "Severity", render: (x: any) => <SeverityBadge s={x.severity} /> },
+    { key: "name", label: "Vulnerability", wrap: true, render: (x: any) => <Link className="font-medium hover:underline" href={`/vulnerabilities/?vtab=findings&ip=${x.ip}&status=${x.status === "fixed" ? "fixed" : ""}`}>{x.name}</Link> },
+    { key: "ip", label: "IP", render: (x: any) => <Mono>{x.ip}</Mono> },
+    { key: "port", label: "Port", render: (x: any) => `${x.port || ""}${x.protocol ? "/" + x.protocol : ""}` },
+    { key: "cve", label: "CVE", wrap: true, render: (x: any) => <span className="text-[12px]">{x.cve}</span> },
+    { key: "first_discovered", label: "First seen", render: (x: any) => fmtDt(x.first_discovered).slice(0, 10) },
+    { key: "fix", label: "Fix available", render: (x: any) => x.fix?.length ? <span className="inline-flex flex-wrap gap-1">{x.fix.map((e: any) =>
+      <Badge key={e.id} tone={e.installable ? "good" : "neutral"} title={e.installable ? "Installable now from Satellite" : "Erratum exists; not yet installable (content view / repo)"}>{e.id}</Badge>)}</span> : <span className="text-muted">–</span> },
+    { key: "status", label: "Status", render: (x: any) => x.status === "fixed" ? <span className="text-good-fg">Fixed</span> : "Open" },
+  ]} />;
+}
+
+function PortsTable({ rows }: { rows: any[] }) {
+  return <SimpleTable rows={rows} maxHeight="50vh" empty="No ports seen — ports come from vulnerability scan findings" columns={[
+    { key: "port", label: "Port", render: (x: any) => <b className="font-mono">{x.port}/{(x.protocol || "").toLowerCase()}</b> },
+    { key: "ip", label: "IP", render: (x: any) => <Mono>{x.ip}</Mono> },
+    { key: "max_severity", label: "Worst open finding", render: (x: any) => x.max_severity ? <SeverityBadge s={x.max_severity} /> : <span className="text-muted">none open</span> },
+    { key: "open_findings", label: "Open findings", num: true },
+    { key: "names", label: "Vulnerabilities on this port", wrap: true, render: (x: any) => <span className="text-xs text-fg-2">{x.names.slice(0, 3).join(" · ")}{x.names.length > 3 ? ` +${x.names.length - 3}` : ""}</span> },
+    { key: "last_observed", label: "Last observed", render: (x: any) => fmtDt(x.last_observed).slice(0, 10) },
+  ]} />;
+}
+
+function AgentsTable({ rows }: { rows: any[] }) {
+  return <SimpleTable rows={rows} empty="No CrowdStrike agent found" columns={[
+    { key: "hostname", label: "Hostname", render: (x: any) => <HostLink aid={x.aid}><b>{x.hostname || x.aid}</b></HostLink> },
+    { key: "edr_status", label: "Status", render: (x: any) => <span className="flex items-center gap-1.5"><EdrBadge s={x.edr_status} />{x.edr_detail && x.edr_detail !== "in console" && <span className="text-xs text-muted">{x.edr_detail}</span>}</span> },
+    { key: "local_ip", label: "IP", render: (x: any) => <Mono>{x.local_ip}</Mono> },
+    { key: "os_version", label: "OS" }, { key: "agent_version", label: "Sensor", render: (x: any) => <Mono>{x.agent_version}</Mono> },
+    { key: "first_seen", label: "First seen", render: (x: any) => fmtDt(x.first_seen).slice(0, 10) },
+    { key: "last_seen", label: "Last seen", render: (x: any) => <When ts={x.last_seen} /> },
+  ]} />;
+}
+
+/* ---------------- Internet exposed: verdict and each method ---------------- */
+const VERDICT_TXT: Record<string, [string, string]> = {
+  exposed: ["crit", "Internet exposed"], whitelisted: ["neutral", "Whitelisted (not counted)"], cgnat: ["warn", "CGNAT only (not directly exposed)"],
+  not_exposed: ["good", "Not exposed"],
+};
+
+function Method({ title, hit, children, none }: { title: string; hit: boolean; children?: React.ReactNode; none: string }) {
+  return (
+    <div className={cn("rounded-xl border p-3", hit ? "border-crit/40 bg-crit-soft/30" : "border-border")}>
+      <div className="mb-2 flex items-center gap-2 text-[12.5px] font-semibold">{title}
+        <Badge tone={hit ? "crit" : "neutral"} className="ml-auto">{hit ? "evidence" : "none"}</Badge></div>
+      {hit ? children : <div className="text-[12px] text-muted">{none}</div>}
+    </div>
+  );
+}
+
+function InternetSection({ i }: { i: any }) {
+  if (!i) return null;
+  const [tone, label] = VERDICT_TXT[i.verdict] || VERDICT_TXT.not_exposed;
+  const scanHit = i.scan.some((x: any) => x.scanned && !x.cgnat);
+  return (
+    <Card>
+      <CardHeader title={<span className="inline-flex items-center gap-2"><Globe2 className="size-4" /> Internet exposed <Badge tone={tone as any}>{label}</Badge></span>}
+        hint={i.public_ips.length ? `public / NAT IP ${i.public_ips.join(", ")}` : "no public IP known for this asset"}
+        right={i.internal_ip && i.verdict !== "not_exposed" ? <Link className="text-[12.5px] text-accent-fg hover:underline print:hidden" href={`/attack-paths/?ip=${encodeURIComponent(i.internal_ip)}`}>Attack path →</Link> : undefined} />
+      <div className="grid gap-3 px-4 pb-4 lg:grid-cols-3">
+        <Method title="Communication matrix" hit={i.matrix.length > 0} none="No inbound Internet / ISP rule reaches this asset.">
+          <div className="space-y-2">
+            {i.matrix.map((m: any) => (
+              <div key={m.rule_id} className="rounded-lg bg-surface px-2.5 py-2 text-[12px] shadow-card">
+                <div className="flex items-center gap-2"><b>{m.rule_id}</b><Badge tone="info">via {m.path === "ISP link" ? `ISP ${m.isp}` : `firewall ${m.firewall}`}</Badge>
+                  <span className="ml-auto text-muted">{m.action}</span></div>
+                <div className="mt-1 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-fg-2">
+                  <span className="text-muted">From</span><span>{m.src_zone || "–"} · <Mono>{m.src || "any"}</Mono>{m.src_nat ? <> (NAT <Mono>{m.src_nat}</Mono>)</> : null}</span>
+                  <span className="text-muted">To</span><span>{m.dst_zone || "–"} · <Mono>{m.dst}</Mono>{m.dst_nat ? <> via public <Mono>{m.dst_nat}</Mono></> : null}</span>
+                  <span className="text-muted">Service</span><span>{(m.protocol || "any").toUpperCase()} {m.ports || "any"}{m.service ? ` · ${m.service}` : ""}</span>
+                  <span className="text-muted">Path</span><span>{[m.isp && `ISP ${m.isp}`, m.firewall && `firewall ${m.firewall}`, m.fw_rule && `rule ${m.fw_rule}`].filter(Boolean).join(" → ") || "–"}</span>
+                  <span className="text-muted">Change</span><span>{m.cr || "–"}{m.valid_till ? ` · valid till ${m.valid_till}` : ""}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Method>
+        <Method title="VA scan of a public IP" hit={scanHit} none="No public IP of this asset appears in a vulnerability scan.">
+          <SimpleTable rows={i.scan} columns={[
+            { key: "ip", label: "Public IP", render: (x: any) => <span><Mono>{x.ip}</Mono>{x.cgnat && <Badge tone="warn" className="ml-1">CGNAT</Badge>}</span> },
+            { key: "last_scan", label: "Scanned", render: (x: any) => x.scanned ? fmtDt(x.last_scan).slice(0, 10) : <span className="text-muted">no</span> },
+            { key: "sev", label: "Open C/H/M/L", render: (x: any) => x.scanned ? <SevCounts c={x.crit} h={x.high} m={x.med} l={x.low} /> : null },
+          ]} />
+        </Method>
+        <Method title="EDR (CrowdStrike)" hit={i.crowdstrike.some((x: any) => x.public_on_nic)} none="No agent has a public IP on its own interface.">
+          <div className="space-y-1 text-[12px]">
+            {i.crowdstrike.filter((x: any) => x.public_on_nic).map((x: any) => (
+              <div key={x.aid}><b>{x.hostname}</b> has public IP <Mono>{x.local_ip}</Mono> on its own interface</div>
+            ))}
+          </div>
+        </Method>
+      </div>
+      {i.crowdstrike.length > 0 && (
+        <div className="border-t border-border px-4 py-3 text-[12px] text-fg-2">
+          <span className="font-medium">What CrowdStrike reports:</span>{" "}
+          {i.crowdstrike.map((x: any) => (
+            <span key={x.aid} className="mr-4 inline-flex flex-wrap gap-x-2">
+              <b>{x.hostname}</b> NIC <Mono>{x.local_ip || "–"}</Mono>{x.public_on_nic && <Badge tone="crit">public</Badge>}
+              · connection <Mono>{x.connection_ip || "–"}</Mono> · egress <Mono>{x.external_ip || "–"}</Mono>
+              {x.egress_public && <span className="text-muted">(organisation NAT, not exposure on its own)</span>}
+            </span>
+          ))}
+        </div>
+      )}
+      {i.inventory.length > 0 && (
+        <div className="border-t border-border px-4 py-3 text-[12px] text-fg-2"><span className="font-medium">Inventory says:</span> {i.inventory.map((e: any) => e.text).join(" · ")}</div>
+      )}
+      {i.ports?.length > 0 && (
+        <div className="border-t border-border px-4 py-3">
+          <div className="mb-2 flex items-center gap-2 text-[12.5px] font-semibold">Real exposure check: ports the VA scan saw on the public IP vs the matrix
+            {i.shadow > 0 ? <Badge tone="crit">{i.shadow} shadow port{i.shadow > 1 ? "s" : ""}</Badge> : <Badge tone="good">all covered by a rule</Badge>}</div>
+          <SimpleTable rows={i.ports} columns={[
+            { key: "ip", label: "Public IP", render: (x: any) => <Mono>{x.ip}</Mono> },
+            { key: "port", label: "Port", render: (x: any) => <b className="font-mono">{x.port}/{x.protocol}</b> },
+            { key: "open", label: "Open findings", num: true },
+            { key: "names", label: "Findings", wrap: true, render: (x: any) => <span className="text-[12px] text-fg-2">{x.names.join(" · ")}</span> },
+            { key: "rules", label: "Allowed by", render: (x: any) => x.shadow ? <Badge tone="crit" title="Reachable from the internet but no inbound rule allows it: undocumented exposure">Shadow — no rule</Badge>
+              : <span className="text-[12px]">{x.rules.join(", ")}</span> },
+          ]} />
+        </div>
+      )}
+    </Card>
+  );
+}
+
+/* ---------------- Recent detections with a date filter ---------------- */
+const SEV_TONE: Record<string, any> = { Critical: "crit", High: "serious", Medium: "warn", Low: "info", Informational: "neutral" };
+const dayStr = (d: Date) => d.toISOString().slice(0, 10);
+
+function DetectionsSection({ agents, ips, names }: { agents: any[]; ips: string[]; names: string[] }) {
+  const today = React.useMemo(() => new Date(), []);
+  const [range, setRange] = React.useState({ from: dayStr(new Date(today.getTime() - 7 * 864e5)), to: dayStr(today) });
+  const [src, setSrc] = React.useState("all");
+  const aids = agents.map((a) => a.aid).join(",");
+  const hn = names.join(",");
+  const ip = ips.join(",");
+  const cs = useQuery({ queryKey: ["det-cs", aids, hn, range], enabled: !!(aids || hn),
+    queryFn: () => api<any>("/api/asset/detections", { params: { aids, hostnames: hn, from: range.from, to: range.to } }) });
+  const sp = useQuery({ queryKey: ["det-splunk", hn, ip, range], queryFn: () => api<any>("/api/asset/splunk/detections", { params: { hosts: hn, ips: ip, from: range.from, to: range.to } }) });
+  const nd = useQuery({ queryKey: ["det-ndr", ip, hn, range], queryFn: () => api<any>("/api/asset/ndr", { params: { ips: ip, hosts: hn, from: range.from, to: range.to } }) });
+  const norm = (rows: any[] | undefined, source: string, map: (x: any) => any) => (rows || []).map((x) => ({ source, ...map(x) }));
+  const csRows = norm(cs.data?.rows, "CrowdStrike", (x) => ({ at: x.created_at, severity: x.severity, name: x.name, detail: [x.tactic, x.technique].filter(Boolean).join(" · "),
+    where: x.hostname, extra: x.filename, action: x.disposition, status: x.status }));
+  const spRows = norm(sp.data?.rows, "Splunk", (x) => ({ at: x.created_at, severity: x.severity, name: x.name, detail: x.category,
+    where: [x.src && `src ${x.src}`, x.dest && `dest ${x.dest}`, x.host].filter(Boolean).join(" · "), extra: "", action: "notable event", status: x.status }));
+  const ndRows = norm(nd.data?.rows, "Seceon NDR", (x) => ({ at: x.created_at, severity: x.severity, name: x.name, detail: x.category,
+    where: `${x.src_ip || "?"} → ${x.dst_ip || "?"}`, extra: x.direction ? `this host is the ${x.direction}` : "", action: x.source === "webhook" ? "pushed by Seceon" : "uploaded", status: x.status }));
+  const all = [...csRows, ...spRows, ...ndRows].sort((a, b) => String(b.at).localeCompare(String(a.at)));
+  const shown = src === "all" ? all : src === "cs" ? csRows : src === "splunk" ? spRows : ndRows;
+  const quick = (days: number) => setRange({ from: dayStr(new Date(today.getTime() - days * 864e5)), to: dayStr(today) });
+  const input = "h-8 rounded-lg border border-border-strong bg-surface px-2 text-[12.5px]";
+  const busy = cs.isFetching || sp.isFetching || nd.isFetching;
+  const note: Record<string, React.ReactNode> = {
+    cs: !agents.length ? "No CrowdStrike agent on this host." : cs.data?.fetched_at ? `fetched ${fmtRel(cs.data.fetched_at)} (Alerts API, every sync)` : "",
+    splunk: sp.data && !sp.data.configured ? <>Splunk not connected — <Link className="text-accent-fg hover:underline" href="/connectors/">Integrations</Link></> : sp.data?.error || (sp.data?.simulated ? "sample data: simulated" : "Splunk ES notable events"),
+    ndr: nd.data && !nd.data.configured ? <>No Seceon alerts received yet — <Link className="text-accent-fg hover:underline" href="/connectors/">set up the webhook or upload an export</Link></> : "Seceon NDR network detections (this host as source or destination)",
+  };
+  return (
+    <Card>
+      <CardHeader title={<span className="inline-flex items-center gap-2"><Crosshair className="size-4" /> Recent detections
+        <span className="text-[12px] font-normal text-muted">{fmtN(all.length)} between {range.from} and {range.to}</span></span>}
+        right={<div className="flex flex-wrap items-center gap-1.5">
+          {[7, 30, 90].map((d) => <Button key={d} size="sm" variant="ghost" onClick={() => quick(d)}>{d} days</Button>)}
+          <input type="date" className={input} value={range.from} max={range.to} onChange={(e) => setRange({ ...range, from: e.target.value })} />
+          <span className="text-muted">–</span>
+          <input type="date" className={input} value={range.to} min={range.from} onChange={(e) => setRange({ ...range, to: e.target.value })} />
+        </div>} />
+      <div className={cn("px-4 pb-4", busy && "opacity-70")}>
+        <Tabs value={src} onChange={setSrc} tabs={[{ id: "all", label: "All sources", count: all.length }, { id: "cs", label: "CrowdStrike", count: csRows.length },
+          { id: "splunk", label: "Splunk", count: spRows.length }, { id: "ndr", label: "Seceon NDR", count: ndRows.length }]} />
+        {src !== "all" && note[src] && <div className="-mt-2 mb-2 text-[11.5px] text-muted">{note[src]}</div>}
+        {!shown.length ? <div className="text-[13px] text-good-fg">No detections in this period.</div> : (
+          <SimpleTable rows={shown} maxHeight="380px" columns={[
+            { key: "at", label: "When", render: (x: any) => <When ts={x.at} /> },
+            { key: "source", label: "Source", render: (x: any) => <Badge tone={x.source === "CrowdStrike" ? "crit" : x.source === "Splunk" ? "info" : "violet"}>{x.source}</Badge> },
+            { key: "severity", label: "Severity", render: (x: any) => <Badge tone={SEV_TONE[x.severity] || "neutral"}>{x.severity || "–"}</Badge> },
+            { key: "name", label: "Detection", wrap: true, render: (x: any) => <b className="text-[12.5px]">{x.name}</b> },
+            { key: "detail", label: "Tactic / category", wrap: true, render: (x: any) => <span className="text-[12px] text-fg-2">{x.detail}</span> },
+            { key: "where", label: "Host / flow", wrap: true, render: (x: any) => <span className="font-mono text-[11.5px]">{x.where}</span> },
+            { key: "extra", label: "Process / role", render: (x: any) => <span className="text-[12px]">{x.extra}</span> },
+            { key: "action", label: "Action", wrap: true, render: (x: any) => <span className="text-[12px]">{x.action}</span> },
+            { key: "status", label: "Status", render: (x: any) => <Badge tone={/closed/i.test(x.status || "") ? "good" : /progress|investig/i.test(x.status || "") ? "info" : "warn"}>{String(x.status || "–").replace("_", " ")}</Badge> },
+          ]} />
+        )}
       </div>
     </Card>
   );
 }
 
-function Profile({ r }: { r: any }) {
-  const s = r.summary;
-  const [tab, setTab] = React.useState("vulns");
-  React.useEffect(() => setTab(r.vulns.length ? "vulns" : r.agents.length ? "agents" : "inventory"), [r]);
-  const ports = r.ports || [];
-  if (!s.found) return <Card className="mt-5 p-8 text-center text-muted">Nothing found for “{s.query}” in CrowdStrike, any inventory, vulnerability scan or the NIAM dump.</Card>;
-  const a = s.edr_agent;
-  const edrTone = s.edr_status === "Online" ? "good" : s.edr_status === "Offline" ? "warn" : "crit";
-  const v = s.vulns;
+/* ---------------- SOD exceptions, last known good, related assets ---------------- */
+function useAssetContext(s: any, agents: any[]) {
+  return useQuery({ queryKey: ["asset-context", s.ips, s.hostnames], queryFn: () => api<any>("/api/asset/context",
+    { params: { ips: s.ips.join(","), names: s.hostnames.join(","), aids: agents.map((a) => a.aid).join(",") } }) });
+}
+
+function ExceptionsCard({ s, agents }: { s: any; agents: any[] }) {
+  const { data } = useAssetContext(s, agents);
+  if (!data) return null;
   return (
-    <div className="mt-5 space-y-4">
-      <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
-        <h2 className="text-[20px] font-semibold">{s.hostnames[0] || s.query}</h2>
-        <span className="font-mono text-[13px] text-fg-2">{s.ips.join(", ")}</span>
-        {s.hostnames.length > 1 && <span className="text-xs text-muted">also known as {s.hostnames.slice(1).join(", ")}</span>}
-        {s.risk && <Link href={`/risk/?q=${encodeURIComponent(s.risk.ip)}`}><RiskBadge score={s.risk.score} level={s.risk.level} factors={s.risk.factors} /></Link>}
-        {s.exposure?.length > 0 && <Link href={`/exposure/?q=${encodeURIComponent(s.ips[0] || "")}`}><Badge tone="crit" title={s.exposure.map((e: any) => "• " + e.text).join("\n")}>Internet exposed</Badge></Link>}
-        {s.ne_ids?.length > 0 && <Badge tone="violet" title="From the NIAM dump">NE ID {s.ne_ids.join(", ")}</Badge>}
+    <Card>
+      <CardHeader title="Vulnerability exceptions (SOD)" hint="exceptions covering this asset's findings, and when they run out" />
+      <div className="px-4 pb-4">
+        {!data.exceptions.length ? <div className="text-[13px] text-muted">No SOD exception covers this asset.</div> : (
+          <SimpleTable rows={data.exceptions} columns={[
+            { key: "exception_id", label: "Exception", render: (x: any) => <Link className="font-semibold hover:underline" href={`/exceptions/?q=${encodeURIComponent(x.exception_id)}`}>{x.exception_id}</Link> },
+            { key: "status", label: "Status", render: (x: any) => <Badge tone={x.status === "Expired" ? "crit" : x.status === "Expiring" ? "warn" : "good"}>{x.status}</Badge> },
+            { key: "days_left", label: "Runs out", render: (x: any) => x.days_left == null ? "no end date" : x.days_left < 0 ? <b className="text-crit-fg">{-x.days_left} days ago</b>
+              : <span className={x.days_left <= 30 ? "font-semibold text-warn-fg" : ""}>in {x.days_left} days · {x.valid_till}</span> },
+            { key: "findings", label: "Findings covered", render: (x: any) => <span>{x.findings}{x.status === "Expired" && <span className="text-crit-fg"> (reopened)</span>}</span> },
+            { key: "finding_names", label: "For", wrap: true, render: (x: any) => <span className="text-[12px] text-fg-2">{x.finding_names.join(" · ")}</span> },
+            { key: "approved_by", label: "Approved by" },
+          ]} />
+        )}
       </div>
-      {(s.os || s.feasibility) && (
-        <div className="-mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[13px]">
-          <span className="text-muted">OS</span><OsCell os={s.os} src={s.os_source} />
-          {s.feasibility && <><span className="text-muted">EDR feasibility</span><FeasibleBadge v={s.feasibility} reason={s.feasibility_reason} /><span className="text-xs text-muted">{s.feasibility_reason}</span></>}
-        </div>
-      )}
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <Verdict tone={edrTone} icon={s.edr_status === "Online" ? <ShieldCheck className="size-5" /> : <ShieldX className="size-5" />} label="EDR (CrowdStrike)"
-          value={s.edr_status === "Not Installed" ? "Not installed" : s.edr_status}
-          sub={a ? <>{s.edr_detail && s.edr_detail !== "in console" && <b className="text-warn-fg">{s.edr_detail} · </b>}{a.aid ? <HostLink aid={a.aid}>{a.hostname}</HostLink> : a.hostname} · sensor {a.agent_version || "–"} · seen {fmtRel(a.last_seen)}{s.active_agents > 1 ? ` · ${s.active_agents} active agents` : ""}</> : "No agent has ever reported this asset"} />
-        <Verdict tone={s.in_inventory ? "info" : "neutral"} icon={<ShieldCheck className="size-5" />} label="Owner (LOB · MSP)"
-          value={s.lobs.length ? s.lobs.join(", ") : "Not in inventory"} sub={s.in_inventory ? <>MSP {s.msps.join(", ") || "unassigned"} · inventory says EDR {s.inventory_claim.join("/") || "–"}</> : "Not in inventory"} />
-        <Verdict tone={v.Critical ? "crit" : v.High ? "warn" : r.scans.length ? "good" : "neutral"} icon={<ShieldAlert className="size-5" />} label="Open vulnerabilities"
-          value={<SevCounts c={v.Critical} h={v.High} m={v.Medium} l={v.Low} />} sub={`${fmtN(v.fixed)} fixed · ${fmtN(v.Info)} info`} />
-        <Verdict tone={s.last_scan ? "info" : "neutral"} icon={<Search className="size-5" />} label="Last vulnerability scan"
-          value={s.last_scan ? fmtDt(s.last_scan).slice(0, 10) : "Never scanned"} sub={s.last_scan ? fmtRel(s.last_scan) : undefined} />
+    </Card>
+  );
+}
+
+function LastGoodCard({ s, agents }: { s: any; agents: any[] }) {
+  const { data } = useAssetContext(s, agents);
+  return (
+    <Card>
+      <CardHeader title="Last seen by each source" hint="last known good" />
+      <div className="space-y-1.5 px-4 pb-4">
+        {!data ? <Loading /> : data.last_good.map((x: any) => (
+          <div key={x.label} className="flex items-center justify-between gap-3 text-[12.5px]" title={x.hint}>
+            <span className="text-fg-2">{x.label}</span>
+            {x.at ? <span className="tabular"><When ts={x.at} /></span> : <span className="text-muted">never</span>}
+          </div>
+        ))}
+        <SplunkLast names={s.hostnames} ips={s.ips} />
       </div>
-      <Tabs value={tab} onChange={setTab} tabs={[
-        { id: "vulns", label: "Vulnerabilities", count: r.vulns.length },
-        { id: "ports", label: "Ports", count: ports.length },
-        ...(r.flows?.length ? [{ id: "flows", label: "Flows", count: r.flows.length }] : []),
-        { id: "agents", label: "EDR agents", count: r.agents.length },
-        { id: "inventory", label: "Inventory", count: r.inventory.length },
-        { id: "scans", label: "Scans", count: r.scans.length },
-        ...(r.niam?.length ? [{ id: "niam", label: "NIAM", count: r.niam.length }] : []),
-      ]} />
-      <Card>
-        {tab === "vulns" && <SimpleTable rows={r.vulns} maxHeight="60vh" empty="No findings for this asset" columns={[
-          { key: "severity", label: "Severity", render: (x: any) => <SeverityBadge s={x.severity} /> },
-          { key: "name", label: "Vulnerability", wrap: true, render: (x: any) => <Link className="font-medium hover:underline" href={`/vulnerabilities/?vtab=findings&ip=${x.ip}&status=${x.status === "fixed" ? "fixed" : ""}`}>{x.name}</Link> },
-          { key: "ip", label: "IP", render: (x: any) => <Mono>{x.ip}</Mono> }, { key: "lob", label: "LOB" },
-          { key: "port", label: "Port", render: (x: any) => `${x.port || ""}${x.protocol ? "/" + x.protocol : ""}` },
-          { key: "plugin_id", label: "Plugin" }, { key: "cve", label: "CVE", wrap: true },
-          { key: "first_discovered", label: "First discovered", render: (x: any) => fmtDt(x.first_discovered) },
-          { key: "last_observed", label: "Last observed", render: (x: any) => fmtDt(x.last_observed) },
-          { key: "status", label: "Status", render: (x: any) => x.status === "fixed" ? <span className="text-good-fg">Fixed</span> : "Open" },
-        ]} />}
-        {tab === "flows" && <SimpleTable rows={r.flows || []} maxHeight="60vh" empty="No communication-matrix rule covers this asset" columns={[
-          { key: "rule_id", label: "Rule", render: (x: any) => <span className="flex items-center gap-1.5"><b>{x.rule_id}</b>{x.inbound_internet ? <Badge tone="crit">internet</Badge> : null}</span> },
-          { key: "role", label: "This asset is", render: (x: any) => <Badge tone={x.role === "Destination" ? "info" : "outline"}>{x.role}</Badge> },
-          { key: "src", label: "Source", wrap: true, render: (x: any) => <span className="text-[12px]"><span className="text-muted">{x.src_zone ? `${x.src_zone} · ` : ""}</span><Mono>{x.src}</Mono></span> },
-          { key: "dst_nat", label: "Public / NAT IP", render: (x: any) => <Mono>{x.dst_nat}</Mono> },
-          { key: "dst", label: "Destination", wrap: true, render: (x: any) => <Mono>{x.dst}</Mono> },
-          { key: "svc", label: "Service", render: (x: any) => `${(x.protocol || "any").toUpperCase()} ${x.ports || "any"}` },
-          { key: "firewall", label: "Firewall" }, { key: "isp", label: "ISP / link" }, { key: "action", label: "Action" }, { key: "cr", label: "CR" },
-        ]} />}
-        {tab === "ports" && <SimpleTable rows={ports} maxHeight="60vh" empty="No ports seen — ports come from vulnerability scan findings" columns={[
-          { key: "port", label: "Port", render: (x: any) => <b className="font-mono">{x.port}</b> },
-          { key: "protocol", label: "Protocol", render: (x: any) => (x.protocol || "").toUpperCase() },
-          { key: "ip", label: "IP", render: (x: any) => <Mono>{x.ip}</Mono> },
-          { key: "max_severity", label: "Worst open finding", render: (x: any) => x.max_severity ? <SeverityBadge s={x.max_severity} /> : <span className="text-muted">none open</span> },
-          { key: "open_findings", label: "Open findings", num: true },
-          { key: "names", label: "Vulnerabilities on this port", wrap: true, render: (x: any) => <span className="text-xs text-fg-2">{x.names.slice(0, 4).join(" · ")}{x.names.length > 4 ? ` +${x.names.length - 4}` : ""}</span> },
-          { key: "last_observed", label: "Last observed", render: (x: any) => fmtDt(x.last_observed) },
-        ]} />}
-        {tab === "agents" && <SimpleTable rows={r.agents} empty="No CrowdStrike agent found" columns={[
-          { key: "hostname", label: "Hostname", render: (x: any) => <HostLink aid={x.aid}><b>{x.hostname || x.aid}</b></HostLink> },
-          { key: "edr_status", label: "Status", render: (x: any) => <span className="flex items-center gap-1.5"><EdrBadge s={x.edr_status} />{x.edr_detail && x.edr_detail !== "in console" && <span className="text-xs text-muted">{x.edr_detail}</span>}</span> },
-          { key: "local_ip", label: "IP", render: (x: any) => <Mono>{x.local_ip}</Mono> },
-          { key: "lobs", label: "LOB" }, { key: "msps", label: "MSP" },
-          { key: "os_version", label: "OS" }, { key: "agent_version", label: "Sensor", render: (x: any) => <Mono>{x.agent_version}</Mono> },
-          { key: "first_seen", label: "First seen", render: (x: any) => fmtDt(x.first_seen) },
-          { key: "last_seen", label: "Last seen", render: (x: any) => <When ts={x.last_seen} /> },
-          { key: "aid", label: "Agent ID", render: (x: any) => <Mono>{x.aid}</Mono> },
-        ]} />}
-        {tab === "inventory" && <SimpleTable rows={r.inventory} empty="Not in inventory" columns={[
-          { key: "lob", label: "LOB", render: (x: any) => <Link className="font-semibold hover:underline" href={`/lob/?id=${x.lob_id}&tab=inventory&q=${encodeURIComponent(x.ip || x.node_name)}`}>{x.lob}</Link> },
-          { key: "msp", label: "MSP", render: (x: any) => x.msp || <span className="text-muted">Unassigned</span> },
-          { key: "ip", label: "IP", render: (x: any) => <Mono>{x.ip}</Mono> }, { key: "node_name", label: "Node name" },
-          { key: "node_type", label: "Node type" }, { key: "live", label: "Live", render: (x: any) => <Live v={x.live} /> },
-          { key: "edr_feasible", label: "EDR feasible", render: (x: any) => <YN v={x.edr_feasible} /> },
-          { key: "edr_installed", label: "EDR installed (inventory)", render: (x: any) => <YN v={x.edr_installed} /> },
-          { key: "coverage_status", label: "EDR status", render: (x: any) => <CoverageBadge v={x.coverage_status} /> },
-          { key: "remarks", label: "Remarks", wrap: true },
-        ]} />}
-        {tab === "scans" && <SimpleTable rows={r.scans} empty="Never scanned" columns={[
-          { key: "ip", label: "IP", render: (x: any) => <Mono>{x.ip}</Mono> }, { key: "lob", label: "LOB" },
-          { key: "scanned_at", label: "Last scanned", render: (x: any) => <When ts={x.scanned_at} /> }, { key: "filename", label: "Scan file" },
-        ]} />}
-        {tab === "niam" && <SimpleTable rows={r.niam || []} empty="Not in the NIAM dump" columns={[
-          { key: "ne_id", label: "NE ID", render: (x: any) => <b>{x.ne_id}</b> },
-          { key: "host", label: "Host (as in NIAM)", render: (x: any) => <Mono>{x.host}</Mono> },
-          { key: "present", label: "In latest dump", render: (x: any) => x.present ? <Badge tone="good">Yes</Badge> : <Badge tone="neutral">Dropped {fmtDt(x.removed_at).slice(0, 10)}</Badge> },
-          { key: "extra", label: "NIAM details", wrap: true, render: (x: any) => <span className="text-xs text-fg-2">{Object.entries(x.extra || {}).map(([k, v]) => `${k}: ${v}`).join(" · ")}</span> },
-          { key: "first_seen_at", label: "First in NIAM", render: (x: any) => fmtDt(x.first_seen_at) },
-        ]} />}
-      </Card>
+    </Card>
+  );
+}
+
+function SplunkLast({ names, ips }: { names: string[]; ips: string[] }) {
+  const { data } = useQuery({ queryKey: ["asset-splunk", names, ips], queryFn: () => api<any>("/api/asset/splunk", { params: { hosts: names.join(","), ips: ips.join(",") } }) });
+  const last = data?.rows?.[0]?.last_seen;
+  return (
+    <div className="flex items-center justify-between gap-3 text-[12.5px]" title="latest event in Splunk from this host">
+      <span className="text-fg-2">Last Splunk event</span>
+      {!data ? <span className="text-muted">…</span> : !data.configured ? <span className="text-muted">not connected</span> : last ? <When ts={last} /> : <span className="font-semibold text-crit-fg">none in {data.days || 7} days</span>}
     </div>
+  );
+}
+
+function RelatedAssets({ s, agents }: { s: any; agents: any[] }) {
+  const { data } = useAssetContext(s, agents);
+  const [, set] = useUrlState();
+  if (!data) return <Loading />;
+  return (
+    <SimpleTable rows={data.related} maxHeight="60vh" empty="No related assets" onRowClick={(x: any) => set({ q: x.ip, view: undefined })} columns={[
+      { key: "kind", label: "Relation", render: (x: any) => <Badge tone={x.kind.startsWith("Talks") || x.kind.startsWith("It talks") ? "info" : "neutral"}>{x.kind}</Badge> },
+      { key: "why", label: "Why", render: (x: any) => <span className="font-mono text-[11.5px]">{x.why}</span> },
+      { key: "ip", label: "IP", render: (x: any) => <Mono>{x.ip}</Mono> },
+      { key: "name", label: "Name" }, { key: "lobs", label: "LOB" },
+      { key: "edr_status", label: "EDR", render: (x: any) => <EdrBadge s={x.edr_status} /> },
+      { key: "sev", label: "Crit / high", render: (x: any) => (x.crit || x.high) ? <span className="font-semibold text-crit-fg">{x.crit} / {x.high}</span> : <span className="text-muted">0</span> },
+      { key: "exposed", label: "Internet", render: (x: any) => x.exposed ? <Badge tone="crit">exposed</Badge> : null },
+    ]} />
+  );
+}
+
+/* ---------------- Satellite: packages, errata (remediation available) and MBSS compliance ---------------- */
+function SatellitePanel({ ips, names }: { ips: string[]; names: string[] }) {
+  const [which, setWhich] = React.useState("installable");
+  const { data } = useQuery({ queryKey: ["asset-satellite", ips, names, which],
+    queryFn: () => api<any>("/api/asset/satellite", { params: { ips: ips.join(","), names: names.join(","), errata: which } }) });
+  if (!data) return <Loading />;
+  if (!data.hosts.length) return (
+    <div className="p-6 text-center text-[13px] text-muted">{data.configured ? "This host is not registered in Red Hat Satellite." :
+      <>Red Hat Satellite is not connected. Add it under <Link className="text-accent-fg hover:underline" href="/settings/">Sync &amp; settings → Red Hat Satellite</Link> to see packages, errata and MBSS compliance.</>}</div>
+  );
+  return (
+    <div className="space-y-3 p-4">
+      {data.hosts.map((h: any) => (
+        <div key={h.host_id} className="grid gap-3 md:grid-cols-3">
+          <Stat label="Satellite host" value={h.name} sub={`${h.os || "–"} · checked in ${h.last_checkin ? fmtRel(h.last_checkin) : "–"} · ${h.subscription || ""}`} />
+          <Stat label="Packages" value={`${fmtN(h.packages ?? 0)} installed`} sub={`${fmtN(h.upgradable ?? 0)} can be upgraded`} tone={h.upgradable ? "warn" : "good"} />
+          <Stat label="Security errata" value={`${fmtN(h.errata_security ?? 0)} applicable`}
+            sub={`${fmtN(h.installable_security ?? 0)} with a fix available now · ${fmtN(h.errata_bugfix ?? 0)} bug fix · ${fmtN(h.errata_enhancement ?? 0)} enhancement`} tone={h.installable_security ? "crit" : "good"} />
+        </div>
+      ))}
+      {data.hosts.map((h: any) => (
+        <div key={"m" + h.host_id}>
+          <div className="mb-2 text-[13px] font-semibold">MBSS compliance {data.hosts.length > 1 ? `· ${h.name}` : ""}</div>
+          <MbssReport hostId={h.host_id} />
+        </div>
+      ))}
+      <div className="flex items-center gap-2 pt-2">
+        <span className="text-[13px] font-semibold">Errata</span>
+        {[["installable", "Remediation available now"], ["all", "All applicable"]].map(([k, l]) => (
+          <Button key={k} size="sm" variant={which === k ? "soft" : "ghost"} onClick={() => setWhich(k)}>{l}</Button>
+        ))}
+      </div>
+      <SimpleTable rows={data.errata} maxHeight="320px" empty="No errata" columns={[
+        { key: "errata_id", label: "Erratum", render: (x: any) => <b className="font-mono text-[12px]">{x.errata_id}</b> },
+        { key: "severity", label: "Severity", render: (x: any) => x.severity ? <Badge tone={x.severity === "Critical" ? "crit" : x.severity === "Important" ? "serious" : x.severity === "Moderate" ? "warn" : "neutral"}>{x.severity}</Badge> : <span className="text-muted">{x.type}</span> },
+        { key: "title", label: "Title", wrap: true },
+        { key: "cves", label: "CVEs", wrap: true, render: (x: any) => <span className="text-[12px]">{x.cves}</span> },
+        { key: "installable", label: "Remediation", render: (x: any) => x.installable ? <Badge tone="good">Installable now</Badge> : <span className="text-[12px] text-muted">needs content / repo</span> },
+        { key: "issued", label: "Issued", render: (x: any) => x.issued },
+      ]} />
+    </div>
+  );
+}
+
+function Stat({ label, value, sub, tone = "neutral" }: { label: string; value: React.ReactNode; sub?: React.ReactNode; tone?: string }) {
+  const bar: Record<string, string> = { good: "before:bg-good", warn: "before:bg-warn", crit: "before:bg-crit", neutral: "before:bg-border" };
+  return (
+    <div className={cn("relative overflow-hidden rounded-xl border border-border p-3 before:absolute before:inset-y-0 before:left-0 before:w-[3px]", bar[tone])}>
+      <div className="text-[11.5px] font-medium text-muted">{label}</div>
+      <div className="mt-0.5 truncate text-[15px] font-semibold" title={typeof value === "string" ? value : undefined}>{value}</div>
+      {sub && <div className="mt-0.5 text-[11.5px] text-fg-2">{sub}</div>}
+    </div>
+  );
+}
+
+/* ---------------- Inventory sources ---------------- */
+function InventorySources() {
+  const { data } = useQuery({ queryKey: ["inventory-sources"], queryFn: () => api<any>("/api/inventory-sources") });
+  if (!data) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2.5 text-[12px]">
+      <span className="font-medium text-fg-2">Inventory sources:</span>
+      {data.sources.map((x: any) => (
+        <Link key={x.key} href="/inventory-sources/" title={x.how}
+          className={cn("inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5", x.status === "connected" ? "border-good/40 text-good-fg" : "border-border text-muted")}>
+          <span className={cn("size-1.5 rounded-full", x.status === "connected" ? "bg-good" : "bg-muted")} />{x.name}
+          <span className="text-muted">{x.status === "connected" ? "· connected" : x.status === "planned" ? "· not connected yet" : "· no data"}</span>
+        </Link>
+      ))}
+    </div>
+  );
+}
+
+/* ---------------- CrowdStrike: prevention policy, containment, Spotlight vs the VA scan ---------------- */
+function CrowdStrikePanel({ agents, ips }: { agents: any[]; ips: string[] }) {
+  const aids = agents.map((a) => a.aid).join(",");
+  const { data } = useQuery({ queryKey: ["asset-cs", aids, ips], enabled: !!aids,
+    queryFn: () => api<any>("/api/asset/crowdstrike", { params: { aids, ips: ips.join(",") } }) });
+  if (!aids) return <div className="p-6 text-center text-[13px] text-muted">No CrowdStrike agent on this asset.</div>;
+  if (!data) return <Loading />;
+  const x = data.cross;
+  return (
+    <div className="space-y-3 p-4">
+      <div className="grid gap-3 md:grid-cols-3">
+        {data.posture.map((p: any) => (
+          <Stat key={p.aid} label={`Prevention policy · ${p.hostname}`} value={p.policy || "Unknown"} tone={p.applied === false ? "crit" : p.policy ? "good" : "neutral"}
+            sub={<>{p.applied === false ? <b className="text-crit-fg">not applied yet</b> : p.applied ? `applied ${p.applied_date ? fmtRel(p.applied_date) : ""}` : "no policy data"}
+              </>} />
+        ))}
+        <Stat label="Spotlight vs VA scan (by CVE)" value={`${fmtN(x.both)} in both`}
+          sub={<>{fmtN(x.spotlight_only)} only Spotlight sees · {fmtN(x.scanner_only)} only the scanner sees</>} tone={x.spotlight_only || x.scanner_only ? "warn" : "good"} />
+      </div>
+      <SimpleTable rows={data.spotlight} maxHeight="360px" empty={data.fetched_at ? "No open Spotlight vulnerabilities" : "Spotlight not fetched yet (needs the Vulnerabilities: Read scope)"} columns={[
+        { key: "cve", label: "CVE", render: (v: any) => <b className="font-mono text-[12px]">{v.cve}</b> },
+        { key: "severity", label: "Severity", render: (v: any) => <SeverityBadge s={v.severity.charAt(0) + v.severity.slice(1).toLowerCase()} /> },
+        { key: "score", label: "CVSS", num: true },
+        { key: "exprt", label: "ExPRT", render: (v: any) => <Badge tone={v.exprt === "HIGH" || v.exprt === "CRITICAL" ? "crit" : "neutral"}>{v.exprt || "–"}</Badge> },
+        { key: "exploit_status", label: "Exploit" },
+        { key: "product", label: "Product", wrap: true },
+        { key: "remediation", label: "Remediation", wrap: true, render: (v: any) => <span className="text-[12px]">{v.remediation}</span> },
+        { key: "in_scanner", label: "In VA scan", render: (v: any) => v.in_scanner ? <Badge tone="good">yes</Badge> : <Badge tone="warn">Spotlight only</Badge> },
+      ]} />
+      {x.scanner_only_cves.length > 0 && <div className="text-[12px] text-muted">Only the VA scan reports: {x.scanner_only_cves.join(", ")}</div>}
+    </div>
+  );
+}
+
+/* ---------------- SIEM: is this host logging to Splunk? ---------------- */
+function SplunkPanel({ names, ips }: { names: string[]; ips: string[] }) {
+  const { data } = useQuery({ queryKey: ["asset-splunk", names, ips], queryFn: () => api<any>("/api/asset/splunk", { params: { hosts: names.join(","), ips: ips.join(",") } }) });
+  if (!data) return <Loading />;
+  if (!data.configured) return <div className="p-6 text-center text-[13px] text-muted">Splunk is not connected. Set it up under <Link className="text-accent-fg hover:underline" href="/connectors/">Integrations → Splunk</Link>.</div>;
+  if (data.error) return <div className="p-4 text-[13px] text-crit-fg">{data.error}</div>;
+  return (
+    <div className="space-y-2 p-4">
+      <div className="flex items-center gap-2 text-[13px]">
+        {data.rows.length ? <Badge tone="good">Logging</Badge> : <Badge tone="crit">No logs</Badge>}
+        <span className="text-fg-2">{data.rows.length ? `${data.rows.length} index / sourcetype${data.rows.length > 1 ? "s" : ""} in the last ${data.days} days` : `Splunk has no event from this host in the last ${data.days} days — a blind spot during an incident.`}</span>
+        {data.simulated && <span className="ml-auto text-[11.5px] text-muted">sample data: simulated</span>}
+      </div>
+      {data.rows.length > 0 && <SimpleTable rows={data.rows} columns={[
+        { key: "index", label: "Index", render: (x: any) => <b>{x.index}</b> }, { key: "sourcetype", label: "Sourcetype" }, { key: "host", label: "Host value" },
+        { key: "count", label: "Events", num: true, render: (x: any) => fmtN(x.count) },
+        { key: "last_seen", label: "Last event", render: (x: any) => <When ts={x.last_seen} /> },
+      ]} />}
+    </div>
+  );
+}
+
+/* ---------------- Headline: risk score, identity, one status tile per area, section menu ---------------- */
+function usePosture(s: any, r: any) {
+  const aids = r.agents.map((a: any) => a.aid).join(",");
+  return useQuery({ queryKey: ["asset-posture", s.ips, s.hostnames, aids],
+    queryFn: () => api<any>("/api/asset/posture", { params: { ips: s.ips.join(","), names: s.hostnames.join(","), aids } }) });
+}
+
+const LEVEL_COLOR: Record<string, string> = { Critical: "var(--crit)", High: "var(--serious)", Medium: "var(--warn)", Low: "var(--good)" };
+
+function ScoreRing({ score, level }: { score: number; level: string }) {
+  const r = 30, c = 2 * Math.PI * r, pct = Math.min(100, score) / 100;
+  return (
+    <div className="relative grid size-[76px] shrink-0 place-items-center">
+      <svg viewBox="0 0 76 76" className="absolute inset-0 -rotate-90">
+        <circle cx="38" cy="38" r={r} fill="none" stroke="var(--surface-3)" strokeWidth="7" />
+        <circle cx="38" cy="38" r={r} fill="none" stroke={LEVEL_COLOR[level]} strokeWidth="7" strokeLinecap="round"
+          strokeDasharray={`${c * pct} ${c}`} style={{ transition: "stroke-dasharray .6s ease" }} />
+      </svg>
+      <div className="text-center leading-none"><div className="text-[22px] font-bold">{score}</div><div className="mt-0.5 text-[9.5px] uppercase tracking-wide text-muted">points</div></div>
+    </div>
+  );
+}
+
+function Chip({ children, onClick, title }: { children: React.ReactNode; onClick?: () => void; title?: string }) {
+  return (
+    <button type="button" title={title} onClick={onClick}
+      className="inline-flex items-center gap-1 rounded-md border border-border bg-surface-2 px-2 py-0.5 font-mono text-[12px] text-fg-2 hover:border-border-strong">
+      {children}
+    </button>
+  );
+}
+
+function Hero({ s, r }: { s: any; r: any }) {
+  const { data: p } = usePosture(s, r);
+  const copy = (t: string) => { navigator.clipboard?.writeText(t); toast.success(`Copied ${t}`); };
+  const level = p?.level || "Low";
+  return (
+    <Card className="relative overflow-hidden">
+      <span className="absolute inset-y-0 left-0 w-1" style={{ background: p?.score != null ? LEVEL_COLOR[level] : "var(--border)" }} />
+      <div className="flex flex-wrap items-start gap-5 p-5 pl-6">
+        <div className="min-w-[280px] flex-1 space-y-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-[22px] font-semibold tracking-tight">{s.hostnames[0] || s.query}</h2>
+            {s.exposure?.length > 0 && <Link href={`/exposure/?q=${encodeURIComponent(s.ips[0] || "")}`}><Badge tone="crit" title={s.exposure.map((e: any) => "• " + e.text).join("\n")}>Internet exposed</Badge></Link>}
+            <EdrBadge s={s.edr_status} />
+            {s.ne_ids?.length > 0 && <Badge tone="violet" title="From the NIAM dump">NE ID {s.ne_ids.join(", ")}</Badge>}
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {s.ips.map((ip: string) => <Chip key={ip} onClick={() => copy(ip)} title="Copy"><Copy className="size-3 opacity-60" />{ip}</Chip>)}
+            {s.hostnames.slice(1).map((h: string) => <Chip key={h} onClick={() => copy(h)} title="Also known as · copy">{h}</Chip>)}
+          </div>
+          <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-[12.5px] 2xl:grid-cols-[auto_1fr_auto_1fr]">
+            <dt className="text-muted">Owner</dt><dd>{s.lobs.length ? s.lobs.join(", ") : <span className="text-violet-fg">Not in inventory</span>}{s.msps.length ? <span className="text-muted"> · MSP {s.msps.join(", ")}</span> : null}</dd>
+            <dt className="text-muted">OS</dt><dd><OsCell os={s.os} src={s.os_source} /></dd>
+            <dt className="text-muted">EDR feasibility</dt><dd>{s.feasibility ? <span className="inline-flex items-center gap-1.5"><FeasibleBadge v={s.feasibility} reason={s.feasibility_reason} /><span className="text-[11.5px] text-muted">{s.feasibility_reason}</span></span> : "–"}</dd>
+            <dt className="text-muted">Inventory says</dt><dd>{s.in_inventory ? `EDR ${s.inventory_claim.join("/") || "–"}` : "–"}</dd>
+          </dl>
+        </div>
+        <div className="flex min-w-[300px] max-w-[460px] flex-1 items-start gap-4 rounded-xl border border-border bg-surface-2/60 p-3">
+          {p?.score != null ? <ScoreRing score={p.score} level={level} /> : <div className="grid size-[76px] place-items-center text-[11px] text-muted">{p ? "no score" : "…"}</div>}
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 text-[12px] text-muted">Asset risk
+              {p?.level && <Badge tone={level === "Critical" ? "crit" : level === "High" ? "serious" : level === "Medium" ? "warn" : "good"}>{level}</Badge>}
+              <Link className="ml-auto text-[11.5px] text-accent-fg hover:underline print:hidden" href="/top-risks/">Top risks →</Link></div>
+            {p?.action && <div className="mt-1 text-[13.5px] font-semibold leading-snug">{p.action}</div>}
+          </div>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+type TileT = { key: string; icon: React.ElementType; label: string; value: React.ReactNode; sub?: React.ReactNode; tone: string; go: () => void };
+const TILE_TONE: Record<string, string> = {
+  good: "text-good-fg bg-good-soft", warn: "text-warn-fg bg-warn-soft", crit: "text-crit-fg bg-crit-soft", info: "text-accent-fg bg-accent-soft", neutral: "text-fg-2 bg-surface-3",
+};
+
+function PostureTiles({ s, r, go }: { s: any; r: any; go: (v: string) => void }) {
+  const { data: p } = usePosture(s, r);
+  const spl = useQuery({ queryKey: ["asset-splunk", s.hostnames, s.ips], queryFn: () => api<any>("/api/asset/splunk", { params: { hosts: s.hostnames.join(","), ips: s.ips.join(",") } }) });
+  const v = s.vulns, a = s.edr_agent, i = r.internet, sat = p?.sat, det = p?.det, ndr = p?.ndr, b = p?.blast;
+  const mbssTot = sat ? (sat.compliance_passed || 0) + (sat.compliance_failed || 0) : 0;
+  const mbss = mbssTot ? Math.round((100 * (sat.compliance_passed || 0)) / mbssTot) : null;
+  const tiles: TileT[] = [
+    { key: "edr", icon: s.edr_status === "Online" ? ShieldCheck : ShieldX, label: "EDR", value: s.edr_status === "Not Installed" ? "Not installed" : s.edr_status,
+      sub: a ? `sensor ${a.agent_version || "–"} · seen ${fmtRel(a.last_seen)}` : "no agent ever", tone: s.edr_status === "Online" ? "good" : s.edr_status === "Offline" ? "warn" : "crit", go: () => go("edr") },
+    { key: "internet", icon: Globe2, label: "Internet", value: i?.verdict === "exposed" ? "Exposed" : i?.verdict === "cgnat" ? "Indirect" : i?.verdict === "whitelisted" ? "Whitelisted" : "Not exposed",
+      sub: i?.verdict === "exposed" ? `${i.matrix.length} rule(s)${i.shadow ? ` · ${i.shadow} shadow port(s)` : ""}` : i?.public_ips?.length ? `public ${i.public_ips[0]}` : "no public IP",
+      tone: i?.verdict === "exposed" ? "crit" : i?.verdict === "cgnat" ? "warn" : "good", go: () => go("exposure") },
+    { key: "vulns", icon: ShieldAlert, label: "Vulnerabilities", value: <span className="flex items-baseline gap-1.5">{v.Critical}<span className="text-[11px] font-normal">crit</span>{v.High}<span className="text-[11px] font-normal">high</span></span>,
+      sub: s.last_scan ? `scanned ${fmtRel(s.last_scan)}` : "never scanned", tone: v.Critical ? "crit" : v.High ? "warn" : s.last_scan ? "good" : "neutral", go: () => go("vulns") },
+    { key: "det", icon: Activity, label: "Detections · 7 days", value: det ? `${fmtN(det.n + (ndr?.n || 0))}` : "…",
+      sub: det ? `${det.n} CrowdStrike · ${ndr?.n || 0} NDR${det.high ? ` · ${det.high} crit/high` : ""}` : "", tone: det?.high || ndr?.high ? "crit" : det?.n || ndr?.n ? "warn" : "good", go: () => go("detections") },
+    { key: "patch", icon: PackageCheck, label: "Patches", value: !p ? "…" : sat ? (sat.installable_security ? `${sat.installable_security} to install` : "Up to date") : "Not in Satellite",
+      sub: sat ? `${sat.errata_security || 0} security errata · ${sat.upgradable || 0} upgradable` : "Linux via Red Hat Satellite", tone: !sat ? "neutral" : sat.installable_security ? "crit" : "good", go: () => go("patching") },
+    { key: "mbss", icon: ClipboardCheck, label: "MBSS", value: mbss == null ? "No report" : `${mbss}%`, sub: mbss == null ? "OpenSCAP via Satellite" : `${sat.compliance_failed} failed rule(s)`,
+      tone: mbss == null ? "neutral" : mbss >= 90 ? "good" : mbss >= 75 ? "warn" : "crit", go: () => go("patching") },
+    { key: "siem", icon: Logs, label: "SIEM logging", value: !spl.data ? "…" : !spl.data.configured ? "Not connected" : spl.data.rows?.length ? "Logging" : "No logs",
+      sub: spl.data?.rows?.[0] ? `last event ${fmtRel(spl.data.rows[0].last_seen)}` : spl.data?.configured ? `nothing in ${spl.data.days || 7} days` : "Splunk",
+      tone: !spl.data?.configured ? "neutral" : spl.data.rows?.length ? "good" : "crit", go: () => go("edr") },
+    { key: "blast", icon: Route, label: "Blast radius", value: !p ? "…" : b ? `${b.reach} reachable` : "–",
+      sub: b ? `${b.weak} weak · reachable from ${b.reached_by} exposed` : "no matrix data", tone: b?.weak ? "crit" : b?.reach ? "warn" : "good", go: () => go("attack") },
+  ];
+  return (
+    <div className="grid grid-cols-2 gap-2.5 md:grid-cols-4 2xl:grid-cols-8">
+      {tiles.map((t) => (
+        <button key={t.key} onClick={t.go}
+          className="group flex flex-col gap-1.5 rounded-xl border border-border bg-surface p-3 text-left shadow-card transition-all hover:-translate-y-px hover:border-accent">
+          <div className="flex items-center gap-2">
+            <span className={cn("grid size-7 place-items-center rounded-lg", TILE_TONE[t.tone])}><t.icon className="size-3.5" /></span>
+            <span className="text-[11.5px] font-medium text-muted">{t.label}</span>
+          </div>
+          <div className={cn("text-[15px] font-semibold leading-tight", t.tone === "crit" && "text-crit-fg")}>{t.value}</div>
+          <div className="line-clamp-2 text-[11px] text-muted">{t.sub}</div>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/* ---------------- Attack path / blast radius for this asset ---------------- */
+function AttackCard({ s, r }: { s: any; r: any }) {
+  const { data: p } = usePosture(s, r);
+  const b = p?.blast;
+  return (
+    <Card>
+      <CardHeader title={<span className="inline-flex items-center gap-2"><Route className="size-4" /> Attack path &amp; blast radius
+        {b && <span className="text-[12px] font-normal text-muted">reaches {b.reach} asset(s), {b.weak} weak · reachable from {b.reached_by} internet-exposed asset(s)</span>}</span>}
+        right={b && <Link className="flex items-center gap-1 text-[12.5px] text-accent-fg hover:underline print:hidden" href={`/attack-paths/?ip=${encodeURIComponent(b.ip)}&all=1`}>Open in Attack paths <ArrowUpRight className="size-3.5" /></Link>} />
+      {!p ? <Loading /> : !b ? <div className="px-4 pb-4 text-[13px] text-muted">No internal IP for this asset in the registry, so no path can be traced.</div>
+        : <PathView ip={b.ip} depth="2" compact />}
+    </Card>
   );
 }

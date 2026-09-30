@@ -43,23 +43,34 @@ export default function Feasibility() {
   const s = data.summary;
   const d = data.dims;
 
+  // optimistic: the button flips at once; the server re-decides in the background and the counts follow
   const mark = async (dim: Dim, key: string, feasible: "Yes" | "No" | null, label: string) => {
-    setBusy(true);
+    const prev = qc.getQueryData(["feasibility"]);
+    qc.setQueryData(["feasibility"], (old: any) => old && ({ ...old, dims: { ...old.dims,
+      [dim]: old.dims[dim].map((r: any) => (r.key === key ? { ...r, mark: feasible } : r)) } }));
     try {
       const r = await api<any>("/api/feasibility/mark", { method: "PUT", body: { dim, key, feasible } });
       const dl = r.delta;
       const parts = [dl.feasible && `${dl.feasible > 0 ? "+" : ""}${fmtN(dl.feasible)} feasible`, dl.not_feasible && `${dl.not_feasible > 0 ? "+" : ""}${fmtN(dl.not_feasible)} not feasible`,
         dl.to_be_decided && `${dl.to_be_decided > 0 ? "+" : ""}${fmtN(dl.to_be_decided)} to be decided`].filter(Boolean);
       toast.success(`${label}: ${feasible ? (feasible === "Yes" ? "marked feasible" : "marked not feasible") : "automatic"}${parts.length ? " · " + parts.join(" · ") : ""}`);
-      qc.invalidateQueries();
-    } catch (e: any) { toast.error(e.message); } finally { setBusy(false); }
+      refreshAfterChange();
+    } catch (e: any) { qc.setQueryData(["feasibility"], prev); toast.error(e.message); }
+  };
+  // this page's data first; everything else (Overview, All inventory...) is marked stale and reloads when opened
+  const refreshAfterChange = () => {
+    qc.invalidateQueries({ predicate: (q) => String(q.queryKey[0]).includes("feasib") || String(q.queryKey[0]).includes("feas-") });
+    qc.invalidateQueries({ predicate: (q) => !String(q.queryKey[0]).includes("feasib"), refetchType: "none" });
   };
   const decide = async (feasible: "Yes" | "No" | "To be decided" | null, body: any) => {
+    const keys = new Set((body.items || []).map((i: any) => `${i.lob_id}|${i.item_key}`));
+    if (keys.size) qc.setQueriesData({ queryKey: ["/api/feasibility/nodes"] }, (old: any) => old?.rows ? ({ ...old,
+      rows: old.rows.map((r: any) => keys.has(`${r.lob_id}|${r.item_key}`) ? { ...r, feasible: feasible || r.feasible, feasible_reason: feasible ? "Set manually" : r.feasible_reason } : r) }) : old);
     try {
       const r = await api<any>("/api/feasibility/override", { method: "POST", body: { feasible, ...body } });
       toast.success(`${fmtN(r.updated)} node${r.updated === 1 ? "" : "s"} ${feasible ? `set to ${({ Yes: "feasible", No: "not feasible", "To be decided": "to be decided" } as any)[feasible]}` : "back to automatic"}`);
-      qc.invalidateQueries();
-    } catch (e: any) { toast.error(e.message); }
+      refreshAfterChange();
+    } catch (e: any) { toast.error(e.message); refreshAfterChange(); }
   };
   const upload = async (f: File) => {
     const fd = new FormData();
@@ -68,7 +79,7 @@ export default function Feasibility() {
     try {
       const r = await apiUpload<any>("/api/feasibility/sheet", fd, () => {});
       toast.success(`Sheet applied · ${fmtN(r.pairs_stored)} Node Type + OS decisions (of ${fmtN(r.pairs)} rows), ${fmtN(r.lob_no)} LOB and ${fmtN(r.domain_no)} domain marked not feasible`);
-      qc.invalidateQueries();
+      refreshAfterChange();
     } catch (e: any) { toast.error(e.message); } finally { setBusy(false); if (fileRef.current) fileRef.current.value = ""; }
   };
   const showNodes = (patch: Record<string, string>) => { replaceAll(patch); setTimeout(() => tableRef.current?.scrollIntoView({ behavior: "smooth" }), 50); };
@@ -283,7 +294,7 @@ function DimTable({ dim, rows, busy, onMark, onShow, hint }: {
                         {opts.map(([l, val]) => {
                           const active = current === val;
                           return (
-                            <button key={l} disabled={busy || active} onClick={() => onMark(dim, r.key, pick(val), r.value)}
+                            <button key={l} disabled={active} onClick={() => onMark(dim, r.key, pick(val), r.value)}
                               title={r.mark && active ? "Your decision" : active ? "What the console decides from the evidence" : undefined}
                               className={cn("h-6 whitespace-nowrap rounded-md px-2 text-[11.5px] font-medium transition-colors",
                                 active ? (val === "No" ? "bg-crit-soft text-crit-fg" : "bg-good-soft text-good-fg") : "text-fg-2 hover:text-fg")}>{l}</button>

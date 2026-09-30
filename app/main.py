@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import asset360, commatrix, config, db, falcon, feasibility, sensor_support, filetemplates, sod, inventory, legacy, niam, posture, queries, registry, sync, vulns
+from . import asset360, commatrix, config, cs_posture, db, detections, satellite, seceon, splunk, falcon, feasibility, sensor_support, filetemplates, sod, inventory, legacy, niam, posture, queries, registry, sync, threats, vulns
 from .exporter import xlsx_response
 from .extra import router as extra_router
 
@@ -40,6 +40,9 @@ async def lifespan(app):
 
 
 app = FastAPI(title="EDR Asset Dashboard", lifespan=lifespan)
+# compress JSON and the UI bundle (the larger JS chunks shrink ~4x); small responses are sent as they are
+from starlette.middleware.gzip import GZipMiddleware  # noqa: E402
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 
 
 @app.middleware("http")
@@ -270,6 +273,7 @@ def hosts_export(request: Request):
         rows = db.rows(c, f"SELECT {queries.HOST_LIST_COLS} FROM {frm} {where} {order}", params)
     for r in rows:
         r["niam_text"] = "Yes" if r["niam_ne_ids"] else "No"
+        r["exposed_text"] = "Yes" if r.get("internet_exposed") else "No"
     return xlsx_response([("Hosts", queries.HOST_EXPORT_COLUMNS, rows)], p.get("name") or "edr_hosts")
 
 
@@ -693,7 +697,7 @@ def tags_remove(lob_id: int, data: dict = Body(...)):
 INV_BASE_COLS = [("lob", "LOB"), ("msp", "MSP"), ("ip", "IP"), ("node_name", "Node Name"), ("node_type", "Node Type"), ("domain", "Domain"),
                  ("live", "Live/Non Live"), ("os", "OS"), ("edr_feasible", "EDR Feasible"),
                  ("edr_installed", "EDR Installed (Inventory)"), ("remarks", "Remarks")]
-INV_STATUS_COLS = [("coverage_status", "EDR Status"), ("os_resolved", "OS (resolved)"), ("os_source", "OS Source"),
+INV_STATUS_COLS = [("coverage_status", "EDR Status"), ("exposed_text", "Internet Exposed"), ("exposure_text", "Exposure Evidence"), ("os_resolved", "OS (resolved)"), ("os_source", "OS Source"),
                    ("feasible", "EDR Feasible (decided)"), ("feasible_reason", "Feasibility Reason"), ("niam_text", "In NIAM"), ("niam_ne_ids", "NIAM NE ID"), ("last_scan", "Last Vulnerability Scan"), ("change_tag", "Change Tag"), ("first_version_no", "First Seen in Version"),
                    ("last_changed_version_no", "Last Changed in Version"), ("edr_actual", "EDR Actual Status"),
                    ("verification", "Verification"), ("match_method", "Match Method"), ("cs_hostname", "Falcon Hostname"),
@@ -720,7 +724,9 @@ def _inventory_query(p, lob_id):
         frm = "inventory_current ic JOIN lobs l ON l.id=ic.lob_id"
         cols = """l.name lob, ic.*,
             (SELECT GROUP_CONCAT(n.ne_id, ', ') FROM niam_nodes n WHERE n.present=1 AND n.ip=ic.ip AND COALESCE(ic.ip,'')<>'') niam_ne_ids,
-            (SELECT MAX(s.scanned_at) FROM vuln_scan_hosts s WHERE s.lob_id=ic.lob_id AND s.ip=ic.ip) last_scan"""  # msp name is on the row
+            (SELECT MAX(s.scanned_at) FROM vuln_scan_hosts s WHERE s.lob_id=ic.lob_id AND s.ip=ic.ip) last_scan,
+            (SELECT r.exposed FROM asset_registry r WHERE r.ip=ic.ip AND COALESCE(ic.ip,'')<>'') internet_exposed,
+            (SELECT r.exposure FROM asset_registry r WHERE r.ip=ic.ip AND COALESCE(ic.ip,'')<>'' AND r.exposed=1) exposure_why"""  # msp name is on the row
         if lob_id:
             w.append("ic.lob_id=?")
             params.append(lob_id)
@@ -744,6 +750,8 @@ def _inventory_query(p, lob_id):
                      + ("" if version_id else " OR ic.cs_hostname LIKE ?") + ")")
             params += [q + "%", like, like, like] + ([] if version_id else [like])
     filt = ["node_type", "domain", "live", "os", "edr_feasible", "edr_installed"]
+    if not version_id and p.get("exposed") in ("0", "1"):
+        w.append(("" if p["exposed"] == "1" else "NOT ") + "EXISTS (SELECT 1 FROM asset_registry r WHERE r.ip=ic.ip AND r.exposed=1)")
     if not version_id:
         filt += ["verification", "edr_actual", "change_tag", "match_method", "coverage_status", "edr_state", "feasible", "os_source"]
         if p.get("os_resolved"):
@@ -877,6 +885,7 @@ def lob_inventory(lob_id: int, request: Request):
         rows = db.rows(c, f"SELECT {cols} FROM {frm} {where} {order} LIMIT ? OFFSET ?", params + [size, (page - 1) * size])
     for r in rows:
         r["extra"] = db.jloads(r.get("extra"), {})
+        r["exposure_why"] = [e.get("text") for e in db.jloads(r.get("exposure_why"), []) or []]
     return {"total": total, "rows": rows, "page": page, "size": size}
 
 
@@ -895,8 +904,112 @@ def lob_inventory_export(lob_id: int, request: Request):
                 extra_keys.append(k)
             r["x::" + k] = ex[k]
         r["niam_text"] = "Yes" if r.get("niam_ne_ids") else "No"
+        r["exposed_text"] = "Yes" if r.get("internet_exposed") else "No"
+        r["exposure_text"] = "; ".join(e.get("text", "") for e in db.jloads(r.get("exposure_why"), []) or [])
     columns = INV_BASE_COLS + ([] if p.get("version_id") else INV_STATUS_COLS) + [("x::" + k, k) for k in extra_keys]
     return xlsx_response([("Inventory", columns, rows)], f"inventory_{name}".replace(" ", "_"))
+
+
+# ------------------------------------------------------------------ edit inventory values in place
+# The inventory's own claims can be corrected without re-uploading: in the table (one cell) or for one column in Excel
+# (download, change, upload). Edits apply to the current version and show in the item's history; the next inventory
+# upload for that LOB replaces them with whatever the new file says.
+EDITABLE = {"edr_installed": ("EDR Installed (Inventory)", ("Yes", "No", "")), "live": ("Live/Non Live", ("Live", "Non Live", "")),
+            "edr_feasible": ("EDR Feasible (Inventory)", ("Yes", "No", "")), "remarks": ("Remarks", None)}
+
+
+def _edit_value(field, value):
+    v = str(value if value is not None else "").strip()
+    if field in ("edr_installed", "edr_feasible"):
+        v = inventory.norm_yes_no(v)
+    elif field == "live":
+        v = inventory.norm_live(v)
+    allowed = EDITABLE[field][1]
+    if allowed is not None and v not in allowed:
+        raise ValueError(f"{EDITABLE[field][0]} must be one of: {', '.join(x or '(blank)' for x in allowed)}")
+    return v
+
+
+def _apply_edits(c, edits):
+    """edits: [(lob_id, item_key, field, new value)] -> number changed. Logged as 'edited' in the item history."""
+    changed, lobs = 0, set()
+    for lob_id, key, field, val in edits:
+        cur = db.one(c, f"SELECT {field} v FROM inventory_current WHERE lob_id=? AND item_key=?", (lob_id, key))
+        if not cur or (cur["v"] or "") == val:
+            continue
+        c.execute(f"UPDATE inventory_current SET {field}=? WHERE lob_id=? AND item_key=?", (val, lob_id, key))
+        ver = db.one(c, "SELECT current_version_id v FROM lobs WHERE id=?", (lob_id,))
+        c.execute("""INSERT INTO inventory_changes(lob_id, version_id, item_key, change_type, field, old_value, new_value)
+                     VALUES (?,?,?,?,?,?,?)""", (lob_id, (ver or {}).get("v") or 0, key, "edited", field, cur["v"] or "", val))
+        changed += 1
+        lobs.add(lob_id)
+    for lob_id in lobs:  # claims feed the claim check; Live / feasibility feed nothing heavier
+        inventory.refresh_matches(c, lob_id)
+    return changed
+
+
+@app.patch("/api/lobs/{lob_id}/inventory/{item_key}")
+def inventory_edit(lob_id: int, item_key: str, data: dict = Body(...)):
+    field = data.get("field")
+    if field not in EDITABLE:
+        raise HTTPException(400, "This column cannot be edited here")
+    try:
+        val = _edit_value(field, data.get("value"))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    with db.get_conn() as c:
+        n = _apply_edits(c, [(lob_id, item_key, field, val)])
+        row = db.one(c, "SELECT * FROM inventory_current WHERE lob_id=? AND item_key=?", (lob_id, item_key))
+    return {"ok": True, "changed": n, "row": row}
+
+
+@app.get("/api/lobs/{lob_id}/inventory/column-sheet")
+def inventory_column_sheet(lob_id: int, request: Request):
+    """One editable column (plus what identifies the row and what CrowdStrike says), for the rows the table shows."""
+    p = _params(request)
+    field = p.pop("field", "edr_installed")
+    if field not in EDITABLE:
+        raise HTTPException(400, "This column cannot be edited here")
+    with db.get_conn() as c:
+        cols, frm, where, params, order = _inventory_query(p, lob_id)
+        rows = db.rows(c, f"SELECT {cols} FROM {frm} {where} {order}", params)
+    label = EDITABLE[field][0]
+    out = [{"lob": r["lob"], "key": f"{r['lob_id']}|{r['item_key']}", "ip": r["ip"], "node_name": r["node_name"], "msp": r["msp"],
+            "node_type": r["node_type"], "falcon": r.get("coverage_status"), "check": r.get("verification"), "value": r.get(field) or ""}
+           for r in rows]
+    columns = [("lob", "LOB"), ("ip", "IP"), ("node_name", "Node Name"), ("msp", "MSP"), ("node_type", "Node Type"),
+               ("falcon", "EDR Status (CrowdStrike)"), ("check", "Inventory Claim Check"), ("value", label), ("key", "Row Key (do not edit)")]
+    allowed = EDITABLE[field][1]
+    guide = [{"t": f"Change only the '{label}' column" + (f" ({' / '.join(x for x in allowed if x)} or blank)" if allowed else "") +
+              ", keep 'Row Key' as it is, then upload the file on the same page (Upload edited column)."},
+             {"t": "Only rows whose value changed are updated. The next inventory upload for a LOB replaces these edits."}]
+    return xlsx_response([(label[:31], columns, out), ("How to use", [("t", "")], guide)], f"edit_{field}")
+
+
+@app.post("/api/lobs/{lob_id}/inventory/column-sheet")
+async def inventory_column_upload(lob_id: int, file: UploadFile = File(...)):
+    book = inventory.read_xlsx(await file.read(), all_sheets=True)
+    rows = next(iter(book.values()), [])
+    if not rows:
+        raise HTTPException(400, "The file is empty")
+    head = [str(h or "").strip() for h in rows[0]]
+    field = next((f for f, (lbl, _) in EDITABLE.items() if lbl in head), None)
+    if not field or "Row Key (do not edit)" not in head:
+        raise HTTPException(400, "Use a sheet downloaded with 'Edit a column in Excel' (it needs the Row Key column)")
+    ki, vi = head.index("Row Key (do not edit)"), head.index(EDITABLE[field][0])
+    edits, bad = [], []
+    for r in rows[1:]:
+        key = str(r[ki] or "")
+        if "|" not in key:
+            continue
+        lid, item = key.split("|", 1)
+        try:
+            edits.append((int(lid), item, field, _edit_value(field, inventory._cell(r[vi]))))
+        except ValueError:
+            bad.append(f"{item}: {r[vi]}")
+    with db.get_conn() as c:
+        n = _apply_edits(c, edits)
+    return {"ok": True, "field": field, "rows": len(edits), "changed": n, "invalid": bad[:20], "invalid_count": len(bad)}
 
 
 @app.get("/api/lobs/{lob_id}/versions")
@@ -1148,7 +1261,77 @@ app.include_router(filetemplates.router)
 app.include_router(sod.router)
 app.include_router(commatrix.router)
 app.include_router(feasibility.router)
+
+
+# ------------------------------------------------------------------ inventory sources
+@app.get("/api/inventory-sources")
+def inventory_sources():
+    """Where inventory comes from: manual uploads today; ServiceNow CMDB and Jaspersoft reports are planned connectors."""
+    with db.get_conn() as c:
+        m = db.one(c, """SELECT COUNT(DISTINCT lob_id) lobs, COUNT(*) versions, MAX(uploaded_at) last_upload FROM inventory_versions""")
+        nodes = c.execute("SELECT COUNT(*) FROM inventory_current").fetchone()[0]
+        s = db.get_settings(c)
+    return {"sources": [
+        {"key": "manual", "name": "Manual upload", "status": "connected" if m["versions"] else "empty",
+         "detail": f"{nodes:,} nodes · {m['lobs'] or 0} LOBs · {m['versions'] or 0} uploaded versions", "last": m["last_upload"],
+         "how": "Excel / CSV per LOB, per MSP or per inventory type (Upload center or the LOB page)."},
+        {"key": "servicenow", "name": "ServiceNow CMDB", "status": "planned", "configured": bool(s.get("servicenow_url")),
+         "url": s.get("servicenow_url") or "", "table": s.get("servicenow_table") or "cmdb_ci_server",
+         "how": "Read-only Table API pull of CI records (IP, name, class, OS, support group, install status) into LOB inventories."},
+        {"key": "jaspersoft", "name": "Jaspersoft reports", "status": "planned",
+         "how": "Scheduled report export (CSV) from JasperReports Server, loaded like a manual upload."},
+    ]}
+
+
+# ------------------------------------------------------------------ possible matches (review only, counted nowhere)
+MC_COLS = """m.lob_id, l.name lob, m.item_key, m.ip, m.node_name, m.aid, m.cs_hostname, m.reason, m.found_at,
+    h.local_ip cs_local_ip, h.connection_ip cs_connection_ip, h.console_state, h.online_state, h.last_seen, h.os_version"""
+
+
+def _mc_query(p):
+    w, params = [], []
+    if p.get("lob"):
+        w.append("m.lob_id=?")
+        params.append(int(p["lob"]))
+    q = (p.get("q") or "").strip()
+    if q:
+        like = f"%{q}%"
+        w.append("(m.ip LIKE ? OR m.node_name LIKE ? OR m.cs_hostname LIKE ?)")
+        params += [like, like, like]
+    return ("WHERE " + " AND ".join(w)) if w else "", params
+
+
+@app.get("/api/match-candidates")
+def match_candidates(request: Request):
+    p = _params(request)
+    page, size = _page(p)
+    where, params = _mc_query(p)
+    frm = "match_candidates m JOIN lobs l ON l.id=m.lob_id LEFT JOIN hosts h ON h.aid=m.aid"
+    with db.get_conn() as c:
+        total = c.execute(f"SELECT COUNT(*) FROM {frm} {where}", params).fetchone()[0]
+        rows = db.rows(c, f"SELECT {MC_COLS} FROM {frm} {where} ORDER BY l.name, m.node_name LIMIT ? OFFSET ?",
+                       params + [size, (page - 1) * size])
+    return {"total": total, "rows": rows}
+
+
+@app.get("/api/match-candidates/export")
+def match_candidates_export(request: Request):
+    p = _params(request)
+    where, params = _mc_query(p)
+    with db.get_conn() as c:
+        rows = db.rows(c, f"""SELECT {MC_COLS} FROM match_candidates m JOIN lobs l ON l.id=m.lob_id
+                             LEFT JOIN hosts h ON h.aid=m.aid {where} ORDER BY l.name, m.node_name""", params)
+    cols = [("lob", "LOB"), ("ip", "Inventory IP"), ("node_name", "Inventory Name"), ("cs_hostname", "CrowdStrike Hostname"),
+            ("aid", "Agent ID"), ("cs_connection_ip", "Connection IP"), ("cs_local_ip", "Local IP"), ("online_state", "Online State"),
+            ("last_seen", "Last Seen"), ("reason", "Why it may match")]
+    return xlsx_response([("Possible matches", cols, rows)], "possible_matches")
 app.include_router(sensor_support.router)
+app.include_router(detections.router)
+app.include_router(satellite.router)
+app.include_router(cs_posture.router)
+app.include_router(splunk.router)
+app.include_router(seceon.router)
+app.include_router(threats.router)
 
 FRONTEND = config.BASE_DIR / "frontend" / "out"
 
@@ -1161,6 +1344,9 @@ class NextStaticFiles(StaticFiles):
         try:
             resp = await super().get_response(path, scope)
             if resp.status_code != 404:
+                if path.replace("\\", "/").startswith("_next/static/"):
+                    # content-hashed file names: a new build gets new names, so the browser can keep these for good
+                    resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
                 return resp
         except StarletteHTTPException as e:
             if e.status_code != 404:

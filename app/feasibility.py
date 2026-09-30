@@ -4,7 +4,8 @@ Result per inventory node: Yes (feasible) | No (not feasible) | To be decided.
   1. a manual decision on one node (EDR feasibility page, node table) wins
   2. a whole LOB or domain marked not feasible -> No
   3. the feasibility sheet: a Yes / No you set for a Node Type + OS pair (download, edit, upload)
-  4. a CrowdStrike agent installed on the node (online or offline) -> Yes
+  4. a CrowdStrike agent installed on the node (online or offline) -> Yes; and the same Node Type on the same OS with an
+     agent on at least one node (any LOB) -> Yes for every node of that pair
   5. OS: marked on the page (Yes / No); otherwise feasible when any CrowdStrike sensor release ever ran on it - an OS only
      old sensors support is still feasible, the page shows the last sensor version that supported it. Not feasible only
      when no sensor supports it at all (network OS, AIX, Solaris...) and no agent anywhere runs on it.
@@ -83,7 +84,7 @@ class Evidence:
     """Where CrowdStrike is actually installed: node types (inventory) and OS groups (inventory + every agent)."""
 
     def __init__(self):
-        self.nt, self.os = {}, {}
+        self.nt, self.os, self.pair = {}, {}, {}
 
     def add_node(self, node_type, os_key, installed):
         if installed:
@@ -91,6 +92,8 @@ class Evidence:
                 self.nt[_k(node_type)] = self.nt.get(_k(node_type), 0) + 1
             if os_key:
                 self.os[os_key] = self.os.get(os_key, 0) + 1
+            if _k(node_type) and os_key:  # the same node type on the same OS already runs an agent
+                self.pair[(_k(node_type), os_key)] = self.pair.get((_k(node_type), os_key), 0) + 1
 
     def add_agent_os(self, os_key):
         if os_key:
@@ -136,6 +139,9 @@ class Decider:
     def pair(self, node_type, os_):
         """Verdict for a Node Type + OS pair, ignoring the node-level steps (used by the sheet)."""
         os_key, label, e = os_group(self.classify, os_)
+        n = self.ev.pair.get((_k(node_type), os_key)) if os_key else None
+        if n and not self.m["os"].get(os_key) == "No" and not self.m["node_type"].get(_k(node_type)) == "No":
+            return "Yes", f"{node_type} on {label}: EDR installed on {n} node{'s' if n > 1 else ''}"
         o, why_o = self.os_verdict(os_key, label, e)
         if o == "No":
             return "No", why_o
@@ -291,8 +297,8 @@ def feasibility_mark(data: dict = Body(...)):
         else:
             m[dim].pop(key, None)
         save_marks(c, m)
-        from .inventory import refresh_matches
-        refresh_matches(c)
+        from .inventory import refresh_feasibility
+        refresh_feasibility(c)
         after = _summary(c)
     return {"ok": True, "summary": after, "delta": {k: after[k] - before[k] for k in ("feasible", "not_feasible", "to_be_decided")}}
 
@@ -403,9 +409,9 @@ def _yn(v):
 @router.post("/api/feasibility/sheet")
 async def feasibility_sheet_upload(file: UploadFile = File(...)):
     """Apply a filled-in sheet. Only the rows in the file change: other LOBs, types and node types keep their decisions."""
-    from openpyxl import load_workbook
+    from .inventory import read_xlsx
     try:
-        wb = load_workbook(io.BytesIO(await file.read()), read_only=True, data_only=True)
+        book = read_xlsx(await file.read(), all_sheets=True)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(400, f"Not an Excel file: {e}")
     stats = {"pairs": 0, "pairs_stored": 0, "pairs_auto": 0, "lob_no": 0, "domain_no": 0, "skipped": 0}
@@ -421,8 +427,8 @@ async def feasibility_sheet_upload(file: UploadFile = File(...)):
         lob_ids = {_k(r["name"]): r["id"] for r in db.rows(c, "SELECT id, name FROM lobs")}
         m = get_marks(c)
         found, now = False, db.now_iso()
-        for ws in wb.worksheets:
-            it = ws.iter_rows(values_only=True)
+        for rows_ in book.values():
+            it = iter(rows_)
             head = [_k(h) for h in (next(it, None) or [])]
             col = lambda *names: next((i for i, h in enumerate(head) if any(h.startswith(n) for n in names)), None)  # noqa: E731
             fcol = col("feasible")
@@ -476,8 +482,8 @@ async def feasibility_sheet_upload(file: UploadFile = File(...)):
         if not found:
             raise HTTPException(400, "No sheet with a 'Feasible' column and Node Type + OS, LOB or Domain columns")
         save_marks(c, m)
-        from .inventory import refresh_matches
-        refresh_matches(c)
+        from .inventory import refresh_feasibility
+        refresh_feasibility(c)
         stats["summary"] = _summary(c)
     return stats
 
@@ -486,8 +492,8 @@ async def feasibility_sheet_upload(file: UploadFile = File(...)):
 def feasibility_sheet_clear():
     with db.get_conn() as c:
         c.execute("DELETE FROM feasibility_pairs")
-        from .inventory import refresh_matches
-        refresh_matches(c)
+        from .inventory import refresh_feasibility
+        refresh_feasibility(c)
     return {"ok": True}
 
 
@@ -509,8 +515,8 @@ def feasibility_override(data: dict = Body(...)):
                           [(int(i["lob_id"]), i["item_key"], val, (data.get("note") or "").strip() or None, db.now_iso()) for i in items])
         else:
             c.executemany("DELETE FROM feasibility_overrides WHERE lob_id=? AND item_key=?", [(int(i["lob_id"]), i["item_key"]) for i in items])
-        from .inventory import refresh_matches
-        refresh_matches(c)
+        from .inventory import refresh_feasibility
+        refresh_feasibility(c)
         return {"ok": True, "updated": len(items), "summary": _summary(c)}
 
 

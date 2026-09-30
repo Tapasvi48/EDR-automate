@@ -65,11 +65,13 @@ HOST_LIST_COLS = """h.aid, h.hostname, h.local_ip, h.connection_ip, h.external_i
     hm.inv_lobs, hm.inv_msps, hm.tag_only, COALESCE(NULLIF(inv.inv_node_type, ''), h.product_type_desc) node_type,
     inv.inv_node_name, inv.inv_node_type, inv.inv_domain, inv.inv_live, inv.inv_os,
     inv.inv_edr_feasible, inv.inv_edr_installed, inv.inv_remarks, inv.inv_verification,
-    (SELECT GROUP_CONCAT(n.ne_id, ', ') FROM niam_nodes n WHERE n.present=1 AND n.ip=h.local_ip AND h.local_ip<>'') niam_ne_ids"""
+    (SELECT GROUP_CONCAT(n.ne_id, ', ') FROM niam_nodes n WHERE n.present=1 AND n.ip=h.local_ip AND h.local_ip<>'') niam_ne_ids,
+    MAX(COALESCE((SELECT MAX(r.exposed) FROM asset_registry r WHERE r.aid=h.aid), 0),
+        COALESCE((SELECT r.exposed FROM asset_registry r WHERE r.ip=h.local_ip AND h.local_ip<>''), 0)) internet_exposed"""
 
 HOST_EXPORT_COLUMNS = [
     ("hostname", "Hostname"), ("aid", "Agent ID"), ("connection_ip", "Connection IP"), ("local_ip", "Local IP"), ("external_ip", "External IP"),
-    ("niam_text", "In NIAM"), ("niam_ne_ids", "NIAM NE ID"),
+    ("niam_text", "In NIAM"), ("niam_ne_ids", "NIAM NE ID"), ("exposed_text", "Internet Exposed"),
     ("mac_address", "MAC"), ("console_state", "Console State"), ("online_state", "Online State"),
     ("first_seen", "First Seen (UTC)"), ("last_seen", "Last Seen (UTC)"), ("platform_name", "Platform"),
     ("os_version", "OS"), ("os_build", "OS Build"), ("product_type_desc", "Type"), ("chassis_type_desc", "Chassis"),
@@ -106,6 +108,9 @@ def build_host_query(p: dict, settings):
            f"LEFT JOIN ({rsql}) rc ON rc.cip = h.connection_ip AND rc.lip = h.local_ip AND h.console_state='active' {INV_JOIN}")
     params = list(dparams) + list(rparams)
     w = []
+    if p.get("exposed") in ("0", "1"):  # internet exposed per the asset registry (matrix, NAT / public IP, scans, inventory)
+        w.append(("" if p["exposed"] == "1" else "NOT ") + """(EXISTS (SELECT 1 FROM asset_registry r WHERE r.aid=h.aid AND r.exposed=1)
+                  OR EXISTS (SELECT 1 FROM asset_registry r WHERE r.ip=h.local_ip AND h.local_ip<>'' AND r.exposed=1))""")
     state = p.get("state") or "active"
     if state == "gone":
         w.append("h.console_state='removed' AND h.gone_primary=1")  # EDR history: one row per device

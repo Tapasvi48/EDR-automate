@@ -149,6 +149,152 @@ Assets in no inventory:
 - If CrowdStrike has them, they are feasible and count in the applicable total on All inventory.
 - Anything found only by a VA scan or the NIAM dump is **Unidentified**. It counts in the total but not in the applicable count.
 
+## Internet exposure
+
+An asset is internet-exposed when an inventory facing / zone / public-IP column, a VA scan of a public IP, or an inbound
+Internet / ISP rule in the communication matrix says so, or its own IP is public and comes from an inventory, the NIAM dump or a scan.
+A public IP that CrowdStrike reports on an agent's own interface is **not** evidence on its own. Not counted as exposed:
+IPs / subnets on the **whitelist** (Internet exposed → Whitelist), and **CGNAT** addresses (100.64.0.0/10), which have their own tab.
+
+### Communication matrix workbooks
+
+One workbook may hold several sheets of different kinds. The upload lists every sheet. For each sheet you pick its **type**, header row and which columns map to the template fields. Every row keeps its workbook and sheet name.
+
+| Type | Typical columns | Internet-facing when |
+|---|---|---|
+| Firewall rules | Name · Source Zone · Source Address · Destination Zone · Destination Address · Service/Port · Application owner | source is Internet / ISP / untrust / outside / any, or a public IP |
+| Public IP pool | S.No · Public IP pool · Use · Application · Application owner | always (our public IPs) |
+| Public ↔ private (NAT) | S.No · Public IP · Private IP · Application · Owner · Which firewall exposes it | a public IP is listed |
+| SOD / NAT rules | SODdetails · dest_nat_ip · destination_ip · fwl · location · nat_ip · port · protocol · rule · source_ip | a public IP is listed |
+| Exposure register | Public IP · Internal IP · Port · Service details · Destination IP · LOB · Domain · MS Partner · Service owner · Firewall | a public IP is listed |
+
+The type is guessed from the headers and can be changed. A new upload replaces the earlier rows of the same workbook, or the whole matrix if chosen.
+
+**Address cells** (`app/addrparse.py`):
+- single IPs, and lists separated by `,` `;` `|` `/`, spaces or new lines
+- ranges: `10.1.1.10-10.1.1.20` or `10.1.1.10-20`
+- subnets: `10.1.0.0/24`
+- last-octet shorthand: `10.1.55.194/195/200/201`
+- object prefixes and suffixes: `h-10.1.1.5`, `n-10.1.0.0/24`, `10.1.1.5_nat`, `10.1.1.5_vm`
+- IPv6: `2101:3900:3d5a::/48`
+- host / object names, matched to inventory and CrowdStrike hostnames
+- `any`
+
+After an IPv4 address, `/N` is a prefix length when N ≤ 24, or N ≤ 32 on a network boundary. Otherwise it is last-octet shorthand.
+
+**Port cells:** `443`, `80,443`, `8000-8100`, `tcp/443`, `443/tcp`, `tcp_8443`, `udp-53`, `dns_tcp`, `https`, `any`. Service names map to their well-known ports.
+
+**Matching:** an internet-facing row exposes every asset whose IP is:
+- its private / internal IP, or inside its subnet or range
+- its public / NAT IP
+- or whose host name it names
+
+These assets get **Internet exposed = Yes** in LOB / all inventory and in CrowdStrike assets, with a filter and the evidence as a tooltip.
+
+**Matrix IP register** (`/matrix-ips/`) lists every address in the matrix.
+
+An address is **ours** when it is any of:
+- a private / CGNAT / ULA address
+- a public IP listed as a public / NAT / pool IP, or as the destination of an inbound rule
+- a public IP found in inventory / scan / NIAM
+- a name matching a known host
+
+Each address has one or more roles:
+- reached from internet
+- public / NAT IP
+- source NAT IP
+- goes out to internet (source of a rule to any / internet zone / a public IP not ours)
+- internet source
+- internal
+
+Views: ours & exposed, ours & talking to internet, our public IPs, exposed but not in inventory, unmatched names, external. Excel export.
+
+### MBSS reports
+
+Each Satellite host's latest OpenSCAP report is stored with **every** rule result (compliant / not compliant / not applicable), not only failures.
+- **MBSS page:** compliance by control (fleet), failed rules, and by asset. Clicking an asset opens its report.
+- **Report contents:** compliance ring, compliance per control, and a rule list filtered by result. Failed rules expand to their fix. Downloadable as Excel (summary, by control, all rules).
+- Asset 360 → Patches & MBSS shows the same report.
+
+### Asset 360 layout
+
+A compact header shows the asset, its risk score and the next action. Below it, tabs split the big features:
+- Overview (status tiles, why this score, last seen by each source)
+- Exposure
+- Attack path
+- Detections
+- Vulnerabilities (+ SOD exceptions)
+- Patches & MBSS
+- EDR & logging
+- Records (inventory, scans, NIAM, related assets)
+
+The open tab is kept in the URL (`&view=`).
+
+## Asset 360 and integrations
+
+Asset 360 answers, for one IP / hostname / agent ID:
+- EDR status and prevention policy;
+- internet exposure: communication-matrix rules via which firewall / ISP, public IPs caught by the VA scan, and what
+  CrowdStrike reports, plus a real-exposure check (ports open on a public IP that no inbound rule allows = shadow exposure);
+- recent detections from CrowdStrike, Splunk (ES notables) and Seceon NDR, together or per source, with a date filter;
+- SOD exceptions covering its findings and when they run out; "last known good" per source; related assets (same subnet,
+  name family, public / NAT IP, matrix peers);
+- vulnerabilities, each with the Satellite erratum that fixes it;
+- open ports;
+- Spotlight vs the VA scan, by CVE;
+- Satellite packages, errata and MBSS failed rules;
+- Splunk logging;
+- inventory with its source.
+
+*Evidence pack* downloads all of it as one workbook; *PDF* prints the page.
+
+**Integrations** (System → Integrations) lists every source and what it needs:
+
+| Integration | Needs | Feeds |
+|---|---|---|
+| CrowdStrike Falcon | Hosts: Read (required); Alerts: Read, Vulnerabilities: Read, Prevention policies: Read, Sensor update policies: Read (optional) | agents, detections, Spotlight, policies, sensor builds |
+| Red Hat Satellite 6 | URL, read-only user + password / token with Viewer on hosts, content and compliance | packages, errata (installable = fix available), OpenSCAP MBSS |
+| Splunk | management port (8089) reachable, token for a role with `search` on the host-log indexes and `index=notable` | log-source presence per host (live `tstats`), Enterprise Security notables as detections |
+| ServiceNow CMDB | planned: instance URL, `cmdb_read` user, CI class | inventory records |
+| Jaspersoft | planned: server URL, read-only user, report path (CSV) | inventory records |
+| Seceon NDR | webhook: Seceon POSTs alerts to `/api/seceon/webhook` with the `X-Webhook-Token` generated on the page; or an alert export upload (template "Seceon NDR alerts") | network detections per IP |
+
+**Patch & MBSS** (left menu): Satellite hosts with fixes waiting, errata across the fleet, and MBSS compliance by rule
+(which assets fail each point, with the fix) and by asset (each asset's failed points by control).
+
+**Internet exposed** has four tabs:
+- *Directly exposed*.
+- *Indirectly exposed*: CGNAT 100.64.0.0/10, plus the telecom ranges you add under *Indirect ranges*. Every asset inside them is listed.
+- *Shadow exposure*.
+- *Whitelisted*.
+
+## Leadership & SOC
+
+- **Top riskiest assets** (`/top-risks/`): one additive score per asset, with every point explained. The factors are:
+  - internet exposure (+25) or indirect exposure (+8), and shadow ports
+  - no EDR (+25) or EDR offline (+10)
+  - critical, high and exploitable vulnerabilities
+  - CrowdStrike detections and Seceon NDR alerts in the date range
+  - failed MBSS rules and uninstalled security errata (Satellite)
+  - weak internal assets it can reach through the communication matrix
+  - Non Live nodes count half
+
+  Each asset gets a next action. Filters: date range, LOB, top 10/25/50/100, exposed only. Excel export.
+- **Attack paths** (`/attack-paths/`): each internet-exposed asset is an entry point. The communication matrix's active Allow rules (explicit source match) show what it can reach in 1 or 2 hops. A target is weak if it has a critical vulnerability or no EDR. Destinations wider than 4,096 addresses are listed as a note, not drawn. Three tabs:
+  - **Paths**: an entry list plus a graph (Internet → entry → hop 1 → hop 2). Hover a node to trace its paths with ports; click it for details. The single "most dangerous path" is shown as numbered steps.
+  - **Choke points**: internal assets that paths from many entry points pass through, with the weak assets behind them.
+  - **Rules to tighten**: matrix rules ranked by the weak assets they open.
+- **Asset 360 header**: the same explained risk score and next action as Top riskiest assets, then eight status tiles. Each tile jumps to its section or tab:
+  - EDR, Internet, Vulnerabilities, Detections (7 days)
+  - Patches, MBSS, SIEM logging, Blast radius
+
+  A sticky section menu follows. An "Attack path & blast radius" card shows what the asset can reach and which exposed assets can reach it (`/api/asset/posture`, `/api/attack-paths/detail`).
+- **Analyst workload** (`/analysts/`): alerts per analyst in a date range (and severity), with drill-down to the alerts:
+  - CrowdStrike: from the Alerts API `assigned_to_name`; time to close is the median of `updated_timestamp - created_timestamp` on closed alerts.
+  - Splunk ES notables: by `owner`, from the `` `notable` `` macro; average time to close uses `review_time`.
+
+  Names are merged case-insensitively. Excel export.
+
 ## NIAM dump and integrations
 
 **Integrations → Upload NIAM dump** (or the Upload center) takes a sheet with **Host** (IP) and **NE ID**; other columns
@@ -171,9 +317,19 @@ Cells with several IPs use the first one. Searches accept exact IPs, IPv4 prefix
 - **Versioning**: every upload creates an immutable snapshot. Rows are matched to the previous version by the key field (IP, Node Name,
   or IP + Node Name). New rows are tagged `NEW`. Missing rows are logged as removed. Changed fields are logged with old → new values. You can
   preview the diff before committing, compare any two versions, view any old snapshot, or restore an old version (the restore becomes a new version).
-- **EDR verification**: each current row is matched to Falcon in this order: IP + hostname › hostname › IP › NIC history. If only the IP
-  matches and the machine name differs, the row is *not* counted as installed. The inventory's "EDR Installed" value is treated as a claim and
-  compared with reality:
+- **EDR verification**: each current row is matched to a Falcon agent in this order:
+  1. the node IP is the agent's **connection IP**: match, the IP alone is enough;
+  2. the node IP is another **NIC IP** of the agent (local IP / IP history): match only if the **hostname** is the same too
+     (case-insensitive; the domain part is ignored, so `HOST.corp.local` = `host`);
+  3. the same hostname with no IP in common: match;
+  4. a NIC IP plus a hostname that is only close (`abc` ↔ `abc1`, and no other `abc<n>` exists in CrowdStrike or the inventories;
+     `MNRA` vs `MNRA1` / `MNRA2` / `MNRA3` is rejected): **not** a match. It is listed on **CrowdStrike → Possible matches** for review
+     and counted nowhere.
+  A NIC IP on a differently named agent is shown as "IP Used by Other Host" and never counted as installed.
+- **Editing values**: "EDR installed (inventory)", "Live / Non Live", "EDR feasible (inventory)" and Remarks can be changed in the
+  table, or for many rows at once with *Edit a column in Excel* (download one column for the filtered rows, change it, upload it back).
+  Edits are logged in the item history; the next inventory upload for the LOB replaces them.
+- The inventory's "EDR Installed" value is treated as a claim and compared with reality:
   `Verified`, `Installed - Inactive`, `Claimed - Not Found`, `Claimed - Removed from Console`, `Installed - Marked No`,
   `Installed - Marked Not Feasible`, `Pending Install`, `Not Feasible`.
 - The inventory fields (LOB, node type, live, feasible, installed, remarks) also appear as columns in the host views.

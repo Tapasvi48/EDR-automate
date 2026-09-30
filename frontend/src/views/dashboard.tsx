@@ -230,14 +230,13 @@ function ExposureSection() {
   ];
   const know = e.know || {};
   const knowRows: [string, number, string, string][] = [
-    ["CrowdStrike", know.by_crowdstrike, "crowdstrike", "the agent reports a public IP on the host"],
     ["LOB inventory", know.by_inventory, "inventory", "facing / zone column, or a public / NAT IP column"],
     ["VA scan", know.by_scan, "scan", "a scan covered a public IP (includes public-IP-only assets)"],
     ["Communication matrix", know.by_matrix, "matrix", "an inbound Internet / ISP rule reaches the host"],
   ];
   return (
     <Card className="mt-4">
-      <CardHeader title="Internet exposed" hint="assets reachable from the internet (inventory, CrowdStrike, communication matrix or a VA scan of a public IP)"
+      <CardHeader title="Internet exposed" hint="assets reachable from the internet (inventory, communication matrix or a VA scan of a public IP) · whitelisted and CGNAT addresses excluded"
         right={<Link className="text-xs text-accent-fg hover:underline" href="/exposure/">Open internet exposed</Link>} />
       <div className="grid gap-4 px-4 pb-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">

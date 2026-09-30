@@ -45,6 +45,7 @@ export default function SettingsPage() {
           </div>
         </Card>
       </div>
+      <SatelliteCard />
       <History runs={st.runs} />
       <Detection />
       <Danger />
@@ -256,6 +257,58 @@ function Danger() {
         <div className="text-[12.5px] text-muted">Use after switching to a different Falcon tenant. LOB inventories are not affected.</div>
       </div>
       <Button variant="danger" onClick={clear}><Trash2 /> Clear Falcon data</Button>
+    </Card>
+  );
+}
+
+/** Red Hat Satellite: packages, errata (remediation available) and OpenSCAP MBSS compliance per Linux host. */
+export function SatelliteCard() {
+  const qc = useQueryClient();
+  const { data: cfg } = useQuery({ queryKey: ["satellite-config"], queryFn: () => api<any>("/api/satellite/config"),
+    refetchInterval: (q) => ((q.state.data as any)?.status?.running ? 1500 : false) });
+  const [f, setF] = React.useState<{ url: string; user: string; token: string; verify_ssl: boolean } | null>(null);
+  const [test, setTest] = React.useState<any>(null);
+  React.useEffect(() => { if (cfg && !f) setF({ url: cfg.url, user: cfg.user, token: "", verify_ssl: cfg.verify_ssl }); }, [cfg, f]);
+  if (!cfg || !f) return null;
+  const save = async () => {
+    try { await api("/api/satellite/config", { method: "PUT", body: f }); toast.success("Satellite settings saved"); setF({ ...f, token: "" }); qc.invalidateQueries({ queryKey: ["satellite-config"] }); }
+    catch (e: any) { toast.error(e.message); }
+  };
+  const doTest = async () => { setTest({ running: true }); setTest(await api<any>("/api/satellite/test", { method: "POST" })); };
+  const sync = async () => {
+    try { await api("/api/satellite/sync", { method: "POST" }); qc.invalidateQueries({ queryKey: ["satellite-config"] }); }
+    catch (e: any) { toast.error(e.message); }
+  };
+  const st = cfg.status || {};
+  return (
+    <Card className="mt-4">
+      <CardHeader title={<span className="flex items-center gap-2"><PlugZap className="size-4" /> Red Hat Satellite</span>}
+        hint={cfg.hosts ? `${cfg.hosts.toLocaleString()} hosts · packages, errata and MBSS compliance · last sync ${fmtDt(cfg.fetched_at)}` : "packages, errata (remediation available) and OpenSCAP MBSS compliance per Linux host, shown on Asset 360"}
+        right={<Button size="sm" variant="primary" disabled={cfg.demo || st.running || !cfg.url} onClick={sync}>
+          <RefreshCw className={st.running ? "animate-spin" : ""} /> {st.running ? `Syncing ${st.done}/${st.total}` : "Sync now"}</Button>} />
+      <div className="grid gap-3 px-4 pb-4 md:grid-cols-2 xl:grid-cols-4">
+        <Field label="Satellite URL"><Input value={f.url} onChange={(e) => setF({ ...f, url: e.target.value })} placeholder="https://satellite.example.com" /></Field>
+        <Field label="User"><Input value={f.user} onChange={(e) => setF({ ...f, user: e.target.value })} placeholder="read-only API user" autoComplete="off" /></Field>
+        <Field label="Password / personal access token" hint={cfg.token_set ? "saved - leave blank to keep it" : undefined}>
+          <Input type="password" value={f.token} onChange={(e) => setF({ ...f, token: e.target.value })} autoComplete="new-password" placeholder={cfg.token_set ? "••••••••" : ""} /></Field>
+        <div className="flex flex-col justify-end gap-2">
+          <Checkbox checked={f.verify_ssl} onChange={(v) => setF({ ...f, verify_ssl: v })} label="Verify the TLS certificate" />
+          <div className="flex gap-2">
+            <Button size="sm" onClick={save}><Save /> Save</Button>
+            <Button size="sm" variant="ghost" disabled={!cfg.url} onClick={doTest}>Test</Button>
+          </div>
+        </div>
+      </div>
+      {(test || st.error || st.message || cfg.demo) && (
+        <div className="border-t border-border px-4 py-2.5 text-[12.5px]">
+          {cfg.demo && <span className="text-muted">Sample data mode: Satellite data is simulated. </span>}
+          {test && !test.running && <span className={test.ok ? "text-good-fg" : "text-crit-fg"}>{test.detail} </span>}
+          {st.error ? <span className="text-crit-fg">Last sync failed: {st.error}</span> : st.message && !st.running ? <span className="text-fg-2">Last sync: {st.message}</span> : null}
+        </div>
+      )}
+      <div className="border-t border-border px-4 py-2.5 text-[11.5px] text-muted">
+        Read-only. The user needs Viewer permissions on hosts, content (Katello errata / packages) and compliance (OpenSCAP). Matching to assets is by IP and hostname.
+      </div>
     </Card>
   );
 }

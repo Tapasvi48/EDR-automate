@@ -6,7 +6,7 @@ import json
 import re
 import uuid
 from collections import OrderedDict
-from datetime import datetime, timedelta, timezone
+from datetime import date as date_type, datetime, timedelta, timezone
 
 from . import config, db
 
@@ -44,7 +44,34 @@ def _cell(v):
         v = int(v)
     if isinstance(v, datetime):
         return v.strftime("%Y-%m-%d %H:%M")
+    if isinstance(v, date_type):
+        return v.strftime("%Y-%m-%d")
     return str(v).strip()
+
+
+def read_xlsx(src, sheet=None, all_sheets=False):
+    """(sheet names, sheet title, rows as lists) - or {title: rows} for every sheet with all_sheets.
+    python-calamine (Rust) reads large Nessus / inventory exports ~10x faster than openpyxl; openpyxl is the fallback."""
+    try:
+        from python_calamine import CalamineWorkbook
+        wb = CalamineWorkbook.from_filelike(io.BytesIO(src)) if isinstance(src, (bytes, bytearray)) else CalamineWorkbook.from_path(str(src))
+        names = wb.sheet_names
+        if all_sheets:
+            return {n: wb.get_sheet_by_name(n).to_python(skip_empty_area=False) for n in names}
+        title = sheet if sheet in names else names[0]
+        return names, title, wb.get_sheet_by_name(title).to_python(skip_empty_area=False)
+    except ImportError:
+        pass
+    from openpyxl import load_workbook
+    wb = load_workbook(io.BytesIO(src) if isinstance(src, (bytes, bytearray)) else src, read_only=True, data_only=True)
+    try:
+        if all_sheets:
+            return {ws.title: [list(r) for r in ws.iter_rows(values_only=True)] for ws in wb.worksheets}
+        names = wb.sheetnames
+        ws = wb[sheet] if sheet in names else wb[names[0]]
+        return names, ws.title, [list(r) for r in ws.iter_rows(values_only=True)]
+    finally:
+        wb.close()
 
 
 def norm_yes_no(v):
@@ -102,13 +129,8 @@ def parse_upload(token, sheet=None, header_row=None):
     filename = path.name.split("__", 1)[1]
     ext = path.suffix.lower()
     if ext in (".xlsx", ".xlsm"):
-        from openpyxl import load_workbook
-        wb = load_workbook(path, read_only=True, data_only=True)
-        sheets = wb.sheetnames
-        ws = wb[sheet] if sheet in sheets else wb[sheets[0]]
-        sheet = ws.title
-        raw = [[_cell(v) for v in r] for r in ws.iter_rows(values_only=True)]
-        wb.close()
+        sheets, sheet, rows = read_xlsx(path, sheet)
+        raw = [[_cell(v) for v in r] for r in rows]
     elif ext in (".csv", ".txt"):
         text = path.read_bytes().decode("utf-8-sig", errors="replace")
         try:
@@ -446,7 +468,7 @@ PRESENT = ("Online", "Offline", "Inactive")
 INSTALLED_STATES = ("Online", "Offline")
 # edr_actual (detailed) -> edr_state (what the dashboards count)
 # bumped when matching / state rules change so stored results are recomputed on startup
-MATCH_REV = "14"
+MATCH_REV = "16"
 # EDR has two states: Online, or Offline - offline in the console, or an agent that has left the console (removed by the
 # inactivity policy, deleted, hidden, or known only from an old EDR inventory upload). Only a node with no agent at all is
 # "Not Installed". edr_actual keeps the detail.
@@ -502,22 +524,46 @@ def rebuild_host_map(c):
                  SELECT aid, lob_id, msp_id, 'tag' FROM agent_tags""")
 
 
+_NUM_SUFFIX = re.compile(r"^[-_]?\d{1,4}$")
+
+
+def near_hostname(inv_name, cs_name, cs_names, inv_names):
+    """Reason text when two hostnames are close enough to review, else None. Close = one is the other plus a short
+    number (abc / abc1, abc / abc-01), and that numbered name is the only one of its family in CrowdStrike and in the
+    inventories (abc1 with abc2 / abc3 around is ambiguous, e.g. MNRA vs MNRA1 / MNRA2 / MNRA3)."""
+    if not inv_name or not cs_name or inv_name == cs_name:
+        return None
+    short, long_ = sorted((inv_name, cs_name), key=len)
+    if not long_.startswith(short) or not _NUM_SUFFIX.match(long_[len(short):]):
+        return None
+    family = {n for n in (cs_names | inv_names) if n.startswith(short) and n != short and _NUM_SUFFIX.match(n[len(short):])}
+    if len(family) != 1:
+        return None
+    return f"hostname {inv_name} ~ {cs_name} (only {long_} with that stem) and the IP is on a NIC of that agent"
+
+
 def refresh_matches(c, lob_id=None):
     settings = db.get_settings(c)
     stale_cut = (datetime.now(timezone.utc) - timedelta(days=float(settings.get("inventory_stale_days") or 7))).strftime("%Y-%m-%dT%H:%M:%SZ")
     sync_msps(c, lob_id)
     hosts = {}
-    by_ip, by_hn, by_hist = {}, {}, {}
-    for r in c.execute("""SELECT aid, hostname, hostname_norm, local_ip, console_state, online_state, last_seen,
+    by_conn, by_nic, by_hn = {}, {}, {}
+    for r in c.execute("""SELECT aid, hostname, hostname_norm, local_ip, connection_ip, console_state, online_state, last_seen,
                           agent_version, os_version FROM hosts WHERE console_state<>'hidden'"""):
         hosts[r["aid"]] = r
+        if r["connection_ip"]:
+            by_conn.setdefault(r["connection_ip"], set()).add(r["aid"])
         if r["local_ip"]:
-            by_ip.setdefault(r["local_ip"], []).append(r["aid"])
+            by_nic.setdefault(r["local_ip"], set()).add(r["aid"])
         if r["hostname_norm"]:
-            by_hn.setdefault(r["hostname_norm"], []).append(r["aid"])
+            by_hn.setdefault(r["hostname_norm"], set()).add(r["aid"])
     for r in c.execute("""SELECT DISTINCT ih.ip, ih.aid FROM ip_history ih JOIN hosts h ON h.aid=ih.aid
                           WHERE ih.kind='local' AND h.console_state<>'hidden'"""):
-        by_hist.setdefault(r["ip"], set()).add(r["aid"])
+        by_nic.setdefault(r["ip"], set()).add(r["aid"])
+    # for the near-miss hostname check: every CrowdStrike and inventory name, to reject abc -> abc1 when abc2 also exists
+    cs_names = {h["hostname_norm"] for h in hosts.values() if h["hostname_norm"]}
+    inv_names = {db.norm_hostname(r["node_name"]) for r in c.execute("SELECT node_name FROM inventory_current") if r["node_name"]}
+    candidates = []
 
     def rank(aid):
         h = hosts[aid]
@@ -539,20 +585,32 @@ def refresh_matches(c, lob_id=None):
         pending.append((it, state, os_, os_src))
         return len(pending) - 1
 
+    # Matching an inventory node to a CrowdStrike agent:
+    #   1. the node IP is the agent's connection IP -> match (an IP alone is enough here)
+    #   2. the node IP is another NIC IP of the agent (local IP / IP history) -> match only if the hostname is the same
+    #      (case-insensitive, domain dropped: HOST.corp.local = host)
+    #   3. same hostname, no IP in common -> match
+    #   4. another NIC IP and a hostname that is only close (abc1 <-> abc, the only abc<n> in CrowdStrike and in the
+    #      inventories) -> not a match: listed under Possible matches for review, counted nowhere
     for it in items:
         ip, hn = (it["ip"] or "").strip(), db.norm_hostname(it["node_name"])
-        cip = set(by_ip.get(ip, [])) if ip else set()
-        chn = set(by_hn.get(hn, [])) if hn else set()
-        both = cip & chn
+        conn = by_conn.get(ip, set()) if ip else set()
+        nic = (by_nic.get(ip, set()) - conn) if ip else set()
+        same_name = by_hn.get(hn, set()) if hn else set()
         method, pool = None, set()
-        if both:
-            method, pool = "ip+hostname", both
-        elif chn:
-            method, pool = "hostname", chn
-        elif cip:
-            method, pool = ("ip (hostname differs)" if hn else "ip"), cip
-        elif ip and ip in by_hist:
-            method, pool = "ip_history", set(by_hist[ip])
+        if conn:
+            named = conn & same_name
+            method, pool = ("connection ip + hostname", named) if named else ("connection ip", conn)
+        elif nic & same_name:
+            method, pool = "nic ip + hostname", nic & same_name
+        elif same_name:
+            method, pool = "hostname", same_name
+        elif nic and hn:
+            for aid in sorted(nic, key=lambda a: rank(a)):
+                why = near_hostname(hn, hosts[aid]["hostname_norm"], cs_names, inv_names)
+                if why:
+                    candidates.append((it["lob_id"], it["item_key"], ip, it["node_name"], aid, hosts[aid]["hostname"], why, db.now_iso()))
+                    break
         if pool:
             best = sorted(pool, key=rank)[0]
             h = hosts[best]
@@ -567,21 +625,25 @@ def refresh_matches(c, lob_id=None):
                 actual = "Inactive"
             else:
                 actual = "Offline"
-            weak = method == "ip (hostname differs)" or (method == "ip_history" and hn and h["hostname_norm"] != hn)
-            if weak:
-                # the IP belongs to a differently named machine: don't count it as installed
-                actual = "IP Used by Other Host"
             state = EDR_STATE[actual]
             updates.append((best, method, active_cnt, h["hostname"], h["console_state"], h["online_state"], h["last_seen"],
                             h["agent_version"], h["os_version"], actual,
-                            _verify(it["edr_feasible"], it["edr_installed"], "Not Found" if weak else actual),
-                            state, decided(it, state, None if weak else h["os_version"]),
+                            _verify(it["edr_feasible"], it["edr_installed"], actual),
+                            state, decided(it, state, h["os_version"]),
                             it["lob_id"], it["item_key"]))
         else:
-            updates.append((None, None, 0, None, None, None, None, None, None, "Not Found",
+            # the IP sits on a differently named agent's NIC: shown for information, never counted as installed
+            actual = "IP Used by Other Host" if nic else "Not Found"
+            updates.append((None, None, 0, None, None, None, None, None, None, actual,
                             _verify(it["edr_feasible"], it["edr_installed"], "Not Found"),
                             "Not Installed", decided(it, "Not Installed", None),
                             it["lob_id"], it["item_key"]))
+    if lob_id:
+        c.execute("DELETE FROM match_candidates WHERE lob_id=?", (lob_id,))
+    else:
+        c.execute("DELETE FROM match_candidates")
+    c.executemany("""INSERT INTO match_candidates(lob_id, item_key, ip, node_name, aid, cs_hostname, reason, found_at)
+                     VALUES (?,?,?,?,?,?,?,?)""", candidates)
     from .sensor_support import classifier
     cls = classifier(c)
     ev_items = [(it["node_type"], os_, state in INSTALLED_STATES) for it, state, os_, _ in pending]
@@ -616,6 +678,26 @@ def refresh_matches(c, lob_id=None):
     posture.refresh(c)
     from . import registry  # every IP from every source, joined (All inventory, Internet exposed, coverage gaps)
     registry.refresh(c)
+
+
+def refresh_feasibility(c):
+    """Re-decide EDR feasibility only (marks, the feasibility sheet, per-node decisions and OS catalog edits change nothing
+    else): matching, scans, NIAM and risk stay as they are, so this takes a fraction of refresh_matches()."""
+    from . import feasibility, registry
+    from .sensor_support import classifier
+    rows = db.rows(c, """SELECT lob_id, item_key, node_type, domain, os_resolved, edr_state, edr_feasible FROM inventory_current""")
+    decide = feasibility.decider(c, feasibility.build_evidence(
+        c, classifier(c), [(r["node_type"], r["os_resolved"], r["edr_state"] in INSTALLED_STATES) for r in rows]))
+    upd = []
+    for r in rows:
+        installed = r["edr_state"] in INSTALLED_STATES
+        f, why, os_status = decide(r["lob_id"], r["item_key"], installed=installed, os_=r["os_resolved"], node_type=r["node_type"],
+                                   domain=r["domain"], inv_feasible=r["edr_feasible"])
+        upd.append((1 if feasibility.is_applicable(f, installed) else 0, coverage_status(f, r["edr_state"]), f, why, os_status,
+                    r["lob_id"], r["item_key"]))
+    c.executemany("""UPDATE inventory_current SET applicable=?, coverage_status=?, feasible=?, feasible_reason=?, os_support=?
+                     WHERE lob_id=? AND item_key=?""", upd)
+    registry.refresh(c)  # All inventory / Overview read feasibility and applicability from here
 
 
 def tag_duplicates(c, lob_id=None):

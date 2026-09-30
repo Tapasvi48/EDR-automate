@@ -2,7 +2,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
-import { BadgeCheck, Building2, FileClock, Radio, ShieldAlert, Tags, Waypoints } from "lucide-react";
+import { BadgeCheck, Building2, FileClock, Radio, ShieldAlert, Tags, Waypoints, Activity } from "lucide-react";
 import { api } from "@/lib/api";
 import { useMeta } from "@/lib/hooks";
 import { fmtDt, fmtN } from "@/lib/format";
@@ -11,8 +11,9 @@ import { SimpleTable } from "@/components/data-table";
 import { UploadWizard } from "@/components/upload-wizard";
 import { TagWizard } from "@/components/tag-wizard";
 import { MappedUpload } from "@/components/mapped-upload";
+import { MatrixUpload } from "@/components/matrix-upload";
 
-type Kind = "inventory" | "tags" | "vulns" | "edr" | "niam" | "sod" | "comm";
+type Kind = "inventory" | "tags" | "vulns" | "edr" | "niam" | "sod" | "comm" | "ndr";
 type Open = null | { kind: Kind; lob?: { id: number; name: string } };
 
 export default function UploadCenter() {
@@ -68,6 +69,8 @@ export default function UploadCenter() {
       desc: "The approved exception register. Matching findings become Accepted and leave open counts and risk; they reopen when the exception expires." },
     { k: "comm", icon: <Waypoints className="size-5" />, title: "Communication matrix", needsLob: false,
       desc: "Firewall / NAT flows. Inbound Internet / ISP rules mark destinations internet-exposed on those ports; flows appear in Asset 360." },
+    { k: "ndr", icon: <Activity className="size-5" />, title: "Seceon NDR alerts", needsLob: false,
+      desc: "Alert export from Seceon aiXDR / OTM. Network detections per IP show under Recent detections in Asset 360 (live alerts can come through the webhook instead)." },
   ];
 
   return (
@@ -109,7 +112,8 @@ export default function UploadCenter() {
       {open?.kind === "edr" && <MappedUpload kind="edr" open onOpenChange={(o) => !o && setOpen(null)} />}
       {open?.kind === "niam" && <MappedUpload kind="niam" open onOpenChange={(o) => !o && setOpen(null)} />}
       {open?.kind === "sod" && <MappedUpload kind="sod" open onOpenChange={(o) => !o && setOpen(null)} />}
-      {open?.kind === "comm" && <MappedUpload kind="comm" open onOpenChange={(o) => !o && setOpen(null)} />}
+      {open?.kind === "comm" && <MatrixUpload open onOpenChange={(o) => !o && setOpen(null)} />}
+      {open?.kind === "ndr" && <MappedUpload kind="ndr" open onOpenChange={(o) => !o && setOpen(null)} />}
     </div>
   );
 }

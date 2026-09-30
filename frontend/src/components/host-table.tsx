@@ -21,6 +21,7 @@ export function hostColumns(): Column[] {
     { key: "node_type", label: "Node type" },
     { key: "os_version", label: "OS" },
     { key: "agent_version", label: "Sensor", render: (r) => <Mono>{r.agent_version}</Mono> },
+    { key: "exposed", label: "Internet exposed", sort: false, render: (r) => (r.internet_exposed ? <Badge tone="crit">Yes</Badge> : <span className="text-muted">No</span>) },
     { key: "niam", label: "NIAM", sort: false, render: (r) => (r.niam_ne_ids ? <Badge tone="good" title={`NE ID ${r.niam_ne_ids}`}>Yes</Badge> : <span className="text-muted">No</span>) },
     { key: "first_seen", label: "First seen", render: (r) => <span title={r.first_seen}>{fmtDt(r.first_seen)}</span> },
     { key: "last_seen", label: "Last seen", render: (r) => <When ts={r.last_seen} /> },
@@ -61,7 +62,7 @@ const FLAGS: [string, string][] = [
   ["contained", "Contained"],
 ];
 const FLAG_KEYS = FLAGS.map(([k]) => k);
-const MORE_KEYS = ["agent_version", "sensor_level", "platform", "domain", "site", "chassis", "ip_range", "niam", ...FLAG_KEYS];
+const MORE_KEYS = ["agent_version", "sensor_level", "platform", "domain", "site", "chassis", "ip_range", "niam", "exposed", ...FLAG_KEYS];
 const MAIN_KEYS = ["q", "status", "lob", "msp", "os", "node_type", "first_from", "first_to", "last_from", "last_to", "removed_from", "removed_to"];
 
 export function HostFilters({ state, set, extra, removalFilter }: { state: Record<string, string>; set: SetFn; extra?: React.ReactNode; removalFilter?: boolean }) {
@@ -99,6 +100,7 @@ export function HostFilters({ state, set, extra, removalFilter }: { state: Recor
                 <Field label="Special cases"><Select className="max-w-none" value={flag} placeholder="All hosts"
                   onChange={(v) => set({ ...Object.fromEntries(FLAG_KEYS.map((k) => [k, undefined])), ...(v ? { [v]: "1" } : {}) })} options={FLAGS} /></Field>
                 <Field label="In NIAM dump"><Select className="max-w-none" value={state.niam} onChange={(v) => set({ niam: v })} placeholder="Any" options={[["1", "Yes — IP is in NIAM"], ["0", "No"]]} /></Field>
+                <Field label="Internet exposed"><Select className="max-w-none" value={state.exposed} onChange={(v) => set({ exposed: v })} placeholder="Any" options={[["1", "Yes"], ["0", "No"]]} /></Field>
               </div>
               <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted">Sensor & host details</div>
               <div className="grid grid-cols-2 gap-3">

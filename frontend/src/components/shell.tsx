@@ -8,8 +8,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import {
   BadgeCheck, Boxes, Flame, Globe2, Waypoints, History, Radar, ShieldAlert, Upload,
   AlertTriangle, Building2, Copy, Network, FileSpreadsheet, FileText, Globe, LayoutDashboard, Menu, Monitor,
-  Moon, PackagePlus, PlugZap, RefreshCw, Search, Settings, ShieldCheck, Sun, Target, WifiOff, ShieldQuestion,
-} from "lucide-react";
+  Moon, PackagePlus, PlugZap, RefreshCw, Search, Settings, ShieldCheck, Sun, Target, WifiOff, ShieldQuestion, GitCompare, Database, PackageCheck, ClipboardCheck, Plug, Route, Siren, UsersRound, ListTree } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { fmtN, fmtRel } from "@/lib/format";
@@ -24,6 +23,11 @@ const NAV: { section?: string; items: { href: string; label: string; icon: React
     { href: "/", label: "Overview", icon: LayoutDashboard },
     { href: "/ip-search/", label: "Asset 360 search", icon: Globe },
   ] },
+  { section: "Leadership & SOC", items: [
+    { href: "/top-risks/", label: "Top riskiest assets", icon: Siren },
+    { href: "/attack-paths/", label: "Attack paths", icon: Route },
+    { href: "/analysts/", label: "Analyst workload", icon: UsersRound },
+  ] },
   { section: "CrowdStrike", items: [
     { href: "/assets/", label: "CrowdStrike assets", icon: Monitor },
     { href: "/health/", label: "Offline & stale", icon: WifiOff },
@@ -32,12 +36,15 @@ const NAV: { section?: string; items: { href: string; label: string; icon: React
     { href: "/routing/", label: "Routing conflicts", icon: Network },
     { href: "/installs/", label: "New installs", icon: PackagePlus },
     { href: "/feasibility/", label: "EDR feasibility", icon: ShieldQuestion },
+    { href: "/possible-matches/", label: "Possible matches", icon: GitCompare },
   ] },
   { section: "Inventory", items: [
     { href: "/inventory/", label: "All inventory", icon: Boxes },
     { href: "/lobs/", label: "LOB inventory", icon: Building2 },
+    { href: "/inventory-sources/", label: "Inventory sources", icon: Database },
     { href: "/exposure/", label: "Internet exposed", icon: Globe2 },
     { href: "/matrix/", label: "Communication matrix", icon: Waypoints },
+    { href: "/matrix-ips/", label: "Matrix IP register", icon: ListTree },
     { href: "/coverage/", label: "Coverage gaps", icon: Target },
     { href: "/templates/", label: "Templates", icon: FileText },
   ] },
@@ -47,7 +54,12 @@ const NAV: { section?: string; items: { href: string; label: string; icon: React
     { href: "/risk/", label: "Risk ranking", icon: Flame },
     { href: "/exceptions/", label: "Exceptions (SOD)", icon: BadgeCheck },
   ] },
+  { section: "Patch & MBSS", items: [
+    { href: "/patches/", label: "Patches & errata", icon: PackageCheck },
+    { href: "/mbss/", label: "MBSS compliance", icon: ClipboardCheck },
+  ] },
   { section: "System", items: [
+    { href: "/connectors/", label: "Integrations", icon: Plug },
     { href: "/upload/", label: "Upload center", icon: Upload },
     { href: "/reports/", label: "Reports", icon: FileSpreadsheet },
     { href: "/settings/", label: "Sync & settings", icon: Settings },
@@ -101,7 +113,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex min-h-screen">
-      <aside className={cn(
+      <aside className={cn("print:hidden",
         "fixed inset-y-0 left-0 z-40 flex w-[232px] flex-col bg-side text-[#a9b2c3] transition-transform lg:sticky lg:top-0 lg:h-screen lg:translate-x-0",
         mobileNav ? "translate-x-0" : "-translate-x-full"
       )}>
@@ -160,7 +172,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
       {mobileNav && <div className="fixed inset-0 z-30 bg-black/40 lg:hidden" onClick={() => setMobileNav(false)} />}
 
       <main className="min-w-0 flex-1">
-        <header className="sticky top-0 z-20 flex h-13 items-center gap-3 border-b border-border bg-surface/85 px-4 backdrop-blur lg:px-6">
+        <header className="sticky top-0 z-20 flex h-13 print:hidden items-center gap-3 border-b border-border bg-surface/85 px-4 backdrop-blur lg:px-6">
           <Button variant="ghost" size="icon" className="lg:hidden" onClick={() => setMobileNav(true)}><Menu /></Button>
           <button onClick={() => setPaletteOpen(true)} className="flex h-8.5 w-full max-w-md items-center gap-2 rounded-lg border border-border bg-surface-2 px-3 text-left text-[13px] text-muted hover:border-border-strong">
             <Search className="size-4 shrink-0" /> <span className="truncate">Jump to host, IP, AID or page…</span>

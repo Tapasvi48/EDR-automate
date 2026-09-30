@@ -2,6 +2,7 @@
 import ipaddress
 import json
 import re
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter
 
@@ -37,7 +38,7 @@ def agent_rank(h):
     return (st, -int(re.sub(r"\D", "", h["last_seen"] or "") or 0))
 
 
-AGENT_COLS = """h.aid, h.hostname, h.hostname_norm, h.local_ip, h.external_ip, h.mac_address, h.platform_name, h.os_version,
+AGENT_COLS = """h.aid, h.hostname, h.hostname_norm, h.local_ip, h.external_ip, h.connection_ip, h.mac_address, h.platform_name, h.os_version,
     h.agent_version, h.product_type_desc, h.console_state, h.online_state, h.removal_type, h.removed_at, h.source,
     h.first_seen, h.last_seen, h.is_reinstall, h.rfm, h.serial_number, h.last_login_user,
     (SELECT GROUP_CONCAT(DISTINCT l.name) FROM host_map x JOIN lobs l ON l.id=x.lob_id WHERE x.aid=h.aid) lobs,
@@ -140,8 +141,179 @@ def profile(c, q):
                        ORDER BY in_inventory DESC, COALESCE(os,'')='' LIMIT 1""", ipl) if ipl else None
     summary.update(os=reg["os"] if reg else None, os_source=reg["os_source"] if reg else None,
                    feasibility=reg["feasibility"] if reg else None, feasibility_reason=reg["feasibility_reason"] if reg else None)
-    return {"mode": "single", "summary": summary, "agents": agents, "inventory": inv, "vulns": vulns, "scans": scans, "history": history, "niam": niam, "ports": ports,
-            "flows": commatrix.flows_for(c, ipl) if ipl else []}
+    from .satellite import cve_fixes, fix_for
+    fixes = cve_fixes(c, ipl)
+    for v in vulns:  # Nessus CVE -> the Satellite erratum that fixes it on this host
+        v["fix"] = fix_for(fixes, v["ip"], v.get("cve"))
+    flows = commatrix.flows_for(c, ipl) if ipl else []
+    for r in inv:  # where each inventory record comes from (manual upload today; ServiceNow CMDB / Jaspersoft later)
+        v = db.one(c, """SELECT v.version_no, v.filename, v.uploaded_at, v.uploaded_by FROM inventory_versions v
+                         JOIN inventory_current ic ON ic.lob_id=v.lob_id WHERE v.lob_id=? AND ic.item_key=?
+                         AND v.version_no=ic.last_changed_version_no AND COALESCE(v.type_id,0)=COALESCE(ic.type_id,0) LIMIT 1""",
+                   (r["lob_id"], r["item_key"]))
+        r["source"] = {"kind": "manual", "label": "Manual upload", **(v or {})}
+    return {"mode": "single", "summary": summary, "agents": agents, "inventory": inv, "vulns": vulns, "scans": scans, "history": history,
+            "niam": niam, "ports": ports, "flows": flows, "internet": internet_detail(c, ipl, agents, flows)}
+
+
+# ------------------------------------------------------------------ SOD exceptions, related assets, last known good
+@router.get("/api/asset/context")
+def asset_context(ips: str = "", names: str = "", aids: str = ""):
+    """Exceptions touching the asset, related assets and 'last known good' timestamps (loaded after the main profile)."""
+    ipl = [db.canon_ip(i) for i in ips.split(",") if i]
+    hn = [db.norm_hostname(h) for h in names.split(",") if h]
+    aid_l = [a for a in aids.split(",") if a]
+    with db.get_conn() as c:
+        return {"exceptions": asset_exceptions(c, ipl), "related": related_assets(c, ipl, hn),
+                "last_good": last_known_good(c, ipl, hn, aid_l)}
+
+
+def asset_exceptions(c, ipl):
+    """SOD exceptions covering at least one finding of this asset (active or expired), with days left."""
+    import ipaddress
+    from .sod import _cves, _status, today
+    if not ipl:
+        return []
+    fnd = db.rows(c, f"""SELECT f.id, f.ip, f.lob_id, l.name lob, f.plugin_id, f.cve, f.name, f.port, f.status, f.exception_ref
+                         FROM vuln_findings f JOIN lobs l ON l.id=f.lob_id WHERE f.ip IN ({_in(len(ipl))}) AND f.status<>'fixed'""", ipl)
+    now = today()
+    soon = (datetime.now(timezone.utc) + timedelta(days=30)).strftime("%Y-%m-%d")
+    out = []
+    for e in db.rows(c, "SELECT * FROM vuln_exceptions"):
+        net = db.parse_net(e["target"]) if e["scope"] == "Subnet" else None
+        hits = []
+        for f in fnd:
+            same = ((e["plugin_id"] and e["plugin_id"] == f["plugin_id"]) or (set(_cves(e["cve"])) & set(_cves(f["cve"])))
+                    or (e["name"] and e["name"].strip().lower() == (f["name"] or "").strip().lower()))
+            if not same or (e["port"] and e["port"] != str(f["port"] or "")):
+                continue
+            if e["scope"] == "IP" and f["ip"] != e["target"]:
+                continue
+            if e["scope"] == "Subnet":
+                try:
+                    if not net or ipaddress.ip_address(f["ip"]) not in net:
+                        continue
+                except ValueError:
+                    continue
+            if e["scope"] == "LOB" and (f["lob"] or "").lower() != (e["lob"] or "").strip().lower():
+                continue
+            hits.append(f)
+        if not hits:
+            continue
+        days = None
+        if e["valid_till"]:
+            try:
+                days = (datetime.strptime(e["valid_till"][:10], "%Y-%m-%d").date() - datetime.now(timezone.utc).date()).days
+            except ValueError:
+                pass
+        out.append({**{k: e[k] for k in ("exception_id", "scope", "target", "lob", "plugin_id", "cve", "name", "justification", "control",
+                                         "approved_by", "valid_till", "ticket")},
+                    "status": _status(e, now, soon), "days_left": days, "findings": len(hits),
+                    "accepted": sum(1 for f in hits if f["status"] == "accepted" and f["exception_ref"] == e["exception_id"]),
+                    "finding_names": sorted({f["name"] for f in hits})[:5]})
+    return sorted(out, key=lambda x: (x["days_left"] if x["days_left"] is not None else 99999))
+
+
+def related_assets(c, ipl, hn):
+    """Assets worth looking at alongside this one during an incident."""
+    import ipaddress
+    out = []
+
+    def add(kind, why, rows):
+        for r in rows:
+            if r["ip"] in ipl:
+                continue
+            out.append({"kind": kind, "why": why, **r})
+
+    cols = "r.ip, r.name, r.lobs, r.edr_status, r.crit, r.high, r.exposed"
+    for ip in ipl:  # same subnet (/24 IPv4, /64 IPv6)
+        try:
+            a = ipaddress.ip_address(ip)
+        except ValueError:
+            continue
+        net = ipaddress.ip_network(f"{ip}/{24 if a.version == 4 else 64}", strict=False)
+        if a.version == 4:
+            rows = db.rows(c, f"SELECT {cols} FROM asset_registry r WHERE r.ip_num BETWEEN ? AND ? ORDER BY (r.crit + r.high) DESC, r.ip_num LIMIT 40",
+                           (int(net.network_address), int(net.broadcast_address)))
+        else:
+            rows = db.rows(c, f"SELECT {cols} FROM asset_registry r WHERE ip_in(r.ip, ?) LIMIT 40", (str(net),))
+        add("Same subnet", str(net), rows)
+    for h in hn:  # same hostname family: abc -> abc1, abc2 ...
+        stem = re.sub(r"[-_]?\d+$", "", h)
+        if len(stem) >= 3:
+            rows = db.rows(c, f"""SELECT {cols} FROM asset_registry r WHERE LOWER(r.name) LIKE ? AND r.ip IS NOT NULL LIMIT 30""", (stem + "%",))
+            add("Same name family", f"{stem}*", [r for r in rows if db.norm_hostname((r["name"] or "").split(",")[0]) != h])
+    if ipl:  # shares a public / NAT IP
+        reg = db.rows(c, f"SELECT public_ips FROM asset_registry WHERE ip IN ({_in(len(ipl))})", ipl)
+        for p in {x for r in reg for x in (r["public_ips"] or "").split(", ") if x}:
+            add("Same public / NAT IP", p, db.rows(c, f"SELECT {cols} FROM asset_registry r WHERE r.public_ips LIKE ?", (f"%{p}%",)))
+        # can talk to it / it can talk to: communication-matrix peers (single IPs only)
+        for f in commatrix.flows_for(c, ipl)[:100]:
+            other = f["src"] if f["role"] == "Destination" else f["dst"]
+            for ip in db.all_ips(other)[:5]:
+                if "/" in str(other) and ip == str(other).split("/")[0]:
+                    continue
+                add("Talks to it" if f["role"] == "Destination" else "It talks to", f"rule {f['rule_id']} {(f['protocol'] or 'any').upper()} {f['ports'] or 'any'}",
+                    db.rows(c, f"SELECT {cols} FROM asset_registry r WHERE r.ip=?", (ip,)))
+    seen, uniq = set(), []
+    for r in out:
+        k = (r["kind"], r["ip"])
+        if k not in seen:
+            seen.add(k)
+            uniq.append(r)
+    return uniq[:200]
+
+
+def last_known_good(c, ipl, hn, aids):
+    """When each source last saw the host - the 'last known good' baseline for an incident timeline."""
+    q = lambda sql, p: (db.one(c, sql, p) or {}).get("v")  # noqa: E731
+    ip_ph, aid_ph = _in(max(len(ipl), 1)), _in(max(len(aids), 1))
+    ipx, aidx = (ipl or [""]), (aids or [""])
+    items = [
+        ("CrowdStrike check-in", q(f"SELECT MAX(last_seen) v FROM hosts WHERE aid IN ({aid_ph})", aidx), "agent last reported to the Falcon cloud"),
+        ("Last CrowdStrike detection", q(f"SELECT MAX(created_at) v FROM detections WHERE aid IN ({aid_ph})", aidx), "most recent alert on the agent"),
+        ("Last Seceon NDR alert", q(f"SELECT MAX(created_at) v FROM ndr_alerts WHERE src_ip IN ({ip_ph}) OR dst_ip IN ({ip_ph})", ipx + ipx), "network detection"),
+        ("Last VA scan", q(f"SELECT MAX(scanned_at) v FROM vuln_scan_hosts WHERE ip IN ({ip_ph})", ipx), "vulnerability scanner reached it"),
+        ("Satellite check-in", q(f"SELECT MAX(last_checkin) v FROM satellite_hosts WHERE ip IN ({ip_ph})", ipx), "patching agent reported"),
+        ("Last MBSS report", q(f"SELECT MAX(compliance_at) v FROM satellite_hosts WHERE ip IN ({ip_ph})", ipx), "OpenSCAP compliance run"),
+        ("In NIAM dump", q(f"SELECT MAX(last_seen_at) v FROM niam_nodes WHERE ip IN ({ip_ph}) AND present=1", ipx), "network element inventory"),
+    ]
+    return [{"label": l, "at": v, "hint": h} for l, v, h in items]
+
+
+def internet_detail(c, ipl, agents, flows):
+    """How (and whether) the asset is reachable from the internet, method by method."""
+    from .registry import is_cgnat, is_public
+    reg = db.rows(c, f"""SELECT ip, exposed, whitelisted, cgnat, exposure, public_ips, nat_of FROM asset_registry
+                         WHERE ip IN ({_in(len(ipl))})""", ipl) if ipl else []
+    reasons = [e for r in reg for e in json.loads(r["exposure"] or "[]")]
+    public = sorted({p for r in reg for p in (r["public_ips"] or "").split(", ") if p} | {ip for ip in ipl if is_public(ip)})
+    verdict = ("exposed" if any(r["exposed"] for r in reg) else "whitelisted" if any(r["whitelisted"] for r in reg)
+               else "cgnat" if any(r["cgnat"] for r in reg) else "not_exposed")
+    # method 1: communication matrix - inbound Internet / ISP rules, via which firewall / ISP link, zones and NAT
+    matrix = [{k: f.get(k) for k in ("rule_id", "direction", "src_zone", "src", "src_nat", "isp", "firewall", "fw_rule", "dst_zone",
+                                     "dst_nat", "dst", "protocol", "ports", "service", "action", "cr", "valid_till", "remarks")}
+              | {"path": "ISP link" if f.get("isp") else "Firewall" if f.get("firewall") else "Rule"}
+              for f in flows if f.get("inbound_internet")]
+    # method 2: a VA scan caught a public IP of the asset (its own, or its public / NAT IP)
+    scanned = []
+    for ip in public:
+        a = db.one(c, """SELECT MAX(last_scanned_at) at, SUM(crit) crit, SUM(high) high, SUM(med) med, SUM(low) low
+                         FROM vuln_assets WHERE ip=?""", (ip,))
+        scanned.append({"ip": ip, "cgnat": is_cgnat(ip), "scanned": bool(a and a["at"]), "last_scan": a["at"] if a else None,
+                        **{k: (a[k] or 0) if a else 0 for k in ("crit", "high", "med", "low")}})
+    # method 3: what CrowdStrike reports - the agent's own interface IPs and the public (egress) IP it connects from
+    cs = [{"aid": a["aid"], "hostname": a["hostname"], "local_ip": a["local_ip"], "connection_ip": a.get("connection_ip"),
+           "external_ip": a["external_ip"], "public_on_nic": bool(a["local_ip"] and is_public(a["local_ip"])),
+           "egress_public": bool(a["external_ip"] and is_public(a["external_ip"]))} for a in agents]
+    # real exposure check: ports the scan saw open on each public IP vs the ports the inbound rules allow
+    shadow = []
+    for ip in public:
+        ports, _ = commatrix.shadow_ports(c, ip, ipl)
+        shadow += ports
+    return {"verdict": verdict, "reasons": reasons, "public_ips": public, "internal_ip": next((ip for ip in ipl if not is_public(ip)), None), "matrix": matrix, "scan": scanned, "crowdstrike": cs,
+            "inventory": [e for e in reasons if e.get("src") == "inventory"], "ports": shadow,
+            "shadow": sum(1 for p in shadow if p["shadow"])}
 
 
 def ip_sort_key(r):
@@ -223,7 +395,23 @@ def asset(q: str = ""):
         if is_range(q):
             rows = range_rows(c, q)
             return {"mode": "range", "rows": rows, "total": len(rows)}
-        return profile(c, q)
+        p = profile(c, q)
+        if not p["summary"]["found"] and not db.is_ip(q) and len(q) >= 2:
+            rows = name_rows(c, q)  # part of a hostname / node name: pick from the list
+            if rows:
+                return {"mode": "range", "rows": rows, "total": len(rows), "by_name": True}
+        return p
+
+
+def name_rows(c, q):
+    like = f"%{q.lower()}%"
+    ips = {r["local_ip"] for r in c.execute("""SELECT local_ip FROM hosts WHERE console_state<>'hidden' AND LOWER(hostname) LIKE ?
+                                              AND COALESCE(local_ip,'')<>'' LIMIT 300""", (like,))}
+    ips |= {r["ip"] for r in c.execute("SELECT ip FROM inventory_current WHERE LOWER(node_name) LIKE ? AND COALESCE(ip,'')<>'' LIMIT 300", (like,))}
+    out = []
+    for ip in sorted(ips, key=lambda i: ip_sort_key({"ip": i}))[:300]:
+        out += range_rows(c, ip)
+    return out
 
 
 RANGE_COLS = [("ip", "IP"), ("risk", "Risk Score"), ("ne_ids", "NE ID"), ("hostname", "Falcon Hostname"), ("node_name", "Inventory Node Name"), ("edr_status", "EDR Status"),
@@ -240,23 +428,90 @@ def asset_export(q: str = ""):
                 r["in_inventory"] = "Yes" if r["in_inventory"] else "No"
             return xlsx_response([("Assets", RANGE_COLS, rows)], "asset_search")
         p = profile(c, q)
-    s = p["summary"]
+    return evidence_pack(q, p)
+
+
+def evidence_pack(q, p):
+    """One workbook with everything Asset 360 shows, for audits and incident tickets."""
+    from .cs_posture import asset_crowdstrike
+    from .detections import asset_detections
+    from .satellite import asset_satellite
+    from .splunk import asset_splunk
+    s, i = p["summary"], p["internet"]
+    aids = ",".join(a["aid"] for a in p["agents"])
+    names = ",".join(h for h in s["hostnames"] if h)
+    det = asset_detections(aids=aids, hostnames=names, date_from=(datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%d"), date_to="")
+    sat = asset_satellite(ips=",".join(s["ips"]), names=names, errata="all")
+    cs = asset_crowdstrike(aids=aids, ips=",".join(s["ips"]))
+    spl = asset_splunk(hosts=names, ips=",".join(s["ips"]))
+    from .seceon import asset_ndr
+    from .splunk import asset_splunk_detections
+    d90 = (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%d")
+    ndr = asset_ndr(ips=",".join(s["ips"]), hosts=names, date_from=d90, date_to="")
+    snot = asset_splunk_detections(hosts=names, ips=",".join(s["ips"]), date_from=d90, date_to="")
+    ctx = asset_context(ips=",".join(s["ips"]), names=names, aids=aids)
+    sh = (sat["hosts"] or [{}])[0]
+    pol = (cs["posture"] or [{}])[0]
     summary = [{"k": k, "v": v} for k, v in [
-        ("Query", s["query"]), ("IPs", ", ".join(s["ips"])), ("Hostnames", ", ".join(s["hostnames"])), ("EDR status", s["edr_status"]),
-        ("Agent ID", (s["edr_agent"] or {}).get("aid")), ("Active agents", s["active_agents"]), ("LOB", ", ".join(s["lobs"])),
-        ("MSP", ", ".join(s["msps"])), ("In inventory", "Yes" if s["in_inventory"] else "No"),
-        ("Inventory says EDR installed", ", ".join(s["inventory_claim"])), ("NE ID (NIAM)", ", ".join(s["ne_ids"])), ("Open critical", s["vulns"]["Critical"]),
-        ("Open high", s["vulns"]["High"]), ("Open medium", s["vulns"]["Medium"]), ("Open low", s["vulns"]["Low"]),
-        ("Fixed", s["vulns"]["fixed"]), ("Last scan", s["last_scan"]),
+        ("Evidence pack generated", db.now_iso()), ("Query", s["query"]), ("IPs", ", ".join(s["ips"])), ("Hostnames", ", ".join(s["hostnames"])),
+        ("OS", s.get("os")), ("EDR status", s["edr_status"]), ("Agent ID", (s["edr_agent"] or {}).get("aid")),
+        ("Sensor version", (s["edr_agent"] or {}).get("agent_version")), ("Prevention policy", pol.get("policy")),
+        ("Policy applied", pol.get("applied")), ("EDR feasibility", s.get("feasibility")),
+        ("LOB", ", ".join(s["lobs"])), ("MSP", ", ".join(s["msps"])), ("In inventory", "Yes" if s["in_inventory"] else "No"),
+        ("NE ID (NIAM)", ", ".join(s["ne_ids"])), ("Internet exposure", i["verdict"]), ("Public / NAT IPs", ", ".join(i["public_ips"])),
+        ("Shadow-exposed ports", i["shadow"]), ("Open critical", s["vulns"]["Critical"]), ("Open high", s["vulns"]["High"]),
+        ("Open medium", s["vulns"]["Medium"]), ("Open low", s["vulns"]["Low"]), ("Last VA scan", s["last_scan"]),
+        ("CrowdStrike detections (90 days)", len(det["rows"])), ("Splunk notables (90 days)", len(snot.get("rows") or [])),
+        ("Seceon NDR alerts (90 days)", len(ndr.get("rows") or [])),
+        ("SOD exceptions covering it", len(ctx["exceptions"])), ("Spotlight open vulnerabilities", len(cs["spotlight"])),
+        ("Satellite: security errata applicable", sh.get("errata_security")), ("Satellite: fixes installable now", sh.get("installable_security")),
+        ("MBSS compliance %", sh.get("compliance_pct")), ("Splunk: indexes with logs", len(spl.get("rows") or [])),
         ("Risk score", (s["risk"] or {}).get("score")), ("Risk level", (s["risk"] or {}).get("level")),
-        ("Risk factors", "; ".join(f"{n} (+{p})" if p else n for n, p in (s["risk"] or {}).get("factors", [])))]]
+        ("Risk factors", "; ".join(f"{n} (+{pt})" if pt else n for n, pt in (s["risk"] or {}).get("factors", [])))]]
+    for v in p["vulns"]:
+        v["fix_text"] = ", ".join(e["id"] for e in v.get("fix") or [])
+    for x in i["ports"]:
+        x["shadow_text"] = "SHADOW - no rule" if x["shadow"] else "allowed"
+        x["rules_text"] = ", ".join(x["rules"])
+    exposure = [{"method": e["src"], "evidence": e["text"]} for e in i["reasons"]]
     return xlsx_response([
         ("Summary", [("k", "Field"), ("v", "Value")], summary),
+        ("Internet exposure", [("method", "Method"), ("evidence", "Evidence")], exposure),
+        ("Matrix rules", [("rule_id", "Rule"), ("path", "Path"), ("isp", "ISP / Link"), ("firewall", "Firewall"), ("fw_rule", "FW Rule"),
+                          ("src_zone", "Source Zone"), ("src", "Source"), ("dst_zone", "Destination Zone"), ("dst_nat", "Public / NAT IP"),
+                          ("dst", "Destination"), ("protocol", "Protocol"), ("ports", "Ports"), ("service", "Service"), ("cr", "CR"),
+                          ("valid_till", "Valid Till")], i["matrix"]),
+        ("Public ports vs rules", [("ip", "Public IP"), ("port", "Port"), ("protocol", "Protocol"), ("open", "Open Findings"),
+                                   ("shadow_text", "Result"), ("rules_text", "Allowed By")], i["ports"]),
+        ("Detections 90d", [("created_at", "Created"), ("severity", "Severity"), ("name", "Detection"), ("tactic", "Tactic"),
+                            ("technique", "Technique"), ("hostname", "Host"), ("filename", "Process"), ("cmdline", "Command Line"),
+                            ("disposition", "Action Taken"), ("status", "Status")], det["rows"]),
+        ("Splunk notables 90d", [("created_at", "Time"), ("severity", "Urgency"), ("name", "Rule"), ("category", "Domain"), ("src", "Source"),
+                                 ("dest", "Destination"), ("host", "Host"), ("status", "Status")], snot.get("rows") or []),
+        ("Seceon NDR 90d", [("created_at", "Time"), ("severity", "Severity"), ("name", "Alert"), ("category", "Category"), ("src_ip", "Source IP"),
+                            ("dst_ip", "Destination IP"), ("host", "Host"), ("status", "Status"), ("source", "Received via")], ndr.get("rows") or []),
+        ("SOD exceptions", [("exception_id", "Exception"), ("status", "Status"), ("valid_till", "Valid Till"), ("days_left", "Days Left"),
+                            ("scope", "Scope"), ("target", "IP / Subnet"), ("lob", "LOB"), ("findings", "Findings Covered"),
+                            ("accepted", "Accepted Now"), ("approved_by", "Approved By"), ("justification", "Justification"),
+                            ("ticket", "Ticket")], ctx["exceptions"]),
+        ("Last known good", [("label", "Source"), ("at", "Last Seen"), ("hint", "Meaning")], ctx["last_good"]),
+        ("Related assets", [("kind", "Relation"), ("why", "Why"), ("ip", "IP"), ("name", "Name"), ("lobs", "LOB"), ("edr_status", "EDR"),
+                            ("crit", "Critical"), ("high", "High"), ("exposed", "Internet Exposed")], ctx["related"]),
+        ("Vulnerabilities", [("lob", "LOB"), ("ip", "IP"), ("severity", "Severity"), ("name", "Vulnerability"), ("plugin_id", "Plugin ID"),
+                             ("port", "Port"), ("cve", "CVE"), ("status", "Status"), ("fix_text", "Fix Available (Satellite)"),
+                             ("first_discovered", "First Discovered"), ("last_observed", "Last Observed")], p["vulns"]),
+        ("Open ports", [("ip", "IP"), ("port", "Port"), ("protocol", "Protocol"), ("max_severity", "Worst Open Finding"),
+                        ("open_findings", "Open Findings"), ("last_observed", "Last Observed")], p["ports"]),
+        ("Spotlight", [("cve", "CVE"), ("severity", "Severity"), ("score", "CVSS"), ("exprt", "ExPRT"), ("product", "Product"),
+                       ("remediation", "Remediation"), ("in_scanner", "Also in VA scan"), ("created_at", "Found")], cs["spotlight"]),
+        ("Satellite errata", [("errata_id", "Erratum"), ("severity", "Severity"), ("type", "Type"), ("title", "Title"), ("cves", "CVEs"),
+                              ("installable", "Installable Now"), ("issued", "Issued")], sat["errata"]),
+        ("MBSS failed rules", [("control", "Control"), ("rule_id", "Rule"), ("title", "Title"), ("severity", "Severity"), ("fix", "Remediation")],
+         sat.get("mbss") or []),
+        ("Splunk logging", [("host", "Host"), ("index", "Index"), ("sourcetype", "Sourcetype"), ("count", "Events"), ("last_seen", "Last Event")],
+         spl.get("rows") or []),
         ("EDR agents", [("hostname", "Hostname"), ("aid", "Agent ID"), ("local_ip", "IP"), ("edr_status", "Status"), ("os_version", "OS"),
                         ("agent_version", "Sensor"), ("lobs", "LOB"), ("msps", "MSP"), ("first_seen", "First Seen"), ("last_seen", "Last Seen")], p["agents"]),
         ("Inventory", [("lob", "LOB"), ("msp", "MSP"), ("ip", "IP"), ("node_name", "Node Name"), ("node_type", "Node Type"), ("live", "Live"),
                        ("edr_feasible", "EDR Feasible"), ("edr_installed", "EDR Installed"), ("coverage_status", "EDR Status")], p["inventory"]),
-        ("Vulnerabilities", [("lob", "LOB"), ("ip", "IP"), ("severity", "Severity"), ("name", "Vulnerability"), ("plugin_id", "Plugin ID"),
-                             ("port", "Port"), ("cve", "CVE"), ("status", "Status"), ("first_discovered", "First Discovered"),
-                             ("last_observed", "Last Observed")], p["vulns"]),
-    ], "asset_" + re.sub(r"[^A-Za-z0-9._-]", "_", q)[:40])
+    ], "evidence_" + re.sub(r"[^A-Za-z0-9._-]", "_", q)[:40])

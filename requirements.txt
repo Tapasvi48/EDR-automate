@@ -2,5 +2,6 @@ fastapi>=0.110
 uvicorn[standard]>=0.29
 crowdstrike-falconpy>=1.4
 openpyxl>=3.1
+python-calamine>=0.3   # fast Excel reader for large uploads (openpyxl is the fallback)
 python-multipart>=0.0.9
 python-dotenv>=1.0

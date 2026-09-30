@@ -451,7 +451,18 @@ def vuln_findings(request: Request):
     with db.get_conn() as c:
         total = c.execute(f"SELECT COUNT(*) FROM {frm} {where}", params).fetchone()[0]
         rows = db.rows(c, f"SELECT {FINDING_LIST_COLS} FROM {frm} {where} {order} LIMIT ? OFFSET ?", params + [size, (page - 1) * size])
+        _add_fixes(c, rows)
     return {"total": total, "rows": rows}
+
+
+def _add_fixes(c, rows):
+    """'Fix available': the Satellite errata that fix a finding's CVEs on that host."""
+    from .satellite import cve_fixes, fix_for
+    fixes = cve_fixes(c, {r["ip"] for r in rows})
+    for r in rows:
+        fx = fix_for(fixes, r["ip"], r.get("cve"))
+        r["fix"] = fx
+        r["fix_text"] = ", ".join(e["id"] + ("" if e["installable"] else " (not yet installable)") for e in fx)
 
 
 FINDING_EXPORT = [("lob", "LOB"), ("msp", "MSP"), ("ip", "IP Address"), ("hostname", "Falcon Hostname"), ("node_name", "Inventory Node Name"),
@@ -470,7 +481,8 @@ def vuln_findings_export(request: Request):
     with db.get_conn() as c:
         rows = db.rows(c, f"""SELECT {FINDING_LIST_COLS}, f.synopsis, f.solution, f.vuln_pub_date, f.patch_pub_date, f.see_also, f.remarks
                               FROM {frm} {where} {order} LIMIT 500000""", params)
-    return xlsx_response([("Vulnerabilities", FINDING_EXPORT, rows)], "vulnerabilities")
+        _add_fixes(c, rows)
+    return xlsx_response([("Vulnerabilities", FINDING_EXPORT + [("fix_text", "Fix Available (Satellite erratum)")], rows)], "vulnerabilities")
 
 
 @router.get("/api/vulns/findings/{fid}")

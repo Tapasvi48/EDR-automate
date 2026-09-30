@@ -7,7 +7,7 @@ import { HostDrawerProvider } from "./host-drawer";
 
 export function Providers({ children }: { children: React.ReactNode }) {
   const [qc] = React.useState(
-    () => new QueryClient({ defaultOptions: { queries: { staleTime: 20_000, refetchOnWindowFocus: false, retry: 1 } } })
+    () => new QueryClient({ defaultOptions: { queries: { staleTime: 120_000, refetchOnWindowFocus: false, retry: 1 } } })
   );
   return (
     <QueryClientProvider client={qc}>

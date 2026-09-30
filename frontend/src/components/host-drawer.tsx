@@ -177,7 +177,7 @@ function HostSheet({ aid, onClose, onBack, canBack }: { aid: string; onClose: ()
                     <div className="mt-3 border-t border-border pt-3">
                       <KV items={[
                         ["EDR status (matched)", <ActualBadge key="a" v={r.edr_actual} />], ["Inventory claim check", <VerifBadge key="v" v={r.verification} />],
-                        ["Matched by", r.match_method], ["Change in latest version", r.change_tag || "–"],
+                        ["Matched by", r.match_method],
                       ]} />
                     </div>
                   </Card>

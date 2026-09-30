@@ -1,6 +1,7 @@
 import ipaddress
 import json
 import re
+from functools import lru_cache
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -376,7 +377,7 @@ CREATE TABLE IF NOT EXISTS asset_registry (
     edr_status TEXT, edr_detail TEXT, aid TEXT, cs_hostname TEXT, edr_last_seen TEXT,
     last_scan TEXT, crit INTEGER, high INTEGER, med INTEGER, low INTEGER, ne_ids TEXT,
     exposed INTEGER, exposure TEXT, exposure_src TEXT, public_ips TEXT, nat_of TEXT, is_public INTEGER, sources TEXT,
-    os TEXT, os_source TEXT, feasibility TEXT, feasibility_reason TEXT
+    os TEXT, os_source TEXT, feasibility TEXT, feasibility_reason TEXT, whitelisted INTEGER DEFAULT 0, cgnat INTEGER DEFAULT 0
 );
 
 -- Falcon sensor builds per platform with their N / N-1 / N-2 tag (Sensor update policies API), replaced on each fetch
@@ -403,12 +404,64 @@ CREATE TABLE IF NOT EXISTS feasibility_pairs (
     PRIMARY KEY (lob_id, node_type, os_key)
 );
 
+-- Possible inventory <-> CrowdStrike matches for review (NIC IP + near hostname). Not counted anywhere.
+CREATE TABLE IF NOT EXISTS match_candidates (
+    lob_id INTEGER, item_key TEXT, ip TEXT, node_name TEXT, aid TEXT, cs_hostname TEXT, reason TEXT, found_at TEXT
+);
+
+-- CrowdStrike detections (Alerts API), the last N days; shown per asset on Asset 360
+CREATE TABLE IF NOT EXISTS detections (
+    id TEXT PRIMARY KEY, aid TEXT, hostname TEXT, severity TEXT, name TEXT, tactic TEXT, technique TEXT, status TEXT,
+    created_at TEXT, description TEXT, filename TEXT, cmdline TEXT, disposition TEXT, product TEXT, fetched_at TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_det_aid ON detections(aid, created_at);
+
+-- Red Hat Satellite hosts (packages, errata, OpenSCAP / MBSS compliance) and their applicable errata; replaced on each sync
+CREATE TABLE IF NOT EXISTS satellite_hosts (
+    host_id INTEGER PRIMARY KEY, name TEXT, name_norm TEXT, ip TEXT, os TEXT, last_checkin TEXT, subscription TEXT,
+    packages INTEGER, upgradable INTEGER, errata_security INTEGER, errata_bugfix INTEGER, errata_enhancement INTEGER,
+    installable_security INTEGER, installable_total INTEGER, compliance_policy TEXT, compliance_passed INTEGER,
+    compliance_failed INTEGER, compliance_other INTEGER, compliance_at TEXT, fetched_at TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_sat_ip ON satellite_hosts(ip);
+CREATE INDEX IF NOT EXISTS ix_sat_name ON satellite_hosts(name_norm);
+CREATE TABLE IF NOT EXISTS satellite_errata (
+    host_id INTEGER, errata_id TEXT, title TEXT, type TEXT, severity TEXT, issued TEXT, cves TEXT, installable INTEGER
+);
+CREATE INDEX IF NOT EXISTS ix_sate_host ON satellite_errata(host_id);
+-- failed MBSS / OpenSCAP rules of each host's latest compliance report
+CREATE TABLE IF NOT EXISTS satellite_mbss (
+    host_id INTEGER, rule_id TEXT, title TEXT, severity TEXT, result TEXT, control TEXT, fix TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_satm_host ON satellite_mbss(host_id);
+
+-- CrowdStrike Spotlight: open vulnerabilities the agent itself reports
+CREATE TABLE IF NOT EXISTS spotlight_vulns (
+    id TEXT PRIMARY KEY, aid TEXT, hostname TEXT, ip TEXT, cve TEXT, severity TEXT, score REAL, exprt TEXT, exploit_status TEXT,
+    product TEXT, remediation TEXT, status TEXT, created_at TEXT, updated_at TEXT, fetched_at TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_spot_aid ON spotlight_vulns(aid);
+-- CrowdStrike prevention policies (names for the policy id on each device record)
+CREATE TABLE IF NOT EXISTS prevention_policies (
+    id TEXT PRIMARY KEY, name TEXT, platform TEXT, enabled INTEGER, description TEXT, modified_at TEXT
+);
+
+-- Seceon NDR alerts (webhook push or uploaded export)
+CREATE TABLE IF NOT EXISTS ndr_alerts (
+    id TEXT PRIMARY KEY, created_at TEXT, severity TEXT, name TEXT, category TEXT, src_ip TEXT, dst_ip TEXT, host TEXT,
+    description TEXT, status TEXT, source TEXT, raw TEXT, received_at TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_ndr_src ON ndr_alerts(src_ip);
+CREATE INDEX IF NOT EXISTS ix_ndr_dst ON ndr_alerts(dst_ip);
+
 -- Manual EDR feasibility decisions for inventory nodes (win over the feasibility rules)
 CREATE TABLE IF NOT EXISTS feasibility_overrides (
     lob_id INTEGER NOT NULL, item_key TEXT NOT NULL, feasible TEXT NOT NULL, note TEXT, set_at TEXT,
     PRIMARY KEY (lob_id, item_key)
 );
 CREATE INDEX IF NOT EXISTS ix_reg_ip ON asset_registry(ip_num);
+CREATE INDEX IF NOT EXISTS ix_reg_aid ON asset_registry(aid);
+CREATE INDEX IF NOT EXISTS ix_reg_ipt ON asset_registry(ip);
 
 -- Vulnerability exceptions (SOD). The uploaded sheet is the full register; each upload replaces it.
 CREATE TABLE IF NOT EXISTS vuln_exceptions (
@@ -478,6 +531,15 @@ MIGRATIONS = [
     ("asset_registry", "os_source", "TEXT"),
     ("asset_registry", "feasibility", "TEXT"),        # Yes | No | Unidentified
     ("asset_registry", "feasibility_reason", "TEXT"),
+    ("asset_registry", "whitelisted", "INTEGER DEFAULT 0"),  # IP / public IP on the exposure whitelist
+    ("asset_registry", "cgnat", "INTEGER DEFAULT 0"),        # IP / public IP in 100.64.0.0/10
+    ("detections", "assigned_to", "TEXT"),            # analyst the alert is assigned to (Alerts API assigned_to_name)
+    ("detections", "updated_at", "TEXT"),             # last status change; closed alerts: time to close
+    # communication matrix workbooks: several sheets of different types, each row keeps its workbook / sheet
+    ("comm_rules", "name", "TEXT"), ("comm_rules", "application", "TEXT"), ("comm_rules", "app_owner", "TEXT"),
+    ("comm_rules", "lob", "TEXT"), ("comm_rules", "domain", "TEXT"), ("comm_rules", "msp", "TEXT"), ("comm_rules", "location", "TEXT"),
+    ("comm_rules", "workbook", "TEXT"), ("comm_rules", "sheet", "TEXT"), ("comm_rules", "sheet_type", "TEXT"),
+    ("comm_uploads", "sheets", "TEXT"),               # JSON: [{sheet, type, rows}]
 ]
 
 
@@ -493,9 +555,21 @@ _TS_FORMATS = [
 ]
 
 
+_ISO_DAY = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?(?:\.\d+)?Z?$")
+
+
 def parse_ts(v):
-    """Best-effort parse of export timestamps (Nessus, CrowdStrike, Excel) -> ISO UTC string, or '' if unknown."""
-    s = str(v or "").strip()
+    """Best-effort parse of export timestamps (Nessus, CrowdStrike, Excel) -> ISO UTC string, or '' if unknown.
+    Memoised: scan exports repeat the same few dates on tens of thousands of rows."""
+    return _parse_ts(str(v or "").strip())
+
+
+@lru_cache(maxsize=100_000)
+def _parse_ts(s):
+    m = _ISO_DAY.match(s)  # fast path for the common 2026-09-20 / 2026-09-20 10:15[:30] forms
+    if m and 1 <= int(m.group(2)) <= 12 and 1 <= int(m.group(3)) <= 31 and int(m.group(4) or 0) < 24:
+        y, mo, d, hh, mi, ss = m.groups()
+        return f"{y}-{mo}-{d}T{hh or '00'}:{mi or '00'}:{ss or '00'}Z"
     if not s or s in ("-", "N/A", "n/a"):
         return ""
     s = s.replace(" UTC", "").replace(" GMT", "").replace("+00:00", "Z")
@@ -543,7 +617,11 @@ def canon_ip(v):
     """Canonical form used for every IP stored or compared, so 010.001.001.005 == 10.1.1.5 and
     2001:DB8:0:0::1 == 2001:db8::1. Cells holding several IPs ("10.1.1.1, 10.1.1.2" / "10.1.1.1 eth0")
     give the first one; values that are not IPs come back trimmed and unchanged."""
-    s = str(v or "").strip()
+    return _canon_ip(str(v or "").strip())
+
+
+@lru_cache(maxsize=200_000)
+def _canon_ip(s):
     if not s:
         return ""
     ip = _parse_ip(s)

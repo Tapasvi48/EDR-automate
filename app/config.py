@@ -57,8 +57,26 @@ DEFAULT_SETTINGS = {
     "falcon_client_secret": "",
     "falcon_base_url": "",
     "falcon_member_cid": "",
+    # Days of CrowdStrike detections fetched on each sync (Alerts API)
+    "detections_days": "30",
+    # Red Hat Satellite (packages, errata / remediation, OpenSCAP MBSS compliance) - entered in Integrations
+    "satellite_url": "",
+    "satellite_user": "",
+    "satellite_token": "",
+    "satellite_verify_ssl": "1",
+    # Splunk log-source presence (REST / management port) - entered in Integrations
+    "splunk_url": "",
+    "splunk_token": "",
+    "splunk_index": "*",
+    "splunk_days": "7",
+    "splunk_verify_ssl": "1",
+    # Seceon NDR webhook token (generated on the Integrations page)
+    "seceon_webhook_token": "",
+    # ServiceNow CMDB inventory source (planned) - entered in Inventory sources
+    "servicenow_url": "",
+    "servicenow_table": "cmdb_ci_server",
 }
-SECRET_SETTINGS = {"falcon_client_secret"}
+SECRET_SETTINGS = {"falcon_client_secret", "satellite_token", "splunk_token", "seceon_webhook_token"}
 
 # Standard inventory template fields: key -> label
 INVENTORY_FIELDS = [

@@ -105,7 +105,7 @@ SOURCES = [
 ]
 
 _REWRITES = [(re.compile(p, re.I), r) for p, r in [
-    (r"\(r\)|®|\(tm\)|™", ""), (r"\bmicrosoft\s+", ""), (r"\blinux kernel [\d.x\-]+ on\s+", ""),
+    (r"\(r\)|®|\(tm\)|™", ""), (r"\bmicrosoft\s+", ""), (r"\blinux kernel \S+ on\s+", ""),
     (r"red hat enterprise linux( server| workstation)?", "rhel"), (r"suse linux enterprise server|suse linux enterprise|\bsles\b", "sles"),
     (r"\balmalinux\b", "alma linux"), (r"\blinux release\b", ""), (r"\brelease\b", ""), (r"\bmac ?os ?x\b|\bos x\b", "macos"),
     (r"\boracle linux server\b|\boel\b|\bol(?=\s*\d)", "oracle linux"), (r"\bamzn\b", "amazon linux"), (r"\bjunos os\b", "junos"),
@@ -341,8 +341,8 @@ def sensor_support_refresh():
     except Exception as e:  # noqa: BLE001
         raise HTTPException(400, str(e))
     with db.get_conn() as c:
-        from .inventory import refresh_matches
-        refresh_matches(c)
+        from .inventory import refresh_feasibility
+        refresh_feasibility(c)
     return {"ok": True, "message": msg}
 
 
@@ -361,6 +361,6 @@ def sensor_support_save(data: dict = Body(...)):
                         "last_sensor": str(e.get("last_sensor") or "").strip()})
     with db.get_conn() as c:
         c.execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", (KEY, json.dumps({"entries": entries})))
-        from .inventory import refresh_matches
-        refresh_matches(c)
+        from .inventory import refresh_feasibility
+        refresh_feasibility(c)
     return {"ok": True, "entries": len(entries)}

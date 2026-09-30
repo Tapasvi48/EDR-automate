@@ -9,16 +9,17 @@ re-joins everything from scratch.
 Internet exposure (any one is enough; every reason is kept so the page can explain it):
   inventory   - a column such as "Internet Facing" / "Exposure" / "Zone" says yes / DMZ / internet, or a
                 "Public IP" / "NAT IP" column maps the node to a public address
-  crowdstrike - the agent reports a public (globally routable) address on its own interface
   scan        - the VA scan covered a public IP: the IP itself, or the public / NAT IP of an inventory node
-  public ip   - the asset's own IP is globally routable (inventory, NIAM or scan)
-Egress IPs (CrowdStrike external / connection IP) are listed separately as the organisation's public IPs; sharing a NAT
-egress address does not make a host reachable from the internet, so it is not counted as exposure."""
+  public ip   - the asset's own IP is globally routable and comes from an inventory, the NIAM dump or a VA scan
+                (a CrowdStrike interface IP alone is not evidence: agents report whatever address their NIC has)
+Not counted as exposed:
+  whitelist   - IPs / subnets listed on the Internet exposed page (known, accepted addresses)
+  CGNAT       - 100.64.0.0/10 (carrier-grade NAT, RFC 6598): not directly reachable; shown on their own tab"""
 import ipaddress
 import json
 import re
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Body, HTTPException, Request
 
 from . import db
 from .exporter import xlsx_response
@@ -35,6 +36,50 @@ SOURCES = ("inventory", "edr", "scan", "niam")
 
 # IPv4 documentation ranges never appear on real networks; the sample data uses them as public addresses
 _DOC_V4 = [ipaddress.ip_network(n) for n in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24")]
+
+
+CGNAT = ipaddress.ip_network("100.64.0.0/10")
+
+
+def is_cgnat(ip):
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return a.version == 4 and a in CGNAT
+
+
+LIST_KEYS = {"whitelist": "exposure_whitelist", "indirect": "exposure_indirect"}
+
+
+def ip_list(c, kind):
+    """User-maintained IP / subnet lists: whitelist (never exposed) and indirect (telecom ranges reachable only indirectly)."""
+    r = c.execute("SELECT value FROM settings WHERE key=?", (LIST_KEYS[kind],)).fetchone()
+    return db.jloads(r["value"], []) if r else []
+
+
+def whitelist(c):
+    return ip_list(c, "whitelist")
+
+
+def _net_fn(entries):
+    """ip -> the matching entry's label (or None)."""
+    nets = [(n, e) for n, e in ((db.parse_net(e.get("value")), e) for e in entries) if n]
+
+    def hit(ip):
+        try:
+            a = ipaddress.ip_address(ip)
+        except ValueError:
+            return None
+        for n, e in nets:
+            if a.version == n.version and a in n:
+                return e.get("value") + (f" ({e['note']})" if e.get("note") else "")
+        return None
+    return hit
+
+
+def _whitelisted_fn(c):
+    return _net_fn(whitelist(c))
 
 
 def is_public(ip):
@@ -60,7 +105,7 @@ def inventory_exposure(extra):
             facing = f"{k} = {sv}"
         if nk in NAT_COLS:
             for ip in db.all_ips(sv):
-                if is_public(ip):
+                if is_public(ip) or is_cgnat(ip):
                     nat.append(ip)
     return facing, nat
 
@@ -134,8 +179,6 @@ def refresh(c):
         add_name(s, h["hostname"])
         if not s["os"] and h["os_version"]:
             s["os"], s["os_source"] = h["os_version"], "edr"
-        if is_public(h["local_ip"]):
-            reason(s, "crowdstrike", f"CrowdStrike: {h['hostname'] or h['aid']} has a public IP on its interface")
     # --- vulnerability scans
     from .vulns import scan_os
     va_os = scan_os(c)
@@ -155,31 +198,57 @@ def refresh(c):
         if n["ne_id"]:
             s["ne_ids"].add(n["ne_id"])
         add_name(s, (db.jloads(n["extra"], {}) or {}).get("NE Name"))
-    # --- communication matrix: inbound Allow rules from the internet / ISP
-    from .commatrix import endpoints, load_rules
+    # --- communication matrix, every sheet type: internet-facing rows expose what they point at. A row matches an asset by
+    # its private / internal IP (or a subnet / range containing it), its public / NAT IP, or its host name.
+    from .addrparse import parse_addresses
+    from .commatrix import load_rules
     import bisect
     v4 = sorted((db.ip_to_num(s["ip"]), k) for k, s in reg.items() if s["ip"] and ":" not in s["ip"])
     v4n = [n for n, _ in v4]
     v6 = [(ipaddress.ip_address(s["ip"]), k) for k, s in reg.items() if s["ip"] and ":" in s["ip"]]
-    for rule in load_rules(c):
-        if not rule["inbound_internet"]:
-            continue
-        _, nets = endpoints(rule["dst"])
-        hits = []
+    by_name = {}
+    for k, s in reg.items():
+        for n in s["names"]:
+            by_name.setdefault(db.norm_hostname(n), set()).add(k)
+
+    def hits_for(text):
+        _, nets, names = parse_addresses(text)
+        hits = set()
         for n in nets:
             if n.version == 4:
                 lo, hi = int(n.network_address), int(n.broadcast_address)
-                hits += [v4[i][1] for i in range(bisect.bisect_left(v4n, lo), bisect.bisect_right(v4n, hi))]
+                hits |= {v4[i][1] for i in range(bisect.bisect_left(v4n, lo), bisect.bisect_right(v4n, hi))}
             else:
-                hits += [k for a, k in v6 if a in n]
+                hits |= {k for a, k in v6 if a in n}
+        for nm in names:
+            hits |= by_name.get(db.norm_hostname(nm), set())
+        return hits
+
+    KIND = {"rules": "Communication matrix rule", "nat_map": "NAT sheet", "public_pool": "Public IP pool", "sod_nat": "SOD / NAT rule",
+            "exposure": "Exposure register"}
+    for rule in load_rules(c):
+        if not rule["inbound_internet"]:
+            continue
+        st = rule.get("sheet_type") or "rules"
+        inner = hits_for(rule["dst"])
+        publ = hits_for(rule["dst_nat"])
+        pubs = [str(n.network_address) for n in parse_addresses(rule["dst_nat"])[1] if n.num_addresses == 1]
         svc = f"{(rule['protocol'] or 'any').upper()} {rule['ports'] or 'any port'}"
-        text = (f"Communication matrix rule {rule['rule_id']}: {rule['src_zone'] or rule['src'] or 'internet'} → {svc}"
-                + (f" via {rule['firewall']}" if rule["firewall"] else "") + (f" ({rule['isp']})" if rule["isp"] else ""))
-        for k in hits:
+        where = f"{rule.get('sheet') or ''}".strip()
+        who = " · ".join(x for x in (rule.get("application"), rule.get("app_owner") and f"owner {rule['app_owner']}") if x)
+        if st == "rules":
+            text = (f"{KIND[st]} {rule['rule_id']}: {rule['src_zone'] or rule['src'] or 'internet'} → {svc}"
+                    + (f" via {rule['firewall']}" if rule["firewall"] else "") + (f" ({rule['isp']})" if rule["isp"] else ""))
+        else:
+            text = (f"{KIND.get(st, 'Matrix sheet')}{f' ‘{where}’' if where else ''}: public IP {rule['dst_nat'] or '–'}"
+                    + (f" → {rule['dst']}" if rule["dst"] else "") + (f" · {svc}" if rule["ports"] else "")
+                    + (f" · {who}" if who else "") + (f" · firewall {rule['firewall']}" if rule["firewall"] else ""))
+        for k in inner | publ:
             reason(reg[k], "matrix", text)
-            for p in db.all_ips(rule["dst_nat"]):
+        for k in inner:
+            for p in pubs:
                 if p != reg[k]["ip"]:
-                    nat_pairs.append((k, p, "matrix", f"Communication matrix rule {rule['rule_id']}"))
+                    nat_pairs.append((k, p, "matrix", f"{KIND.get(st, 'Matrix')} {rule['rule_id']}"))
     # --- public / NAT IPs (inventory columns and matrix destination NAT)
     for key, p, src, label in nat_pairs:
         s = reg[key]
@@ -195,7 +264,7 @@ def refresh(c):
                 reason(s, "scan", f"VA scan of its public IP {p}: {n_open} open findings")
     # --- the asset's own IP is public
     for s in reg.values():
-        if s["ip"] and is_public(s["ip"]):
+        if s["ip"] and is_public(s["ip"]) and (s["in_inventory"] or s["in_niam"] or s["in_scan"]):
             src = "scan" if s["in_scan"] else "ip"
             reason(s, src, "Public IP, covered by a VA scan (external scan)" if s["in_scan"] else "Public IP address")
     # --- EDR feasibility of assets in no inventory: CrowdStrike has it -> feasible (and applicable); anything else found only
@@ -209,8 +278,19 @@ def refresh(c):
             s.update(feasible=None, feasible_reason="Public / NAT IP of an inventory node")
         else:
             s.update(feasible="Unidentified", feasible_reason="Not in any inventory and no EDR: feasibility unknown")
+    listed = _whitelisted_fn(c)
+    indirect = _net_fn(ip_list(c, "indirect"))
     rows = []
     for s in reg.values():
+        # indirectly exposed: CGNAT (100.64.0.0/10) or a telecom range you listed; reachable only through another network
+        addrs = ([s["ip"]] if s["ip"] else []) + sorted(s["public_ips"])
+        why = next((f"CGNAT address {a}" for a in addrs if is_cgnat(a)), None) or next(
+            (f"{a} in indirect range {indirect(a)}" for a in addrs if indirect(a)), None)
+        cg = 1 if why else 0
+        if why:
+            reason(s, "indirect", f"Indirectly exposed: {why}")
+        wl = 1 if (s["ip"] and listed(s["ip"])) or any(listed(p) for p in s["public_ips"]) else 0
+        exposed = 1 if s["reasons"] and not cg and not wl else 0
         srcs = [x for x, f in (("inventory", s["in_inventory"]), ("edr", s["in_edr"]), ("scan", s["in_scan"]), ("niam", s["in_niam"])) if f]
         rows.append((s["asset_key"], s["ip"], db.ip_to_num(s["ip"]), ", ".join(s["names"][:3]) or None,
                      ", ".join(sorted(set(s["lobs"].values()))) or None, "," + ",".join(str(i) for i in s["lobs"]) + ",",
@@ -218,11 +298,11 @@ def refresh(c):
                      s["node_type"], s["live"], s["edr_applicable"], s["in_inventory"], s["in_edr"], s["in_scan"], s["in_niam"],
                      s["edr_status"] or "Not Installed", s["edr_detail"], s["aid"], s["cs_hostname"], s["edr_last_seen"],
                      s["last_scan"], s["crit"], s["high"], s["med"], s["low"], ", ".join(sorted(s["ne_ids"])) or None,
-                     1 if s["reasons"] else 0, json.dumps(s["reasons"]), "," + ",".join(sorted(s["exp_src"])) + ",",
+                     exposed, json.dumps(s["reasons"]), "," + ",".join(sorted(s["exp_src"])) + ",",
                      ", ".join(sorted(s["public_ips"])) or None, ", ".join(sorted(x for x in s["nat_of"] if x)) or None,
-                     1 if is_public(s["ip"]) else 0, ",".join(srcs), s["os"], s["os_source"], s["feasible"], s["feasible_reason"]))
+                     1 if is_public(s["ip"]) else 0, ",".join(srcs), s["os"], s["os_source"], s["feasible"], s["feasible_reason"], wl, cg))
     c.execute("DELETE FROM asset_registry")
-    c.executemany(f"INSERT INTO asset_registry VALUES ({','.join('?' * 37)})", rows)
+    c.executemany(f"INSERT INTO asset_registry VALUES ({','.join('?' * 39)})", rows)
 
 
 # ------------------------------------------------------------------ queries
@@ -256,6 +336,10 @@ def query(p):
         vals = p["edr_status"].split("|")
         w.append(f"r.edr_status IN ({','.join('?' * len(vals))})")
         params += vals
+    for flag in ("cgnat", "whitelisted"):
+        if p.get(flag) in ("0", "1"):
+            w.append(f"r.{flag}=?")
+            params.append(int(p[flag]))
     if p.get("exposed") in ("0", "1"):
         w.append("r.exposed=?")
         params.append(int(p["exposed"]))
@@ -400,7 +484,7 @@ def registry_summary():
 def exposure_summary():
     with db.get_conn() as c:
         s = db.one(c, """SELECT SUM(exposed) exposed, SUM(exposed AND exposure_src LIKE '%,inventory,%') by_inventory,
-            SUM(exposed AND exposure_src LIKE '%,crowdstrike,%') by_crowdstrike, SUM(exposed AND exposure_src LIKE '%,scan,%') by_scan,
+            SUM(exposed AND exposure_src LIKE '%,scan,%') by_scan,
             SUM(exposed AND exposure_src LIKE '%,ip,%') by_ip, SUM(exposed AND exposure_src LIKE '%,matrix,%') by_matrix, SUM(exposed AND edr_status='Not Installed') no_edr,
             SUM(exposed AND (crit + high) > 0) crit_high, SUM(exposed AND in_inventory=0) not_in_inventory,
             SUM(exposed AND in_inventory=1) in_inventory,
@@ -415,18 +499,71 @@ def exposure_summary():
         know = db.one(c, """SELECT
             SUM(exposed AND (exposure_src LIKE '%,scan,%' OR exposure_src LIKE '%,ip,%')) by_scan,
             SUM(exposed AND exposure_src LIKE '%,inventory,%') by_inventory,
-            SUM(exposed AND exposure_src LIKE '%,crowdstrike,%') by_crowdstrike,
             SUM(exposed AND exposure_src LIKE '%,matrix,%') by_matrix FROM asset_registry""")
-        # the organisation's public egress IPs as CrowdStrike sees them (NAT / proxy addresses the agents connect from)
-        egress = {}
-        for h in db.rows(c, """SELECT hostname, external_ip, connection_ip, online_state FROM hosts WHERE console_state='active'"""):
-            for ip in {h["external_ip"], h["connection_ip"]}:
-                if ip and is_public(ip):
-                    e = egress.setdefault(ip, {"ip": ip, "hosts": 0, "online": 0, "sample": []})
-                    e["hosts"] += 1
-                    e["online"] += 1 if h["online_state"] == "online" else 0
-                    if len(e["sample"]) < 3 and h["hostname"]:
-                        e["sample"].append(h["hostname"])
-    return {**{k: (v or 0) for k, v in s.items()},
-            "know": {k: (v or 0) for k, v in know.items()},
-            "egress_ips": sorted(egress.values(), key=lambda e: -e["hosts"])}
+        extra = db.one(c, "SELECT SUM(cgnat) cgnat, SUM(whitelisted) whitelisted FROM asset_registry")
+    return {**{k: (v or 0) for k, v in s.items()}, **{k: (v or 0) for k, v in extra.items()},
+            "know": {k: (v or 0) for k, v in know.items()}, "whitelist": whitelist_list(), "indirect": indirect_list()}
+
+
+@router.get("/api/exposure/shadow")
+def exposure_shadow():
+    """Every public IP the VA scan covered: open ports and whether an inbound Internet / ISP rule allows them.
+    Ports no rule allows are shadow exposure."""
+    from .commatrix import shadow_ports
+    out = []
+    with db.get_conn() as c:
+        owners = {}
+        for r in db.rows(c, "SELECT ip, name, nat_of, lobs FROM asset_registry"):
+            owners[r["ip"]] = r
+        for ip in sorted({r["ip"] for r in c.execute("SELECT DISTINCT ip FROM vuln_findings") if is_public(r["ip"])}):
+            o = owners.get(ip) or {}
+            inner = [x for x in (o.get("nat_of") or "").split(", ") if x]
+            ports, rules = shadow_ports(c, ip, inner)
+            for p in ports:
+                internal = inner[0] if inner else None
+                io = owners.get(internal) or {} if internal else {}
+                out.append({**p, "asset": io.get("name") or o.get("name"), "internal_ip": internal, "lobs": io.get("lobs") or o.get("lobs"),
+                            "rules_on_ip": len(rules), "rules": ", ".join(p["rules"])})
+    return {"rows": out, "shadow": sum(1 for p in out if p["shadow"]), "ports": len(out),
+            "ips": len({p["ip"] for p in out}), "shadow_ips": len({p["ip"] for p in out if p["shadow"]})}
+
+
+def whitelist_list():
+    with db.get_conn() as c:
+        return whitelist(c)
+
+
+def indirect_list():
+    with db.get_conn() as c:
+        return ip_list(c, "indirect")
+
+
+def _save_list(kind, data):
+    out, bad = [], []
+    for e in data.get("entries") or []:
+        v = str(e.get("value") or "").strip()
+        if not v:
+            continue
+        if not db.parse_net(v):
+            bad.append(v)
+            continue
+        out.append({"value": v, "note": str(e.get("note") or "").strip()})
+    if bad:
+        raise HTTPException(400, "Not an IP or subnet: " + ", ".join(bad))
+    with db.get_conn() as c:
+        c.execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", (LIST_KEYS[kind], json.dumps(out)))
+        refresh(c)
+    return {"ok": True, "entries": out}
+
+
+@router.put("/api/exposure/whitelist")
+def exposure_whitelist_save(data: dict = Body(...)):
+    """[{value: IP or CIDR (v4 / v6), note}] - these addresses are never listed as internet exposed."""
+    return _save_list("whitelist", data)
+
+
+@router.put("/api/exposure/indirect")
+def exposure_indirect_save(data: dict = Body(...)):
+    """[{value, note}] - telecom ranges reachable only indirectly (partner / NNI / roaming / core links), shown on the
+    Indirectly exposed tab with CGNAT; every asset inside them is listed there."""
+    return _save_list("indirect", data)

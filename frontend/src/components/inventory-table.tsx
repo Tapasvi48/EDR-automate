@@ -1,15 +1,16 @@
 "use client";
 import * as React from "react";
 import * as Popover from "@radix-ui/react-popover";
-import { useQuery } from "@tanstack/react-query";
-import { SlidersHorizontal, X } from "lucide-react";
-import { api } from "@/lib/api";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
+import { FileSpreadsheet, SlidersHorizontal, Upload, X } from "lucide-react";
+import { api, apiUpload, downloadExcel } from "@/lib/api";
 import { fmtDt, fmtN } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import { Badge, Button, Card, Checkbox, Field, KV, Loading, SearchInput, Select, Sheet, SectionTitle } from "./ui";
+import { Badge, Button, Card, Checkbox, Field, KV, Loading, Menu, SearchInput, Select, Sheet, SectionTitle } from "./ui";
 import { DataTable, SimpleTable, type Column } from "./data-table";
 import { useMeta } from "@/lib/hooks";
-import { ActualBadge, ChangeTag, FeasibleBadge, OsCell, DupBadge, dupReasons, CoverageBadge, COVERAGE_HELP, HostLink, Live, Mono, VERIFICATION_HELP, VerifBadge, When, YN } from "./badges";
+import { ActualBadge, FeasibleBadge, OsCell, DupBadge, dupReasons, CoverageBadge, COVERAGE_HELP, HostLink, Live, Mono, VERIFICATION_HELP, VerifBadge, When, YN } from "./badges";
 
 export const VERIFICATIONS = Object.keys(VERIFICATION_HELP);
 export const COVERAGE_STATUSES = Object.keys(COVERAGE_HELP);
@@ -19,26 +20,28 @@ const MATCHES = ["ip+hostname", "hostname", "ip", "ip (hostname differs)", "ip_h
 export function inventoryColumns(showLob: boolean, historical: boolean): Column[] {
   const cols: Column[] = [
     ...(showLob ? [{ key: "lob", label: "LOB", render: (r: any) => <b>{r.lob}</b> }] : []),
-    { key: "change_tag", label: "Tag", sort: historical ? false : undefined, render: (r: any) => <span className="inline-flex gap-1"><ChangeTag t={r.change_tag} /><DupBadge r={r} /></span> },
+    { key: "dup", label: "Duplicate", render: (r: any) => <DupBadge r={r} /> },
     { key: "ip", label: "IP", render: (r: any) => <Mono>{r.ip}</Mono> },
     { key: "node_name", label: "Node name", render: (r: any) => <b>{r.node_name}</b> },
     { key: "msp", label: "MSP", render: (r: any) => r.msp || <span className="text-muted">Unassigned</span> },
     ...(historical ? [] : ([
       { key: "coverage_status", label: "EDR status", render: (r: any) => <CoverageBadge v={r.coverage_status} /> },
+      { key: "exposed", label: "Internet exposed", sort: false, render: (r: any) => r.internet_exposed
+        ? <Badge tone="crit" title={(r.exposure_why || []).map((t: string) => "• " + t).join("\n")}>Yes</Badge> : <span className="text-muted">No</span> },
       { key: "niam", label: "NIAM", sort: false, render: (r: any) => r.niam_ne_ids ? <Badge tone="good" title={`NE ID ${r.niam_ne_ids}`}>Yes</Badge> : <span className="text-muted">No</span> },
       { key: "last_scan", label: "Last scan", sort: false, render: (r: any) => r.last_scan ? <span title={r.last_scan}>{String(r.last_scan).slice(0, 10)}</span> : <span className="text-muted">Never</span> },
     ] as Column[])),
     { key: "node_type", label: "Node type" },
     { key: "domain", label: "Domain", hidden: true },
-    { key: "live", label: "Live / Non Live", render: (r: any) => <Live v={r.live} /> },
+    { key: "live", label: "Live / Non Live", render: (r: any) => historical ? <Live v={r.live} /> : <EditCell r={r} field="live" options={["Live", "Non Live"]} /> },
     ...(historical
       ? [{ key: "os", label: "OS" }, { key: "edr_feasible", label: "EDR feasible", render: (r: any) => <YN v={r.edr_feasible} /> }]
       : [{ key: "os_resolved", label: "OS", render: (r: any) => <OsCell os={r.os_resolved} src={r.os_source} /> },
          { key: "feasible", label: "EDR feasible", render: (r: any) => <span className="inline-flex items-center gap-1.5"><FeasibleBadge v={r.feasible} reason={r.feasible_reason} />
            {r.feasible_reason && !/^(No rule matched|EDR installed)/.test(r.feasible_reason) && <span className="text-[11px] text-muted">{r.feasible_reason.replace(/ rule:/, ":")}</span>}</span> },
-         { key: "edr_feasible", label: "EDR feasible (sheet)", hidden: true, render: (r: any) => <YN v={r.edr_feasible} /> },
+         { key: "edr_feasible", label: "EDR feasible (sheet)", hidden: true, render: (r: any) => <EditCell r={r} field="edr_feasible" options={["Yes", "No"]} /> },
          { key: "os", label: "OS (sheet)", hidden: true }]),
-    { key: "edr_installed", label: "EDR installed (inventory)", render: (r: any) => <YN v={r.edr_installed} /> },
+    { key: "edr_installed", label: "EDR installed (inventory)", render: (r: any) => historical ? <YN v={r.edr_installed} /> : <EditCell r={r} field="edr_installed" options={["Yes", "No"]} /> },
     { key: "remarks", label: "Remarks", wrap: true, hidden: true },
   ];
   if (!historical)
@@ -78,10 +81,10 @@ const PILL: Record<string, string> = {
   match_method: "Matched by", edr_state: "Agent state", applicable: "EDR applicable only", installed: "Installed", pending: "Not installed or removed",
   claimed_missing: "Inventory says Yes · no agent", marked_no: "Inventory says No · agent running", installed_na: "Not applicable · agent running",
   cross_msp_dup: "IP in more than one MSP", in_scope: "Applicable only", mismatch: "Inventory claim mismatch",
-  niam: "NIAM integrated", scanned: "Scanned", gap: "Coverage gap",
+  niam: "NIAM integrated", scanned: "Scanned", gap: "Coverage gap", exposed: "Internet exposed",
 };
 const MORE_KEYS = ["live", "feasible", "os_source", "edr_feasible", "edr_installed", "domain", "dup", "change_tag", "applicable", "claimed_missing", "marked_no",
-  "installed", "pending", "installed_na", "cross_msp_dup", "verification", "edr_actual", "match_method", "edr_state", "in_scope", "mismatch", "niam", "scanned", "gap"];
+  "installed", "pending", "installed_na", "cross_msp_dup", "verification", "edr_actual", "match_method", "edr_state", "in_scope", "mismatch", "niam", "scanned", "gap", "exposed"];
 const isMainStatus = (v?: string) => STATUS_MAIN.some(([s]) => s && s === v);
 
 export function InventoryTable({ lobId, state, set, reset, versions, showLob, lobs, types }: {
@@ -107,7 +110,7 @@ export function InventoryTable({ lobId, state, set, reset, versions, showLob, lo
     if (v === "1") return null;
     if (k === "dup") return DUPS.find(([d]) => d === v)?.[1] || v;
     if (k === "change_tag") return v === "new" ? "New in latest version" : v === "modified" ? "Modified in latest version" : v;
-    if (k === "niam" || k === "scanned") return v === "1" ? "Yes" : "No";
+    if (k === "niam" || k === "scanned" || k === "exposed") return v === "1" ? "Yes" : "No";
     if (k === "applicable" && v === "0") return "No (not feasible or legacy OS)";
     if (k === "gap") return ({ edr: "EDR not installed", niam: "Not integrated", scan: "Never scanned", any: "Any gap" } as any)[v] || v;
     return v.split("|").join(", ");
@@ -152,6 +155,7 @@ export function InventoryTable({ lobId, state, set, reset, versions, showLob, lo
           )}
           {!historical && <MspSelect lobId={scopeLob} value={state.msp} onChange={(v) => set({ msp: v })} />}
           <Select value={state.node_type} onChange={(v) => set({ node_type: v })} placeholder="All node types" options={opts("node_type")} />
+          {!historical && <Select value={state.exposed} onChange={(v) => set({ exposed: v })} placeholder="Internet: any" options={[["1", "Internet exposed"], ["0", "Not exposed"]] as [string, string][]} />}
           {historical
             ? <Select value={state.os} onChange={(v) => set({ os: v })} placeholder="All OS" options={opts("os")} />
             : <Select value={state.os_resolved} onChange={(v) => set({ os_resolved: v })} placeholder="All OS" options={opts("os_resolved")} />}
@@ -196,11 +200,7 @@ export function InventoryTable({ lobId, state, set, reset, versions, showLob, lo
                     <Select className="max-w-none" value={state.dup} onChange={(v) => set({ dup: v, cross_msp_dup: undefined })} placeholder="Any row"
                       options={DUPS.filter(([d]) => !historical || d === "file").map(([d, l, fk]) => [d, fk && facets?.dup ? `${l} (${fmtN(facets.dup[fk])})` : l] as [string, string])} />
                   </Field>
-                  {!historical && (
-                    <Field label="Change in latest version">
-                      <Select className="max-w-none" value={state.change_tag} onChange={(v) => set({ change_tag: v })} placeholder="Any" options={[["new", "New"], ["modified", "Modified"], ["unchanged", "Unchanged"]]} />
-                    </Field>
-                  )}
+
                 </div>
                 <div className="mt-4 border-t border-border pt-3">
                   <div className="mb-2 text-xs font-medium text-fg-2">Checks</div>
@@ -213,6 +213,7 @@ export function InventoryTable({ lobId, state, set, reset, versions, showLob, lo
               </Popover.Content>
             </Popover.Portal>
           </Popover.Root>
+          {!historical && <ColumnSheetMenu lobId={lobId} state={state} />}
           {versions && (
             <Select className="ml-auto" value={state.version_id || ""} onChange={(v) => set({ version_id: v })} placeholder="Current inventory"
               options={versions.filter((v) => !v.is_current).map((v) => ({ value: v.id, label: `${v.type_name || "Main"} v${v.version_no} · ${fmtDt(v.uploaded_at)}` }))} />
@@ -246,7 +247,7 @@ function ItemSheet({ lobId, item, onClose }: { lobId: number; item: any; onClose
   const cur = data?.current || item;
   return (
     <Sheet open onOpenChange={(o) => !o && onClose()} width={820}
-      title={<span>{cur.node_name || cur.ip} <ChangeTag t={cur.change_tag} /></span>}
+      title={<span>{cur.node_name || cur.ip}</span>}
       sub={<span><Mono>{cur.ip}</Mono> · key <Mono>{item.item_key}</Mono>{item.lob ? ` · ${item.lob}` : ""}</span>}>
       {!data ? <Loading /> : (
         <div className="space-y-4">
@@ -305,5 +306,60 @@ function MspSelect({ lobId, value, onChange }: { lobId: number; value?: string; 
   return (
     <Select value={value} onChange={onChange} placeholder="All MSPs"
       options={[...msps.map((x) => ({ value: x.id, label: lobId ? x.name : `${x.name} · ${lobName(x.lob_id)}` })), { value: "none", label: "Unassigned MSP" }]} />
+  );
+}
+
+const EDIT_FIELDS: [string, string][] = [["edr_installed", "EDR installed (inventory)"], ["live", "Live / Non Live"],
+  ["edr_feasible", "EDR feasible (inventory sheet)"], ["remarks", "Remarks"]];
+const YN_TONE: Record<string, string> = { Yes: "text-good-fg", No: "text-crit-fg", Live: "text-good-fg", "Non Live": "text-fg-2" };
+
+/** An inventory value corrected in place: saved at once, the table updates without waiting. */
+function EditCell({ r, field, options }: { r: any; field: string; options: string[] }) {
+  const qc = useQueryClient();
+  const [val, setVal] = React.useState<string>(r[field] || "");
+  React.useEffect(() => setVal(r[field] || ""), [r, field]);
+  const save = async (v: string) => {
+    const old = val;
+    setVal(v);
+    try {
+      await api(`/api/lobs/${r.lob_id}/inventory/${encodeURIComponent(r.item_key)}`, { method: "PATCH", body: { field, value: v } });
+      toast.success(`${r.node_name || r.ip}: ${EDIT_FIELDS.find(([f]) => f === field)?.[1]} → ${v || "blank"}`);
+      qc.invalidateQueries({ predicate: (q) => String(q.queryKey[0]).includes("inventory") || String(q.queryKey[0]).includes("inv-") });
+      qc.invalidateQueries({ refetchType: "none" });
+    } catch (e: any) { setVal(old); toast.error(e.message); }
+  };
+  return (
+    <select value={val} onClick={(e) => e.stopPropagation()} onChange={(e) => save(e.target.value)} title="Change the inventory's value"
+      className={cn("h-6 cursor-pointer rounded border border-transparent bg-transparent px-1 text-[12.5px] font-medium hover:border-border-strong", YN_TONE[val] || "text-muted")}>
+      <option value="">–</option>
+      {options.map((o) => <option key={o} value={o}>{o}</option>)}
+    </select>
+  );
+}
+
+/** Download one editable column for the rows the table shows, change it in Excel, upload it back. */
+function ColumnSheetMenu({ lobId, state }: { lobId: number; state: Record<string, string> }) {
+  const qc = useQueryClient();
+  const ref = React.useRef<HTMLInputElement>(null);
+  const params = Object.fromEntries(Object.entries(state).filter(([k]) => !["page", "size", "sort", "dir", "tab", "id"].includes(k)));
+  const upload = async (f: File) => {
+    const fd = new FormData();
+    fd.append("file", f);
+    try {
+      const r = await apiUpload<any>(`/api/lobs/${lobId}/inventory/column-sheet`, fd, () => {});
+      toast.success(`${fmtN(r.changed)} of ${fmtN(r.rows)} rows updated${r.invalid_count ? ` · ${fmtN(r.invalid_count)} invalid values skipped` : ""}`);
+      qc.invalidateQueries();
+    } catch (e: any) { toast.error(e.message); } finally { if (ref.current) ref.current.value = ""; }
+  };
+  return (
+    <>
+      <Menu width={280} trigger={<Button><FileSpreadsheet /> Edit a column in Excel</Button>} items={[
+        ...EDIT_FIELDS.map(([f, l]) => ({ label: `Download: ${l}`, hint: "the rows matching the current filters", icon: <FileSpreadsheet />,
+          onSelect: () => downloadExcel(`/api/lobs/${lobId}/inventory/column-sheet`, { ...params, field: f }) })),
+        "sep" as const,
+        { label: "Upload edited column", hint: "only changed values are applied", icon: <Upload />, onSelect: () => ref.current?.click() },
+      ]} />
+      <input ref={ref} type="file" accept=".xlsx,.xlsm" className="hidden" onChange={(e) => e.target.files?.[0] && upload(e.target.files[0])} />
+    </>
   );
 }

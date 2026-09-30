@@ -6,7 +6,7 @@ import { ShieldAlert, Upload } from "lucide-react";
 import { api } from "@/lib/api";
 import { useMeta } from "@/lib/hooks";
 import { fmtDt, fmtN, fmtRel } from "@/lib/format";
-import { Button, Callout, Card, CardHeader, KV, Kpi, KpiGrid, Loading, SearchInput, Segmented, Select, Sheet, SectionTitle } from "./ui";
+import { Badge, Button, Callout, Card, CardHeader, KV, Kpi, KpiGrid, Loading, SearchInput, Segmented, Select, Sheet, SectionTitle } from "./ui";
 import { DataTable, SimpleTable } from "./data-table";
 import { EdrBadge, HostLink, Mono, SevCounts, SeverityBadge } from "./badges";
 import { MappedUpload } from "./mapped-upload";
@@ -176,6 +176,8 @@ function FindingsTable({ state, set, fixed, reset, showLob, lobId, meta, onOpen 
         { key: "plugin_id", label: "Plugin" },
         { key: "cve", label: "CVE", sort: false, render: (r: any) => <span className="text-xs">{r.cve}</span> },
         { key: "exploit_ease", label: "Exploit", sort: false, hidden: true },
+        { key: "fix", label: "Fix available", sort: false, render: (r: any) => r.fix?.length ? <span className="inline-flex flex-wrap gap-1">{r.fix.map((e: any) =>
+          <Badge key={e.id} tone={e.installable ? "good" : "neutral"} title={e.installable ? "Satellite erratum, installable now" : "Satellite erratum, not yet installable"}>{e.id}</Badge>)}</span> : <span className="text-muted">–</span> },
         { key: "first_discovered", label: "First discovered", render: (r: any) => fmtDt(r.first_discovered) },
         { key: "last_observed", label: "Last observed", render: (r: any) => fmtDt(r.last_observed) },
         { key: "status", label: "Status", render: (r: any) => r.status === "fixed" ? <span className="text-good-fg">Fixed {fmtDt(r.fixed_at).slice(0, 10)}</span>
