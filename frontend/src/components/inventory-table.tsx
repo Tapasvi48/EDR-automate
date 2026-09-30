@@ -28,7 +28,17 @@ export function inventoryColumns(showLob: boolean, historical: boolean): Column[
       { key: "coverage_status", label: "EDR status", render: (r: any) => <CoverageBadge v={r.coverage_status} /> },
       { key: "exposed", label: "Internet exposed", sort: false, render: (r: any) => r.internet_exposed
         ? <Badge tone="crit" title={(r.exposure_why || []).map((t: string) => "• " + t).join("\n")}>Yes</Badge> : <span className="text-muted">No</span> },
-      { key: "niam", label: "NIAM", sort: false, render: (r: any) => r.niam_ne_ids ? <Badge tone="good" title={`NE ID ${r.niam_ne_ids}`}>Yes</Badge> : <span className="text-muted">No</span> },
+      { key: "niam", label: "NIAM integrated", sort: false, render: (r: any) => {
+        const yes = r.niam_eff ? r.niam_eff === "Yes" : !!r.niam_ne_ids;
+        const fromInv = r.niam_src === "inventory";
+        const clash = fromInv && yes && !r.niam_dump_ne_ids;
+        return (
+          <span className="inline-flex items-center gap-1.5" title={fromInv ? `From the inventory's NIAM Integrated column${clash ? " · this IP is not in the latest NIAM dump" : ""}` : "From the NIAM dump (IP match)"}>
+            {yes ? <Badge tone={clash ? "warn" : "good"}>Yes</Badge> : <span className="text-muted">No</span>}
+            <span className="text-[10px] uppercase tracking-wide text-muted">{fromInv ? "inv" : "dump"}</span>
+          </span>);
+      } },
+      { key: "ne_id", label: "NE ID", sort: false, render: (r: any) => r.niam_ne_ids ? <span className="font-mono text-[11.5px]" title={r.ne_id ? "from the inventory" : "from the NIAM dump"}>{r.niam_ne_ids}</span> : <span className="text-muted">–</span> },
       { key: "last_scan", label: "Last scan", sort: false, render: (r: any) => r.last_scan ? <span title={r.last_scan}>{String(r.last_scan).slice(0, 10)}</span> : <span className="text-muted">Never</span> },
     ] as Column[])),
     { key: "node_type", label: "Node type" },

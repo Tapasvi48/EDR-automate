@@ -67,7 +67,7 @@ HOST_LIST_COLS = """h.aid, h.hostname, h.local_ip, h.connection_ip, h.external_i
     inv.inv_edr_feasible, inv.inv_edr_installed, inv.inv_remarks, inv.inv_verification,
     (SELECT GROUP_CONCAT(n.ne_id, ', ') FROM niam_nodes n WHERE n.present=1 AND n.ip=h.local_ip AND h.local_ip<>'') niam_ne_ids,
     MAX(COALESCE((SELECT MAX(r.exposed) FROM asset_registry r WHERE r.aid=h.aid), 0),
-        COALESCE((SELECT r.exposed FROM asset_registry r WHERE r.ip=h.local_ip AND h.local_ip<>''), 0)) internet_exposed"""
+        COALESCE((SELECT r.exposed FROM asset_registry r WHERE r.ip=COALESCE(NULLIF(h.connection_ip,''), h.local_ip)), 0)) internet_exposed"""
 
 HOST_EXPORT_COLUMNS = [
     ("hostname", "Hostname"), ("aid", "Agent ID"), ("connection_ip", "Connection IP"), ("local_ip", "Local IP"), ("external_ip", "External IP"),
@@ -110,7 +110,7 @@ def build_host_query(p: dict, settings):
     w = []
     if p.get("exposed") in ("0", "1"):  # internet exposed per the asset registry (matrix, NAT / public IP, scans, inventory)
         w.append(("" if p["exposed"] == "1" else "NOT ") + """(EXISTS (SELECT 1 FROM asset_registry r WHERE r.aid=h.aid AND r.exposed=1)
-                  OR EXISTS (SELECT 1 FROM asset_registry r WHERE r.ip=h.local_ip AND h.local_ip<>'' AND r.exposed=1))""")
+                  OR EXISTS (SELECT 1 FROM asset_registry r WHERE r.ip=COALESCE(NULLIF(h.connection_ip,''), h.local_ip) AND r.exposed=1))""")
     state = p.get("state") or "active"
     if state == "gone":
         w.append("h.console_state='removed' AND h.gone_primary=1")  # EDR history: one row per device
@@ -408,6 +408,10 @@ def dashboard(c, settings):
     }
 
 
+# NIAM integrated for an inventory node: what the inventory's "NIAM Integrated" column says; blank -> the IP is in the NIAM dump
+NIAM_EFF = """(ic.niam_integrated='Yes' OR (COALESCE(ic.niam_integrated,'')='' AND COALESCE(ic.ip,'')<>''
+    AND EXISTS (SELECT 1 FROM niam_nodes nn WHERE nn.present=1 AND nn.ip=ic.ip)))"""
+
 COVERAGE_SELECT = """COUNT(ic.item_key) nodes,
     SUM(ic.applicable=1) applicable,
     SUM(ic.applicable=1 AND ic.edr_state IN ('Online','Offline')) installed,
@@ -417,7 +421,7 @@ COVERAGE_SELECT = """COUNT(ic.item_key) nodes,
     SUM(ic.applicable=1 AND ic.edr_state='Hidden') hidden,
     SUM(ic.applicable=1 AND ic.edr_state='Removed') removed,
     SUM(ic.applicable=1 AND ic.edr_state='Offline' AND ic.edr_actual IN ('Removed','Hidden')) offline_removed,
-    SUM(COALESCE(ic.ip,'')<>'' AND EXISTS (SELECT 1 FROM niam_nodes nn WHERE nn.present=1 AND nn.ip=ic.ip)) in_niam,
+    SUM(""" + NIAM_EFF + """) in_niam,
     SUM(COALESCE(ic.live,'')<>'Non Live') live_nodes,
     SUM(COALESCE(ic.live,'')<>'Non Live' AND EXISTS (SELECT 1 FROM vuln_scan_hosts vs WHERE vs.lob_id=ic.lob_id AND vs.ip=ic.ip)) scanned_live,
     SUM(ic.applicable=1 AND ic.edr_state='Offline' AND ic.edr_actual IN ('Removed','Hidden') AND EXISTS (SELECT 1 FROM hosts hx

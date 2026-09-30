@@ -22,6 +22,8 @@ ALIASES = {
     "edr_feasible": ["edrfeasible", "feasible", "edrfeasibility", "feasibility", "edrapplicable", "applicable"],
     "edr_installed": ["edrinstalled", "edr", "edrstatus", "crowdstrikeinstalled", "agentinstalled", "csinstalled", "falconinstalled", "installed"],
     "remarks": ["remarks", "remark", "comments", "comment", "notes", "note", "justification"],
+    "niam_integrated": ["niamintegrated", "niamintegration", "inniam", "niam", "niamstatus", "niamonboarded", "integratedinniam"],
+    "ne_id": ["neid", "niamneid", "networkelementid", "neidniam", "neids"],
 }
 YES = {"yes", "y", "true", "1", "installed", "done", "present", "feasible", "ok", "available", "deployed"}
 NO = {"no", "n", "false", "0", "notinstalled", "not installed", "pending", "notfeasible", "not feasible", "missing", "absent", "not deployed"}
@@ -236,18 +238,26 @@ def build_items(parsed, mapping, key_field, forced_msp=None, forced_type=None, k
         it["live"] = norm_live(it["live"])
         it["edr_feasible"] = norm_yes_no(it["edr_feasible"])
         it["edr_installed"] = norm_yes_no(it["edr_installed"])
+        it["niam_integrated"] = norm_yes_no(it["niam_integrated"])
+        it["ne_id"] = (it["ne_id"] or "").strip()
         it["extra"] = {h: r[idx[h]] for h in extra_headers if r[idx[h]]}
         key = make_key(it, key_field)
         key = key_prefix + key if key else key
         if not key:
             no_key += 1
             continue
+        if key in items and _hash(it) != _hash(items[key]):
+            # same IP (or name) on another row that is NOT a copy (e.g. two node names on one IP): keep both rows. The second
+            # row's key adds its node name (or row number), so it stays stable across uploads; Duplicates tags both by IP.
+            alt = f"{key}#{db.norm_hostname(it['node_name']) or f'row{n}'}"
+            if alt not in items:
+                key = alt
         if key in items:
-            # same key repeated in the file: keep the first row, count the repeats and tag the item as duplicate
+            # an exact copy of a row already read: keep the first, count the repeats and tag the item as duplicate
             dups += 1
             items[key]["file_dups"] = items[key].get("file_dups", 0) + 1
             if dups <= 25:
-                warnings.append(f"Row {n}: duplicate key '{key}' - merged into the first occurrence (row {items[key]['_row']})")
+                warnings.append(f"Row {n}: exact copy of row {items[key]['_row']} - merged")
             continue
         it["_row"] = n
         it["file_dups"] = 0
@@ -255,7 +265,7 @@ def build_items(parsed, mapping, key_field, forced_msp=None, forced_type=None, k
     for it in items.values():
         it.pop("_row", None)
     if dups > 25:
-        warnings.append(f"... {dups - 25} more duplicate rows merged")
+        warnings.append(f"... {dups - 25} more exact copies merged")
     if no_key:
         warnings.append(f"{no_key} rows skipped: no IP / Node Name value")
     return items, warnings
@@ -270,7 +280,7 @@ def merge_scope(prev_items, new_items, scope_msp):
 
 
 def _hash(it):
-    payload = json.dumps([it.get(f, "") for f in FIELDS] + [it.get("extra") or {}], sort_keys=True)
+    payload = json.dumps([it.get(f) or "" for f in FIELDS] + [it.get("extra") or {}], sort_keys=True)
     return hashlib.sha1(payload.encode()).hexdigest()
 
 
@@ -468,7 +478,7 @@ PRESENT = ("Online", "Offline", "Inactive")
 INSTALLED_STATES = ("Online", "Offline")
 # edr_actual (detailed) -> edr_state (what the dashboards count)
 # bumped when matching / state rules change so stored results are recomputed on startup
-MATCH_REV = "17"
+MATCH_REV = "20"
 # EDR has two states: Online, or Offline - offline in the console, or an agent that has left the console (removed by the
 # inactivity policy, deleted, hidden, or known only from an old EDR inventory upload). Only a node with no agent at all is
 # "Not Installed". edr_actual keeps the detail.
@@ -560,6 +570,17 @@ def refresh_matches(c, lob_id=None):
     for r in c.execute("""SELECT DISTINCT ih.ip, ih.aid FROM ip_history ih JOIN hosts h ON h.aid=ih.aid
                           WHERE ih.kind='local' AND h.console_state<>'hidden'"""):
         by_nic.setdefault(r["ip"], set()).add(r["aid"])
+    # NAT: a public IP maps to the private IPs behind it (matrix NAT / source NAT rows, inventory NAT columns), and each agent
+    # reports the public IP it leaves through (external IP)
+    from .commatrix import nat_map
+    nat = nat_map(c)
+    back = {}
+    for pub, privs in nat.items():
+        for p in privs:
+            back.setdefault(p, set()).add(pub)
+    by_ext = {}
+    for r in c.execute("SELECT aid, external_ip FROM hosts WHERE console_state<>'hidden' AND COALESCE(external_ip,'')<>''"):
+        by_ext.setdefault(r["external_ip"], set()).add(r["aid"])
     # for the near-miss hostname check: every CrowdStrike and inventory name, to reject abc -> abc1 when abc2 also exists
     cs_names = {h["hostname_norm"] for h in hosts.values() if h["hostname_norm"]}
     inv_names = {db.norm_hostname(r["node_name"]) for r in c.execute("SELECT node_name FROM inventory_current") if r["node_name"]}
@@ -590,7 +611,9 @@ def refresh_matches(c, lob_id=None):
     #   2. the node IP is another NIC IP of the agent (local IP / IP history) -> match only if the hostname is the same
     #      (case-insensitive, domain dropped: HOST.corp.local = host)
     #   3. same hostname, no IP in common -> match
-    #   4. another NIC IP and a hostname that is only close (abc1 <-> abc, the only abc<n> in CrowdStrike and in the
+    #   4. the IP is a NAT IP (matrix NAT / source NAT, inventory NAT column, or the agent's external IP) or the private IP
+    #      behind one -> match when exactly one active agent sits behind it (hostname matches were taken in step 3)
+    #   5. another NIC IP and a hostname that is only close (abc1 <-> abc, the only abc<n> in CrowdStrike and in the
     #      inventories) -> not a match: listed under Possible matches for review, counted nowhere
     for it in items:
         ip, hn = (it["ip"] or "").strip(), db.norm_hostname(it["node_name"])
@@ -605,7 +628,17 @@ def refresh_matches(c, lob_id=None):
             method, pool = "nic ip + hostname", nic & same_name
         elif same_name:
             method, pool = "hostname", same_name
-        elif nic and hn:
+        elif ip and (nat.get(ip) or back.get(ip) or by_ext.get(ip)):
+            # the inventory lists a NAT IP (or the private IP of a public one): match through the NAT mapping. One agent
+            # behind it -> match; several (a shared NAT / egress IP) -> only the one whose hostname is the same
+            via = set()
+            for x in nat.get(ip, set()) | back.get(ip, set()):
+                via |= by_conn.get(x, set()) | by_nic.get(x, set())
+            via |= by_ext.get(ip, set())
+            active_via = {a for a in via if hosts[a]["console_state"] == "active"}
+            if len(active_via) == 1:
+                method, pool = "nat ip", active_via
+        if not pool and nic and hn:
             for aid in sorted(nic, key=lambda a: rank(a)):
                 why = near_hostname(hn, hosts[aid]["hostname_norm"], cs_names, inv_names)
                 if why:

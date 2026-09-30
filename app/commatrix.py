@@ -525,6 +525,7 @@ def comm_uploads():
                          untrust / any, a NAT / pool / exposure-register sheet
             public       listed as a public / destination-NAT / pool IP
             public_src   source NAT IP (the public address our traffic leaves from)
+            snat         source of a row with a source NAT IP: leaves through that public IP -> internet exposed
             outbound     source of a rule whose destination is the internet (any / internet zone / a public IP not ours)
             internet_src source of an inbound internet rule (a partner or 'any'; ours only if it is one of our public IPs)
             internal     only in internal flows"""
@@ -582,7 +583,8 @@ def matrix_ips(c):
             elif col == "src_nat":
                 role = "public_src"
             else:
-                role = "internet_src" if r["inbound_internet"] else "outbound" if to_internet else "internal"
+                role = ("internet_src" if r["inbound_internet"] else "snat" if parse_addresses(r["src_nat"])[1]
+                        else "outbound" if to_internet else "internal")
             for n0 in nets:
                 # small ranges / subnets (up to 64 addresses) are listed IP by IP, so each can be matched to inventory
                 parts = [ipaddress.ip_network(a) for a in n0] if n0.version == 4 and 1 < n0.num_addresses <= 64 else [n0]
@@ -625,7 +627,7 @@ def matrix_ips(c):
                          in_edr=sum(1 for ip in inside if reg[ip]["in_edr"]),
                          lobs=", ".join(sorted({x for ip in inside for x in (reg[ip]["lobs"] or "").split(", ") if x}))[:120] or None)
         roles = e["roles"]
-        cat = ("exposed" if ours and roles & {"exposed", "public"} else "outbound" if ours and "outbound" in roles
+        cat = ("exposed" if ours and roles & {"exposed", "public", "snat", "public_src"} else "outbound" if ours and "outbound" in roles
                else "external" if not ours and e["kind"] != "name" else "unknown" if not ours else "internal")
         out.append({"address": e["address"][5:] if e["kind"] == "name" else e["address"], "kind": e["kind"], "ours": ours, "why": why,
                     "category": cat, "roles": sorted(roles), "rules": len(e["rules"]), "rule_ids": ", ".join(sorted(e["rules"])[:6]),
@@ -789,3 +791,33 @@ def comm_template():
     sheets = [(name, [(f"c{i}", h) for i, h in enumerate(hd)], [{f"c{i}": v for i, v in enumerate(r)} for r in rows]) for name, _, hd, rows in TEMPLATE_SHEETS]
     sheets.append(("How to fill", [("k", "Topic"), ("v", "How")], [{"k": k, "v": v} for k, v in TEMPLATE_GUIDE]))
     return xlsx_response(sheets, "template_communication_matrix")
+
+
+
+def nat_map(c):
+    """Public / NAT IP -> the private IPs behind it, from every NAT source: matrix rows (destination NAT: dst_nat -> dst on
+    internet-facing rows; source NAT: src_nat <- src on any row) and inventory Public / NAT IP columns. Used to match
+    inventory rows that list the public IP to the CrowdStrike agent that reports the private one, and the other way round."""
+    from .registry import inventory_exposure, is_public
+    out = {}
+
+    def add(pub, priv_text):
+        for n in parse_addresses(priv_text)[1]:
+            if n.num_addresses <= 1024:
+                for a in (n if n.num_addresses > 1 else [n.network_address]):
+                    a = str(a)
+                    if a != pub:
+                        out.setdefault(pub, set()).add(a)
+
+    for r in load_rules(c):
+        for col, src in (("dst_nat", "dst"), ("src_nat", "src")):
+            if col == "dst_nat" and not r["inbound_internet"]:
+                continue
+            for n in parse_addresses(r[col])[1]:
+                if n.num_addresses == 1 and is_public(str(n.network_address)):
+                    add(str(n.network_address), r[src])
+    for r in c.execute("SELECT ip, extra FROM inventory_current WHERE COALESCE(ip,'')<>'' AND extra IS NOT NULL"):
+        for p in inventory_exposure(db.jloads(r["extra"], {}))[1]:
+            if p != r["ip"]:
+                out.setdefault(p, set()).add(r["ip"])
+    return out

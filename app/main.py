@@ -696,9 +696,10 @@ def tags_remove(lob_id: int, data: dict = Body(...)):
 
 INV_BASE_COLS = [("lob", "LOB"), ("msp", "MSP"), ("ip", "IP"), ("node_name", "Node Name"), ("node_type", "Node Type"), ("domain", "Domain"),
                  ("live", "Live/Non Live"), ("os", "OS"), ("edr_feasible", "EDR Feasible"),
-                 ("edr_installed", "EDR Installed (Inventory)"), ("remarks", "Remarks")]
+                 ("edr_installed", "EDR Installed (Inventory)"), ("remarks", "Remarks"), ("niam_integrated", "NIAM Integrated (Inventory)"),
+                 ("ne_id", "NE ID (Inventory)")]
 INV_STATUS_COLS = [("coverage_status", "EDR Status"), ("exposed_text", "Internet Exposed"), ("exposure_text", "Exposure Evidence"), ("os_resolved", "OS (resolved)"), ("os_source", "OS Source"),
-                   ("feasible", "EDR Feasible (decided)"), ("feasible_reason", "Feasibility Reason"), ("niam_text", "In NIAM"), ("niam_ne_ids", "NIAM NE ID"), ("last_scan", "Last Vulnerability Scan"), ("change_tag", "Change Tag"), ("first_version_no", "First Seen in Version"),
+                   ("feasible", "EDR Feasible (decided)"), ("feasible_reason", "Feasibility Reason"), ("niam_text", "NIAM Integrated (effective)"), ("niam_ne_ids", "NE ID (effective)"), ("niam_src_text", "NIAM Source"), ("last_scan", "Last Vulnerability Scan"), ("change_tag", "Change Tag"), ("first_version_no", "First Seen in Version"),
                    ("last_changed_version_no", "Last Changed in Version"), ("edr_actual", "EDR Actual Status"),
                    ("verification", "Verification"), ("match_method", "Match Method"), ("cs_hostname", "Falcon Hostname"),
                    ("cs_last_seen", "Falcon Last Seen"), ("cs_agent_version", "Sensor Version"), ("cs_os", "Falcon OS"),
@@ -723,7 +724,9 @@ def _inventory_query(p, lob_id):
     else:
         frm = "inventory_current ic JOIN lobs l ON l.id=ic.lob_id"
         cols = """l.name lob, ic.*,
-            (SELECT GROUP_CONCAT(n.ne_id, ', ') FROM niam_nodes n WHERE n.present=1 AND n.ip=ic.ip AND COALESCE(ic.ip,'')<>'') niam_ne_ids,
+            (SELECT GROUP_CONCAT(n.ne_id, ', ') FROM niam_nodes n WHERE n.present=1 AND n.ip=ic.ip AND COALESCE(ic.ip,'')<>'') niam_dump_ne_ids,
+            CASE WHEN """ + queries.NIAM_EFF + """ THEN 'Yes' ELSE 'No' END niam_eff,
+            CASE WHEN COALESCE(ic.niam_integrated,'')<>'' THEN 'inventory' ELSE 'dump' END niam_src,
             (SELECT MAX(s.scanned_at) FROM vuln_scan_hosts s WHERE s.lob_id=ic.lob_id AND s.ip=ic.ip) last_scan,
             (SELECT r.exposed FROM asset_registry r WHERE r.ip=ic.ip AND COALESCE(ic.ip,'')<>'') internet_exposed,
             (SELECT r.exposure FROM asset_registry r WHERE r.ip=ic.ip AND COALESCE(ic.ip,'')<>'' AND r.exposed=1) exposure_why"""  # msp name is on the row
@@ -769,7 +772,7 @@ def _inventory_query(p, lob_id):
             else:
                 w.append("ic.msp_id=?")
                 params.append(int(p["msp"]))
-        niam_x = "EXISTS (SELECT 1 FROM niam_nodes n WHERE n.present=1 AND n.ip=ic.ip AND COALESCE(ic.ip,'')<>'')"
+        niam_x = queries.NIAM_EFF  # inventory column first, NIAM dump when it is blank
         scan_x = "EXISTS (SELECT 1 FROM vuln_scan_hosts s WHERE s.lob_id=ic.lob_id AND s.ip=ic.ip)"
         if p.get("niam") in ("0", "1"):
             w.append(niam_x if p["niam"] == "1" else f"NOT {niam_x}")
@@ -886,6 +889,7 @@ def lob_inventory(lob_id: int, request: Request):
     for r in rows:
         r["extra"] = db.jloads(r.get("extra"), {})
         r["exposure_why"] = [e.get("text") for e in db.jloads(r.get("exposure_why"), []) or []]
+        r["niam_ne_ids"] = r.get("ne_id") or r.get("niam_dump_ne_ids")
     return {"total": total, "rows": rows, "page": page, "size": size}
 
 
@@ -903,7 +907,9 @@ def lob_inventory_export(lob_id: int, request: Request):
             if k not in extra_keys:
                 extra_keys.append(k)
             r["x::" + k] = ex[k]
-        r["niam_text"] = "Yes" if r.get("niam_ne_ids") else "No"
+        r["niam_text"] = r.get("niam_eff") or ("Yes" if r.get("niam_ne_ids") else "No")
+        r["niam_ne_ids"] = r.get("ne_id") or r.get("niam_dump_ne_ids") or r.get("niam_ne_ids")
+        r["niam_src_text"] = {"inventory": "Inventory column", "dump": "NIAM dump (IP match)"}.get(r.get("niam_src"), "")
         r["exposed_text"] = "Yes" if r.get("internet_exposed") else "No"
         r["exposure_text"] = "; ".join(e.get("text", "") for e in db.jloads(r.get("exposure_why"), []) or [])
     columns = INV_BASE_COLS + ([] if p.get("version_id") else INV_STATUS_COLS) + [("x::" + k, k) for k in extra_keys]

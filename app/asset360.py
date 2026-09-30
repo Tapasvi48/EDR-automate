@@ -58,10 +58,10 @@ def profile(c, q):
     ips = {q} if ip_q else set()
     agents = []
     if ip_q:
-        agents = db.rows(c, f"SELECT {AGENT_COLS} FROM hosts h WHERE h.console_state<>'hidden' AND (h.local_ip=? OR h.external_ip=? OR h.connection_ip=?)", (q, q, q))
+        agents = db.rows(c, f"SELECT {AGENT_COLS} FROM hosts h WHERE h.console_state<>'hidden' AND (h.connection_ip=? OR h.local_ip=?)", (q, q))
     else:
         agents = db.rows(c, f"SELECT {AGENT_COLS} FROM hosts h WHERE h.console_state<>'hidden' AND (h.aid=? OR h.hostname_norm=?)", (q.lower(), hn))
-        ips |= {a["local_ip"] for a in agents if a["local_ip"]}
+        ips |= {a["connection_ip"] or a["local_ip"] for a in agents if a["connection_ip"] or a["local_ip"]}
     inv = db.rows(c, f"""SELECT l.name lob, l.id lob_id, ic.* FROM inventory_current ic JOIN lobs l ON l.id=ic.lob_id
         WHERE {'ic.ip=?' if ip_q else 'LOWER(ic.node_name)=? OR LOWER(ic.node_name) LIKE ?'}""",
                      (q,) if ip_q else (q.lower(), hn + ".%"))
@@ -73,7 +73,8 @@ def profile(c, q):
             inv = db.rows(c, f"""SELECT l.name lob, l.id lob_id, ic.* FROM inventory_current ic JOIN lobs l ON l.id=ic.lob_id
                 WHERE ic.ip IN ({_in(len(ips))})""", list(ips))
         if not agents and ips:  # found only via inventory / NIAM -> agents on its IPs
-            agents = db.rows(c, f"SELECT {AGENT_COLS} FROM hosts h WHERE h.console_state<>'hidden' AND h.local_ip IN ({_in(len(ips))})", list(ips))
+            agents = db.rows(c, f"""SELECT {AGENT_COLS} FROM hosts h WHERE h.console_state<>'hidden'
+                                    AND (h.connection_ip IN ({_in(len(ips))}) OR h.local_ip IN ({_in(len(ips))}))""", list(ips) * 2)
     ipl = sorted(ips)
     vulns, counts, scans, history, niam, risk, ports = [], {}, [], [], [], [], []
     if ipl:
@@ -283,18 +284,18 @@ def last_known_good(c, ipl, hn, aids):
 
 def internet_detail(c, ipl, agents, flows):
     """How (and whether) the asset is reachable from the internet, method by method."""
-    from .registry import is_cgnat, is_public
+    from .registry import exposed_by_itself, is_cgnat, is_public
     reg = db.rows(c, f"""SELECT ip, exposed, whitelisted, cgnat, exposure, public_ips, nat_of FROM asset_registry
                          WHERE ip IN ({_in(len(ipl))})""", ipl) if ipl else []
     reasons = [e for r in reg for e in json.loads(r["exposure"] or "[]")]
-    public = sorted({p for r in reg for p in (r["public_ips"] or "").split(", ") if p} | {ip for ip in ipl if is_public(ip)})
+    public = sorted({p for r in reg for p in (r["public_ips"] or "").split(", ") if p} | {ip for ip in ipl if exposed_by_itself(ip)})
     verdict = ("exposed" if any(r["exposed"] for r in reg) else "whitelisted" if any(r["whitelisted"] for r in reg)
                else "cgnat" if any(r["cgnat"] for r in reg) else "not_exposed")
     # method 1: communication matrix - inbound Internet / ISP rules, via which firewall / ISP link, zones and NAT
     matrix = [{k: f.get(k) for k in ("rule_id", "direction", "src_zone", "src", "src_nat", "isp", "firewall", "fw_rule", "dst_zone",
                                      "dst_nat", "dst", "protocol", "ports", "service", "action", "cr", "valid_till", "remarks")}
-              | {"path": "ISP link" if f.get("isp") else "Firewall" if f.get("firewall") else "Rule"}
-              for f in flows if f.get("inbound_internet")]
+              | {"path": "Source NAT" if not f.get("inbound_internet") else "ISP link" if f.get("isp") else "Firewall" if f.get("firewall") else "Rule"}
+              for f in flows if f.get("inbound_internet") or (f.get("src_nat") and f.get("role") == "Source")]
     # method 2: a VA scan caught a public IP of the asset (its own, or its public / NAT IP)
     scanned = []
     for ip in public:
@@ -304,7 +305,7 @@ def internet_detail(c, ipl, agents, flows):
                         **{k: (a[k] or 0) if a else 0 for k in ("crit", "high", "med", "low")}})
     # method 3: what CrowdStrike reports - the agent's own interface IPs and the public (egress) IP it connects from
     cs = [{"aid": a["aid"], "hostname": a["hostname"], "local_ip": a["local_ip"], "connection_ip": a.get("connection_ip"),
-           "external_ip": a["external_ip"], "public_on_nic": bool(a["local_ip"] and is_public(a["local_ip"])),
+           "external_ip": a["external_ip"], "public_on_nic": exposed_by_itself(a.get("connection_ip")),
            "egress_public": bool(a["external_ip"] and is_public(a["external_ip"]))} for a in agents]
     # real exposure check: ports the scan saw open on each public IP vs the ports the inbound rules allow
     shadow = []
@@ -396,11 +397,35 @@ def asset(q: str = ""):
             rows = range_rows(c, q)
             return {"mode": "range", "rows": rows, "total": len(rows)}
         p = profile(c, q)
+        if db.is_ip(q):
+            behind = nat_rows(c, db.canon_ip(q))
+            if behind and not p["summary"]["found"]:  # a NAT / egress IP only: list the hosts behind it
+                return {"mode": "range", "rows": behind, "total": len(behind), "by_nat": db.canon_ip(q)}
+            if behind:
+                p["behind_nat"] = behind
         if not p["summary"]["found"] and not db.is_ip(q) and len(q) >= 2:
             rows = name_rows(c, q)  # part of a hostname / node name: pick from the list
             if rows:
                 return {"mode": "range", "rows": rows, "total": len(rows), "by_name": True}
         return p
+
+
+def nat_rows(c, ip):
+    """Hosts behind a public / NAT IP: registry rows that list it as their public / NAT IP (matrix destination or source
+    NAT, inventory NAT column) and CrowdStrike agents that leave through it (external IP)."""
+    ips = {r["ip"] for r in c.execute("SELECT ip FROM asset_registry WHERE ip IS NOT NULL AND ip<>? AND (', ' || public_ips || ', ') LIKE ?",
+                                      (ip, f"%, {ip}, %"))}
+    ips |= {r["ip"] for r in c.execute("""SELECT COALESCE(NULLIF(connection_ip,''), local_ip) ip FROM hosts WHERE console_state='active' AND external_ip=?
+                                        AND COALESCE(NULLIF(connection_ip,''), local_ip, '') NOT IN ('', ?) LIMIT 2000""", (ip, ip))}
+    out = []
+    for x in sorted(ips, key=lambda i: ip_sort_key({"ip": i}))[:500]:
+        out += range_rows(c, _exact(x))
+    return out
+
+
+def _exact(ip):
+    """A single IP as a one-address network, so range_rows does not read 10.20.0.11 as the prefix 10.20.0.11x."""
+    return ip + ("/128" if ":" in ip else "/32")
 
 
 def name_rows(c, q):
@@ -410,7 +435,7 @@ def name_rows(c, q):
     ips |= {r["ip"] for r in c.execute("SELECT ip FROM inventory_current WHERE LOWER(node_name) LIKE ? AND COALESCE(ip,'')<>'' LIMIT 300", (like,))}
     out = []
     for ip in sorted(ips, key=lambda i: ip_sort_key({"ip": i}))[:300]:
-        out += range_rows(c, ip)
+        out += range_rows(c, _exact(ip))
     return out
 
 
@@ -510,7 +535,7 @@ def evidence_pack(q, p):
          sat.get("mbss") or []),
         ("Splunk logging", [("host", "Host"), ("index", "Index"), ("sourcetype", "Sourcetype"), ("count", "Events"), ("last_seen", "Last Event")],
          spl.get("rows") or []),
-        ("EDR agents", [("hostname", "Hostname"), ("aid", "Agent ID"), ("local_ip", "IP"), ("edr_status", "Status"), ("os_version", "OS"),
+        ("EDR agents", [("hostname", "Hostname"), ("aid", "Agent ID"), ("connection_ip", "Connection IP"), ("local_ip", "Local IP"), ("edr_status", "Status"), ("os_version", "OS"),
                         ("agent_version", "Sensor"), ("lobs", "LOB"), ("msps", "MSP"), ("first_seen", "First Seen"), ("last_seen", "Last Seen")], p["agents"]),
         ("Inventory", [("lob", "LOB"), ("msp", "MSP"), ("ip", "IP"), ("node_name", "Node Name"), ("node_type", "Node Type"), ("live", "Live"),
                        ("edr_feasible", "EDR Feasible"), ("edr_installed", "EDR Installed"), ("coverage_status", "EDR Status")], p["inventory"]),

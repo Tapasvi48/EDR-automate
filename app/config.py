@@ -90,6 +90,8 @@ INVENTORY_FIELDS = [
     ("edr_feasible", "EDR Feasible"),
     ("edr_installed", "EDR Installed"),
     ("remarks", "Remarks"),
+    ("niam_integrated", "NIAM Integrated"),   # Yes / No; blank -> taken from the NIAM dump (IP match)
+    ("ne_id", "NE ID"),                       # blank -> NE ID(s) of the IP in the NIAM dump
 ]
 INVENTORY_FIELD_KEYS = [k for k, _ in INVENTORY_FIELDS]
 

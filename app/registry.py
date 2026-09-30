@@ -10,8 +10,10 @@ Internet exposure (any one is enough; every reason is kept so the page can expla
   inventory   - a column such as "Internet Facing" / "Exposure" / "Zone" says yes / DMZ / internet, or a
                 "Public IP" / "NAT IP" column maps the node to a public address
   scan        - the VA scan covered a public IP: the IP itself, or the public / NAT IP of an inventory node
-  public ip   - the asset's own IP is globally routable and comes from an inventory, the NIAM dump or a VA scan
-                (a CrowdStrike interface IP alone is not evidence: agents report whatever address their NIC has)
+  public ip   - the asset's own IPv4 is globally routable and comes from an inventory, the NIAM dump or a VA scan (a global
+                IPv6 address alone is NOT evidence: IPv6 assets are exposed only through the matrix / an explicit column / a mark)
+  edr         - a CrowdStrike agent's CONNECTION IP (the interface it reaches the cloud from) is public. Agents are listed under
+                their connection IP; the local IP and the external (egress / NAT) IP are never exposure evidence
 Not counted as exposed:
   whitelist   - IPs / subnets listed on the Internet exposed page (known, accepted addresses)
   CGNAT       - 100.64.0.0/10 (carrier-grade NAT, RFC 6598): not directly reachable; shown on their own tab"""
@@ -104,6 +106,13 @@ def is_public(ip):
     return a.is_global or (a.version == 4 and any(a in n for n in _DOC_V4))
 
 
+def exposed_by_itself(ip):
+    """Is the address on its own evidence of internet exposure? Only a public IPv4. A global IPv6 address is normal inside
+    networks (no NAT), so an IPv6 asset is exposed only when the communication matrix (or an explicit inventory column /
+    manual mark) says so."""
+    return bool(ip) and ":" not in ip and is_public(ip)
+
+
 def _norm(h):
     return re.sub(r"[^a-z0-9]", "", str(h or "").lower())
 
@@ -143,7 +152,7 @@ def refresh(c):
             s["names"].append(n)
 
     WHERE = {"inventory": "Inventory", "matrix": "Communication matrix", "scan": "VA scan", "ip": "Public IP", "indirect": "Indirect range",
-             "manual": "Marked manually"}
+             "manual": "Marked manually", "edr": "CrowdStrike"}
 
     def reason(s, src, text, where=None):
         """where: short label of the source for the 'Exposed by' column (Inventory · LOB, Matrix · workbook › sheet…)."""
@@ -155,12 +164,17 @@ def refresh(c):
     # --- LOB inventories
     for r in db.rows(c, """SELECT ic.lob_id, l.name lob, ic.msp_id, ic.msp, ic.ip, ic.node_name, ic.node_type, ic.live, ic.applicable,
                           ic.edr_state, ic.matched_aid, ic.cs_hostname, ic.cs_last_seen, ic.extra, ic.item_key,
-                          ic.os_resolved, ic.os_source, ic.feasible, ic.feasible_reason
+                          ic.os_resolved, ic.os_source, ic.feasible, ic.feasible_reason, ic.niam_integrated, ic.ne_id
                           FROM inventory_current ic JOIN lobs l ON l.id=ic.lob_id ORDER BY ic.feasible='Yes' DESC"""):
         key = r["ip"] or "name:" + (db.norm_hostname(r["node_name"]) or r["item_key"])
         s = slot(key, r["ip"] or None)
         s["in_inventory"] = 1
         s["lobs"][r["lob_id"]] = r["lob"]
+        if r["niam_integrated"] in ("Yes", "No"):  # the inventory's NIAM column wins over the dump (Yes on any row counts)
+            s["niam_inv"] = "Yes" if "Yes" in (s.get("niam_inv"), r["niam_integrated"]) else "No"
+        for ne in (r["ne_id"] or "").replace(";", ",").split(","):
+            if ne.strip():
+                s["ne_ids"].add(ne.strip())
         if r["msp"]:
             s["msps"][r["msp_id"] or 0] = r["msp"]
         add_name(s, r["node_name"])
@@ -182,11 +196,15 @@ def refresh(c):
         for p in nat:
             if r["ip"] and p != r["ip"]:
                 nat_pairs.append((key, p, "inventory", f"Inventory ({r['lob']})", f"Inventory · {r['lob']}"))
-    # --- CrowdStrike: agents in the console and devices in EDR history (hidden hosts ignored)
-    for h in db.rows(c, """SELECT aid, hostname, local_ip, console_state, online_state, last_seen, removal_type, os_version FROM hosts
-                          WHERE local_ip<>'' AND (console_state='active' OR (console_state='removed' AND gone_primary=1))
+    # --- CrowdStrike: agents in the console and devices in EDR history (hidden hosts ignored). An agent is listed under its
+    # CONNECTION IP (the interface it reaches the CrowdStrike cloud from; local IP only when there is none). An agent already
+    # matched to an inventory node stays on that node's row. The local IP is never exposure evidence; a public connection IP is.
+    placed = {s["aid"]: k for k, s in reg.items() if s.get("aid")}
+    for h in db.rows(c, """SELECT aid, hostname, COALESCE(NULLIF(connection_ip,''), local_ip) ip, connection_ip, console_state, online_state,
+                          last_seen, removal_type, os_version FROM hosts
+                          WHERE COALESCE(NULLIF(connection_ip,''), local_ip, '')<>'' AND (console_state='active' OR (console_state='removed' AND gone_primary=1))
                           ORDER BY console_state='active' DESC, online_state='online' DESC, last_seen DESC"""):
-        s = slot(h["local_ip"], h["local_ip"])
+        s = reg[placed[h["aid"]]] if h["aid"] in placed else slot(h["ip"], h["ip"])
         s["in_edr"] = 1
         st = "Online" if h["console_state"] == "active" and h["online_state"] == "online" else "Offline"
         if s["edr_status"] is None or EDR_RANK.get(st, 9) < EDR_RANK.get(s["edr_status"], 9):
@@ -197,6 +215,9 @@ def refresh(c):
         add_name(s, h["hostname"])
         if not s["os"] and h["os_version"]:
             s["os"], s["os_source"] = h["os_version"], "edr"
+        if exposed_by_itself(h["connection_ip"]) and h["console_state"] == "active":
+            reason(s, "edr", f"CrowdStrike: {h['hostname']} connects from public IP {h['connection_ip']} (its own interface)",
+                   "CrowdStrike · connection IP")
     # --- vulnerability scans
     from .vulns import scan_os
     va_os = scan_os(c)
@@ -216,6 +237,9 @@ def refresh(c):
         if n["ne_id"]:
             s["ne_ids"].add(n["ne_id"])
         add_name(s, (db.jloads(n["extra"], {}) or {}).get("NE Name"))
+    for s in reg.values():  # NIAM integrated: the inventory column when filled, else the dump (set above)
+        if s.get("niam_inv"):
+            s["in_niam"] = 1 if s["niam_inv"] == "Yes" else 0
     # --- communication matrix, every sheet type: internet-facing rows expose what they point at. A row matches an asset by
     # its private / internal IP (or a subnet / range containing it), its public / NAT IP, or its host name.
     from .addrparse import parse_addresses
@@ -245,6 +269,15 @@ def refresh(c):
     KIND = {"rules": "Communication matrix rule", "nat_map": "NAT sheet", "public_pool": "Public IP pool", "sod_nat": "SOD / NAT rule",
             "exposure": "Exposure register"}
     for rule in load_rules(c):
+        # source NAT: the sources of a row reach the internet through a public NAT IP -> internet exposed, even when many
+        # hosts share that one public IP; the public IP is linked to every host behind it
+        snat = [str(n.network_address) for n in parse_addresses(rule["src_nat"])[1] if n.num_addresses == 1 and is_public(str(n.network_address))]
+        if snat:
+            where = "Matrix · " + (rule.get("sheet") or rule.get("workbook") or "rules")
+            for k in hits_for(rule["src"]):
+                for p in snat:
+                    if p != reg[k]["ip"]:
+                        nat_pairs.append((k, p, "matrix", f"Source NAT {rule['rule_id']} (sources leave through {p})", where))
         if not rule["inbound_internet"]:
             continue
         st = rule.get("sheet_type") or "rules"
@@ -283,7 +316,7 @@ def refresh(c):
                 reason(s, "scan", f"VA scan of its public IP {p}: {n_open} open findings")
     # --- the asset's own IP is public
     for s in reg.values():
-        if s["ip"] and is_public(s["ip"]) and (s["in_inventory"] or s["in_niam"] or s["in_scan"]):
+        if exposed_by_itself(s["ip"]) and (s["in_inventory"] or s["in_niam"] or s["in_scan"]):
             src = "scan" if s["in_scan"] else "ip"
             reason(s, src, "Public IP, covered by a VA scan (external scan)" if s["in_scan"] else "Public IP address")
     # --- EDR feasibility of assets in no inventory: CrowdStrike has it -> feasible (and applicable); anything else found only
@@ -517,6 +550,7 @@ def exposure_summary():
         s = db.one(c, """SELECT SUM(exposed) exposed, SUM(exposed AND exposure_src LIKE '%,inventory,%') by_inventory,
             SUM(exposed AND exposure_src LIKE '%,scan,%') by_scan,
             SUM(exposed AND exposure_src LIKE '%,ip,%') by_ip, SUM(exposed AND exposure_src LIKE '%,matrix,%') by_matrix, SUM(exposed AND exposure_src LIKE '%,manual,%') by_manual,
+            SUM(exposed AND exposure_src LIKE '%,edr,%') by_edr,
             SUM(exposed AND edr_status='Not Installed') no_edr,
             SUM(exposed AND (crit + high) > 0) crit_high, SUM(exposed AND in_inventory=0) not_in_inventory,
             SUM(exposed AND in_inventory=1) in_inventory,
@@ -547,7 +581,7 @@ def exposure_shadow():
         owners = {}
         for r in db.rows(c, "SELECT ip, name, nat_of, lobs FROM asset_registry"):
             owners[r["ip"]] = r
-        for ip in sorted({r["ip"] for r in c.execute("SELECT DISTINCT ip FROM vuln_findings") if is_public(r["ip"])}):
+        for ip in sorted({r["ip"] for r in c.execute("SELECT DISTINCT ip FROM vuln_findings") if exposed_by_itself(r["ip"])}):
             o = owners.get(ip) or {}
             inner = [x for x in (o.get("nat_of") or "").split(", ") if x]
             ports, rules = shadow_ports(c, ip, inner)

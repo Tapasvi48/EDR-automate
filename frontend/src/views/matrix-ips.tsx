@@ -11,7 +11,7 @@ import { EdrBadge } from "@/components/badges";
 
 const ROLE: Record<string, [string, string]> = {
   exposed: ["crit", "Reached from internet"], public: ["violet", "Public / NAT IP"], public_src: ["violet", "Source NAT IP"],
-  outbound: ["warn", "Goes out to internet"], internet_src: ["neutral", "Internet source"], internal: ["neutral", "Internal flow"],
+  outbound: ["warn", "Goes out to internet"], snat: ["crit", "NATed to a public IP"], internet_src: ["neutral", "Internet source"], internal: ["neutral", "Internal flow"],
 };
 const VIEWS: [string, string, string][] = [
   ["exposed", "Ours & internet exposed", "crit"], ["outbound", "Ours & talking to internet", "warn"], ["public", "Our public / NAT IPs", "violet"],
@@ -82,6 +82,7 @@ export function MatrixIpsPanel({ state, set, replaceAll, keep = {} }: { state: R
               <ul className="mt-1 list-disc space-y-0.5 pl-5 text-fg-2">
                 <li><b>Reached from internet</b>: destination of an internet-facing row (inbound rule from Internet / ISP / untrust / any, or a NAT, pool or exposure-register sheet)</li>
                 <li><b>Public / NAT IP</b>: listed as the public or destination-NAT address</li>
+                <li><b>NATed to a public IP</b>: source of a row with a Source NAT IP; it leaves through that public IP, so it counts as internet exposed (also when many hosts share the one NAT IP)</li>
                 <li><b>Goes out to internet</b>: source of a rule whose destination is any, an internet zone or a public IP that is not ours</li>
                 <li><b>Internet source</b>: source of an inbound rule (a partner or any)</li>
               </ul>

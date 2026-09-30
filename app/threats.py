@@ -226,11 +226,11 @@ def top_risks(c, d_from, d_to, lob="", limit=10, exposed_only=False):
     g = Graph(c)
     cand = [x for x in scored[: max(limit * 5, 50)] if x[0] > 0]
     from .commatrix import shadow_ports
-    from .registry import is_public
+    from .registry import exposed_by_itself, is_public
     for x in cand:
         a, ext = x[1], x[2]
         if a["exposed"]:
-            pubs = [p for p in (a["public_ips"] or "").split(", ") if p] + ([a["ip"]] if a["ip"] and is_public(a["ip"]) else [])
+            pubs = [p for p in (a["public_ips"] or "").split(", ") if p] + ([a["ip"]] if exposed_by_itself(a["ip"]) else [])
             ext["shadow"] = sum(sum(1 for p in shadow_ports(c, pub, [a["ip"]])[0] if p["shadow"] and p["open"]) for pub in pubs[:3])
             if a["ip"]:
                 _, _, targets = g.summary(a["ip"], 2)
@@ -436,8 +436,8 @@ def asset_posture(ips: str = "", names: str = "", aids: str = ""):
         shadow = 0
         if a and a["exposed"]:
             from .commatrix import shadow_ports
-            from .registry import is_public
-            pubs = [x for x in (a["public_ips"] or "").split(", ") if x] + ([a["ip"]] if is_public(a["ip"]) else [])
+            from .registry import exposed_by_itself, is_public
+            pubs = [x for x in (a["public_ips"] or "").split(", ") if x] + ([a["ip"]] if exposed_by_itself(a["ip"]) else [])
             shadow = sum(sum(1 for q in shadow_ports(c, pub, [a["ip"]])[0] if q["shadow"] and q["open"]) for pub in pubs[:3])
     if not a:
         return {"score": None, "det": det, "ndr": ndr, "sat": sat, "blast": blast}

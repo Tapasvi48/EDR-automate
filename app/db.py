@@ -546,7 +546,10 @@ MIGRATIONS = [
     ("comm_rules", "lob", "TEXT"), ("comm_rules", "domain", "TEXT"), ("comm_rules", "msp", "TEXT"), ("comm_rules", "location", "TEXT"),
     ("comm_rules", "workbook", "TEXT"), ("comm_rules", "sheet", "TEXT"), ("comm_rules", "sheet_type", "TEXT"),
     ("comm_uploads", "sheets", "TEXT"),               # JSON: [{sheet, type, rows}]
-    ("comm_rules", "inbound_auto", "INTEGER"),        # internet-facing as computed from the row; inbound_internet may be a manual override
+    ("comm_rules", "inbound_auto", "INTEGER"),
+    ("inventory_rows", "niam_integrated", "TEXT"), ("inventory_rows", "ne_id", "TEXT"),
+    ("inventory_current", "niam_integrated", "TEXT"),  # as the inventory says; blank -> NIAM dump decides
+    ("inventory_current", "ne_id", "TEXT"),        # internet-facing as computed from the row; inbound_internet may be a manual override
 ]
 
 
@@ -787,7 +790,11 @@ def init_db():
         c.execute("""INSERT OR IGNORE INTO templates(name, description, key_field, mapping, created_at, updated_at)
                      VALUES (?,?,?,?,?,?)""",
                   (config.STANDARD_TEMPLATE, "Default inventory layout: IP, Node Name, MSP, Node Type, Domain, Live/Non Live, "
-                   "OS, EDR Feasible, EDR Installed, Remarks", "ip", json.dumps(dict(config.INVENTORY_FIELDS)), now_iso(), now_iso()))
+                   "OS, EDR Feasible, EDR Installed, Remarks, NIAM Integrated, NE ID", "ip", json.dumps(dict(config.INVENTORY_FIELDS)), now_iso(), now_iso()))
+        # built-in template: keep its columns in step with the standard fields (new fields added later)
+        c.execute("UPDATE templates SET mapping=?, description=? WHERE name=?",
+                  (json.dumps(dict(config.INVENTORY_FIELDS)), "Default inventory layout: IP, Node Name, MSP, Node Type, Domain, Live/Non Live, "
+                   "OS, EDR Feasible, EDR Installed, Remarks, NIAM Integrated, NE ID", config.STANDARD_TEMPLATE))
 
 
 # (table, ip column, ip number column or None)

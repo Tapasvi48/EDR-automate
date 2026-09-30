@@ -14,10 +14,11 @@ import { Mono, SeverityBadge } from "@/components/badges";
 import { RegistryTable } from "@/components/registry-table";
 
 const RULES: [string, string, string][] = [
-  ["inventory", "LOB inventory", "An “Internet Facing” / “Exposure” / “Zone” column says Yes, DMZ or Internet, or a “Public IP” / “NAT IP” column gives the node a public address."],
+  ["inventory", "LOB inventory", "An “Internet Facing” / “Exposure” / “Zone” column says Yes, DMZ or Internet, or a “Public IP” / “NAT IP” column gives the node a public address (also when several nodes share one NAT IP)."],
   ["scan", "VA scan", "A scan covered a public IP: the asset's own public IP, or the public / NAT IP of an inventory node (its findings are what the internet can see)."],
-  ["matrix", "Communication matrix", "An internet-facing row of any matrix sheet (inbound rule from Internet / ISP / any, public IP pool, NAT list, SOD NAT, exposure register) names the asset's private IP, public / NAT IP, subnet, range or host name. Rows can be marked internet-facing by hand."],
-  ["ip", "Public IP", "The asset's own IP is globally routable and comes from an inventory, the NIAM dump or a VA scan. A CrowdStrike interface IP alone is not evidence."],
+  ["matrix", "Communication matrix", "An internet-facing row of any matrix sheet (inbound rule from Internet / ISP / any, public IP pool, NAT list, SOD NAT, exposure register) names the asset's private IP, public / NAT IP, subnet, range or host name; or a row source-NATs the asset to a public IP (every host behind a shared NAT IP counts). Rows can be marked internet-facing by hand."],
+  ["ip", "Public IP", "The asset's own IPv4 is globally routable and comes from an inventory, the NIAM dump or a VA scan. A global IPv6 address alone is not evidence (IPv6 needs no NAT, so most IPv6 addresses are global): IPv6 assets are exposed only through the communication matrix, an inventory Internet Facing / Public IP column, or Mark exposed."],
+  ["edr", "CrowdStrike connection IP", "The agent's connection IP (the interface it reaches the CrowdStrike cloud from) is a public IPv4. CrowdStrike assets are listed under their connection IP; the local IP and the external (egress / NAT) IP are not exposure evidence."],
   ["manual", "Marked by hand", "The IP or its subnet is on the Mark exposed list, with a note saying where you know it from."],
 ];
 const TABS = [["exposed", "Directly exposed"], ["cgnat", "Indirectly exposed"], ["shadow", "Shadow exposure"], ["whitelisted", "Whitelisted"]] as const;
@@ -48,6 +49,7 @@ export default function Exposure() {
         <Kpi label="From inventory" value={s.by_inventory} foot="facing column / public IP" active={state.exposure_src === "inventory"} onClick={() => only({ exposure_src: "inventory" })} />
         <Kpi label="From VA scan" value={s.by_scan} foot="public IP was scanned" active={state.exposure_src === "scan"} onClick={() => only({ exposure_src: "scan" })} />
         <Kpi label="From comm. matrix" value={s.by_matrix} foot="internet-facing matrix row" active={state.exposure_src === "matrix"} onClick={() => only({ exposure_src: "matrix" })} />
+        <Kpi label="From CrowdStrike" value={s.by_edr} foot="public connection IP" active={state.exposure_src === "edr"} onClick={() => only({ exposure_src: "edr" })} />
         <Kpi label="Marked by hand" value={s.by_manual} tone="warn" foot="Mark exposed list" active={state.exposure_src === "manual"} onClick={() => only({ exposure_src: "manual" })} />
         <Kpi label="No EDR agent" value={s.no_edr} tone="crit" foot="exposed and unprotected" active={state.edr_status === "Not Installed"} onClick={() => only({ edr_status: "Not Installed" })} />
         <Kpi label="Crit / high vulns" value={s.crit_high} tone="serious" active={state.vulns === "crit_high"} onClick={() => only({ vulns: "crit_high" })} />

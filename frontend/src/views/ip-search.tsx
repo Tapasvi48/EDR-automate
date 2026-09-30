@@ -49,7 +49,7 @@ function RangeView({ r, q }: { r: any; q: string }) {
   const count = (st: string) => r.rows.filter((x: any) => x.edr_status === st).length;
   return (
     <Card className="mt-5">
-      <CardHeader title={r.by_name ? `${fmtN(r.total)} assets whose name contains “${q}”` : `${fmtN(r.total)} assets in ${q}`}
+      <CardHeader title={r.by_nat ? `${fmtN(r.total)} hosts behind public / NAT IP ${r.by_nat}` : r.by_name ? `${fmtN(r.total)} assets whose name contains “${q}”` : `${fmtN(r.total)} assets in ${q}`}
         hint={`${fmtN(count("Online"))} online · ${fmtN(count("Offline"))} offline · ${fmtN(r.rows.filter((x: any) => !["Online", "Offline"].includes(x.edr_status)).length)} without active EDR`} />
       <SimpleTable rows={r.rows} maxHeight="calc(100vh - 320px)" empty="Nothing found in this range" onRowClick={(x: any) => set({ q: x.ip })} columns={[
         { key: "ip", label: "IP", render: (x: any) => <Mono>{x.ip}</Mono> },
@@ -103,7 +103,8 @@ function Profile({ r }: { r: any }) {
         ))}
       </nav>
       {view === "overview" && <Overview s={s} r={r} go={go} />}
-      {view === "exposure" && <div className="space-y-4"><InternetSection i={r.internet} /><Card><CardHeader title="Open ports" hint="from vulnerability scan findings" /><PortsTable rows={r.ports || []} /></Card></div>}
+      {view === "exposure" && <div className="space-y-4"><InternetSection i={r.internet} />
+        {r.behind_nat?.length > 0 && <RangeView r={{ rows: r.behind_nat, total: r.behind_nat.length, by_nat: s.ips[0] }} q={s.ips[0]} />}<Card><CardHeader title="Open ports" hint="from vulnerability scan findings" /><PortsTable rows={r.ports || []} /></Card></div>}
       {view === "attack" && <AttackCard s={s} r={r} />}
       {view === "detections" && <DetectionsSection agents={r.agents} ips={s.ips} names={s.hostnames} />}
       {view === "vulns" && <div className="space-y-4"><Card><CardHeader title="Vulnerabilities" hint={`${v.Critical} critical · ${v.High} high · ${v.Medium} medium · ${v.Low} low open · ${fmtN(v.fixed)} fixed`} /><VulnTable rows={r.vulns} /></Card><ExceptionsCard s={s} agents={r.agents} /></div>}
@@ -217,7 +218,8 @@ function AgentsTable({ rows }: { rows: any[] }) {
   return <SimpleTable rows={rows} empty="No CrowdStrike agent found" columns={[
     { key: "hostname", label: "Hostname", render: (x: any) => <HostLink aid={x.aid}><b>{x.hostname || x.aid}</b></HostLink> },
     { key: "edr_status", label: "Status", render: (x: any) => <span className="flex items-center gap-1.5"><EdrBadge s={x.edr_status} />{x.edr_detail && x.edr_detail !== "in console" && <span className="text-xs text-muted">{x.edr_detail}</span>}</span> },
-    { key: "local_ip", label: "IP", render: (x: any) => <Mono>{x.local_ip}</Mono> },
+    { key: "connection_ip", label: "Connection IP", render: (x: any) => <Mono>{x.connection_ip || x.local_ip}</Mono> },
+    { key: "local_ip", label: "Local IP", render: (x: any) => <Mono>{x.local_ip}</Mono> },
     { key: "os_version", label: "OS" }, { key: "agent_version", label: "Sensor", render: (x: any) => <Mono>{x.agent_version}</Mono> },
     { key: "first_seen", label: "First seen", render: (x: any) => fmtDt(x.first_seen).slice(0, 10) },
     { key: "last_seen", label: "Last seen", render: (x: any) => <When ts={x.last_seen} /> },
@@ -250,11 +252,11 @@ function InternetSection({ i }: { i: any }) {
         hint={i.public_ips.length ? `public / NAT IP ${i.public_ips.join(", ")}` : "no public IP known for this asset"}
         right={i.internal_ip && i.verdict !== "not_exposed" ? <Link className="text-[12.5px] text-accent-fg hover:underline print:hidden" href={`/attack-paths/?ip=${encodeURIComponent(i.internal_ip)}`}>Attack path →</Link> : undefined} />
       <div className="grid gap-3 px-4 pb-4 lg:grid-cols-3">
-        <Method title="Communication matrix" hit={i.matrix.length > 0} none="No inbound Internet / ISP rule reaches this asset.">
+        <Method title="Communication matrix" hit={i.matrix.length > 0} none="No internet-facing or source-NAT matrix row covers this asset.">
           <div className="space-y-2">
             {i.matrix.map((m: any) => (
               <div key={m.rule_id} className="rounded-lg bg-surface px-2.5 py-2 text-[12px] shadow-card">
-                <div className="flex items-center gap-2"><b>{m.rule_id}</b><Badge tone="info">via {m.path === "ISP link" ? `ISP ${m.isp}` : `firewall ${m.firewall}`}</Badge>
+                <div className="flex items-center gap-2"><b>{m.rule_id}</b><Badge tone={m.path === "Source NAT" ? "warn" : "info"}>{m.path === "Source NAT" ? `source NAT → ${m.src_nat}` : m.path === "ISP link" ? `via ISP ${m.isp}` : `via firewall ${m.firewall}`}</Badge>
                   <span className="ml-auto text-muted">{m.action}</span></div>
                 <div className="mt-1 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-fg-2">
                   <span className="text-muted">From</span><span>{m.src_zone || "–"} · <Mono>{m.src || "any"}</Mono>{m.src_nat ? <> (NAT <Mono>{m.src_nat}</Mono>)</> : null}</span>
@@ -274,10 +276,10 @@ function InternetSection({ i }: { i: any }) {
             { key: "sev", label: "Open C/H/M/L", render: (x: any) => x.scanned ? <SevCounts c={x.crit} h={x.high} m={x.med} l={x.low} /> : null },
           ]} />
         </Method>
-        <Method title="EDR (CrowdStrike)" hit={i.crowdstrike.some((x: any) => x.public_on_nic)} none="No agent has a public IP on its own interface.">
+        <Method title="EDR (CrowdStrike)" hit={i.crowdstrike.some((x: any) => x.public_on_nic)} none="No agent connects from a public IP (connection IP is private).">
           <div className="space-y-1 text-[12px]">
             {i.crowdstrike.filter((x: any) => x.public_on_nic).map((x: any) => (
-              <div key={x.aid}><b>{x.hostname}</b> has public IP <Mono>{x.local_ip}</Mono> on its own interface</div>
+              <div key={x.aid}><b>{x.hostname}</b> connects to CrowdStrike from public IP <Mono>{x.connection_ip}</Mono> (its own interface)</div>
             ))}
           </div>
         </Method>
@@ -287,8 +289,8 @@ function InternetSection({ i }: { i: any }) {
           <span className="font-medium">What CrowdStrike reports:</span>{" "}
           {i.crowdstrike.map((x: any) => (
             <span key={x.aid} className="mr-4 inline-flex flex-wrap gap-x-2">
-              <b>{x.hostname}</b> NIC <Mono>{x.local_ip || "–"}</Mono>{x.public_on_nic && <Badge tone="crit">public</Badge>}
-              · connection <Mono>{x.connection_ip || "–"}</Mono> · egress <Mono>{x.external_ip || "–"}</Mono>
+              <b>{x.hostname}</b> connection <Mono>{x.connection_ip || "–"}</Mono>{x.public_on_nic && <Badge tone="crit">public</Badge>}
+              · local <Mono>{x.local_ip || "–"}</Mono> · egress <Mono>{x.external_ip || "–"}</Mono>
               {x.egress_public && <span className="text-muted">(organisation NAT, not exposure on its own)</span>}
             </span>
           ))}

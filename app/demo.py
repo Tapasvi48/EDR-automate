@@ -260,8 +260,9 @@ def seed(c):
 
     # ---- LOBs, MSPs and inventories (through the normal upload path)
     std = db.standard_template_id(c)
-    headers = [lbl for _, lbl in inventory.config.INVENTORY_FIELDS] + ["Application ID", "Internet Facing", "Public IP"]
-    mapping = {k: lbl for k, lbl in inventory.config.INVENTORY_FIELDS}
+    base = [(k, lbl) for k, lbl in inventory.config.INVENTORY_FIELDS if k not in ("niam_integrated", "ne_id")]  # NIAM comes from the dump
+    headers = [lbl for _, lbl in base] + ["Application ID", "Internet Facing", "Public IP"]
+    mapping = {k: lbl for k, lbl in base}
     lob_ids = {}
     for lob, desc, owner, msps, *_ in LOBS:
         lid = c.execute("INSERT INTO lobs(name, description, owner, created_at) VALUES (?,?,?,?)", (lob, desc, owner, now)).lastrowid

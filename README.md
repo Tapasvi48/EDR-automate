@@ -153,7 +153,30 @@ Assets in no inventory:
 
 An asset is internet-exposed when an inventory facing / zone / public-IP column, a VA scan of a public IP, or an inbound
 Internet / ISP rule in the communication matrix says so, or its own IP is public and comes from an inventory, the NIAM dump or a scan.
-A public IP that CrowdStrike reports on an agent's own interface is **not** evidence on its own. Not counted as exposed:
+**IPv6:** a global IPv6 address is **not** exposure evidence on its own, since IPv6 has no NAT and most addresses are global. An IPv6 asset is
+exposed only when one of these says so:
+- a communication-matrix row (inbound rule, NAT list, pool, register, source NAT)
+- an inventory Internet Facing / Public IP column
+- the Mark exposed list
+
+The "own public IP", "VA scan of a public IP", "CrowdStrike connection IP" and "shadow port" checks apply to IPv4 only.
+
+**NAT counts:** a host that is destination-NATed from a public IP, or source-NATed to one, is internet exposed. This holds for matrix rows
+and for inventory Public / NAT IP columns, even when many hosts share the one NAT IP. Every host is linked to its public IP.
+
+Searching a public / NAT IP in Asset 360 lists the hosts behind it:
+- from the matrix and inventory NAT mappings;
+- plus CrowdStrike agents whose external (egress) IP it is.
+
+An agent's external IP is used for this lookup and for matching only, not as exposure evidence: every agent has one.
+
+**CrowdStrike assets are listed under their connection IP**: the interface the agent reaches the CrowdStrike cloud from. The local IP is
+used only when there is no connection IP. An agent already matched to an inventory node stays on that node's row.
+- A **public IPv4 connection IP** is exposure evidence ("CrowdStrike · connection IP").
+- The **local IP** is never exposure evidence.
+- The **external IP** (public egress / NAT address seen by the cloud) is never exposure evidence.
+
+Not counted as exposed:
 IPs / subnets on the **whitelist** (Internet exposed → Whitelist), and **CGNAT** addresses (100.64.0.0/10), which have their own tab.
 
 ### Communication matrix workbooks
@@ -333,10 +356,21 @@ Cells with several IPs use the first one. Searches accept exact IPs, IPv4 prefix
   2. the node IP is another **NIC IP** of the agent (local IP / IP history): match only if the **hostname** is the same too
      (case-insensitive; the domain part is ignored, so `HOST.corp.local` = `host`);
   3. the same hostname with no IP in common: match;
-  4. a NIC IP plus a hostname that is only close (`abc` ↔ `abc1`, and no other `abc<n>` exists in CrowdStrike or the inventories;
+  4. **through NAT**: the node IP is a public / NAT IP, and exactly one active agent sits behind it → match (`nat ip`). "Behind" means:
+     - the agent's connection / NIC IP is the private IP mapped to that public IP (matrix NAT / source-NAT rows, inventory Public / NAT IP columns);
+     - or the agent reports that public IP as its external IP.
+
+     The other direction works too: the node lists the private IP and the agent reports the public one. When several agents share
+     the NAT IP, only a hostname match (step 3) links them;
+  5. a NIC IP plus a hostname that is only close (`abc` ↔ `abc1`, and no other `abc<n>` exists in CrowdStrike or the inventories;
      `MNRA` vs `MNRA1` / `MNRA2` / `MNRA3` is rejected): **not** a match. It is listed on **CrowdStrike → Possible matches** for review
      and counted nowhere.
   A NIC IP on a differently named agent is shown as "IP Used by Other Host" and never counted as installed.
+- **Same IP on several rows**: every row is kept. The second row's key adds its node name, and all of them are tagged under Duplicates.
+  Only exact copies of a row are merged.
+- **NIAM Integrated / NE ID columns** (standard template): when filled, they are what the console shows and counts for the node. When
+  blank, NIAM integrated = the IP is in the latest NIAM dump, and NE ID = the dump's NE ID(s) for the IP. The inventory table marks the
+  source (inv / dump). A "Yes" from the inventory whose IP is not in the dump shows amber.
 - **Editing values**: "EDR installed (inventory)", "Live / Non Live", "EDR feasible (inventory)" and Remarks can be changed in the
   table, or for many rows at once with *Edit a column in Excel* (download one column for the filtered rows, change it, upload it back).
   Edits are logged in the item history; the next inventory upload for the LOB replaces them.
