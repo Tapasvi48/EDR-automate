@@ -187,7 +187,7 @@ export const CoverageBadge = ({ v }: { v?: string }) => (v ? <Badge tone={COVERA
 /** Duplicate tag for an inventory row: repeated in the uploaded file and/or sharing IP / node name with other rows of the LOB */
 export function dupReasons(r: any) {
   const out: string[] = [];
-  if (r.file_dups > 0) out.push(`${r.file_dups + 1} rows in the uploaded file`);
+  if (r.file_dups > 0) out.push(`${r.file_dups + 1} rows with the same key in the uploaded file (kept separately)`);
   if (r.dup_ip > 1) out.push(`IP shared by ${r.dup_ip} rows`);
   if (r.dup_name > 1) out.push(`node name shared by ${r.dup_name} rows`);
   return out;

@@ -225,7 +225,7 @@ def build_items(parsed, mapping, key_field, forced_msp=None, forced_type=None, k
     idx = {h: i for i, h in enumerate(headers)}
     mapped_headers = set(v for v in mapping.values() if v)
     extra_headers = [h for h in headers if h not in mapped_headers]
-    items, warnings, dups = OrderedDict(), [], 0
+    items, warnings = OrderedDict(), []
     no_key = 0
     for n, r in enumerate(parsed["rows"], start=parsed["header_row"] + 1):
         it = {}
@@ -247,29 +247,45 @@ def build_items(parsed, mapping, key_field, forced_msp=None, forced_type=None, k
         if not key:
             no_key += 1
             continue
-        if key in items and _hash(it) != _hash(items[key]):
-            # same IP (or name) on another row that is NOT a copy (e.g. two node names on one IP): keep both rows. The second
-            # row's key adds its node name (or row number), so it stays stable across uploads; Duplicates tags both by IP.
-            alt = f"{key}#{db.norm_hostname(it['node_name']) or f'row{n}'}"
-            if alt not in items:
-                key = alt
-        if key in items:
-            # an exact copy of a row already read: keep the first, count the repeats and tag the item as duplicate
-            dups += 1
-            items[key]["file_dups"] = items[key].get("file_dups", 0) + 1
-            if dups <= 25:
-                warnings.append(f"Row {n}: exact copy of row {items[key]['_row']} - merged")
-            continue
-        it["_row"] = n
-        it["file_dups"] = 0
-        items[key] = it
-    for it in items.values():
-        it.pop("_row", None)
-    if dups > 25:
-        warnings.append(f"... {dups - 25} more exact copies merged")
+        it["_base"] = key
+        items[unique_key(items, key, it)] = it
+    dups = mark_file_dups(items)
+    if dups:
+        warnings.append(f"{dups} rows share their key (IP / node name) with another row in the file - every row is kept "
+                        "and tagged DUP (see the Duplicate rows tab)")
     if no_key:
         warnings.append(f"{no_key} rows skipped: no IP / Node Name value")
     return items, warnings
+
+
+def unique_key(items, key, it):
+    """Rows are never merged. A key already used by an earlier row gets a suffix: first the row's node name (two node names
+    on one IP), then #2, #3 ... in file order, so the keys stay the same when the same file is uploaded again."""
+    if key not in items:
+        return key
+    nn = db.norm_hostname(it.get("node_name"))
+    if nn and f"{key}#{nn}" not in items:
+        return f"{key}#{nn}"
+    i = 2
+    while f"{key}#{i}" in items:
+        i += 1
+    return f"{key}#{i}"
+
+
+def mark_file_dups(items):
+    """file_dups = how many OTHER rows of the upload share this row's key (0 = unique). Returns the number of rows that
+    have a duplicate."""
+    groups = {}
+    for it in items.values():
+        b = it.get("_base")
+        if b:
+            groups[b] = groups.get(b, 0) + 1
+    n = 0
+    for it in items.values():
+        if it.get("_base"):
+            it["file_dups"] = groups[it["_base"]] - 1
+            n += 1 if it["file_dups"] else 0
+    return n
 
 
 def merge_scope(prev_items, new_items, scope_msp):
@@ -434,7 +450,7 @@ def scoped_items(c, lob, parsed, mapping, key_field, scope_msp=None, type_id=Non
 def multi_items(c, lob, token, sheets, key_field, scope_msp=None, type_id=None):
     """Several sheets of one workbook, each with its own header row and mapping, merged into one set of items.
     With more than one sheet every row keeps its sheet name (extra column "Sheet"). The same key on two sheets: an exact copy
-    is merged; a different row is kept under key#sheet."""
+    is kept too (under key#sheet) and both are tagged as duplicates - rows are never merged."""
     t = get_type(c, lob["id"], type_id)
     items, warnings = OrderedDict(), []
     use = [s for s in sheets if s.get("include", True)]
@@ -449,12 +465,13 @@ def multi_items(c, lob, token, sheets, key_field, scope_msp=None, type_id=None):
             if len(use) > 1:
                 it["extra"] = {**(it.get("extra") or {}), "Sheet": sh["sheet"]}
             if k in items:
-                if _hash({**it, "extra": {x: y for x, y in (it.get("extra") or {}).items() if x != "Sheet"}}) == \
-                        _hash({**items[k], "extra": {x: y for x, y in (items[k].get("extra") or {}).items() if x != "Sheet"}}):
-                    items[k]["file_dups"] = (items[k].get("file_dups") or 0) + 1
-                    continue
-                k = f"{k}#{sh['sheet'].lower()}"
+                base, i = f"{k}#{sh['sheet'].lower()}", 2
+                k = base
+                while k in items:
+                    k, i = f"{base}#{i}", i + 1
             items[k] = it
+    if len(use) > 1:
+        mark_file_dups(items)  # duplicates across sheets too
     prev = load_version_items(c, stream_version_id(c, lob, type_id))
     if scope_msp:
         items = merge_scope(prev, items, scope_msp)
@@ -496,7 +513,7 @@ def preview_upload(c, lob_id, token, mapping, key_field, sheet=None, header_row=
     summary["is_first_version"] = not cur_vid
     summary["type"] = (get_type(c, lob_id, type_id) or {}).get("name")
     summary["scope_msp"] = scope_msp
-    summary["file_duplicates"] = sum(it.get("file_dups") or 0 for it in items.values())
+    summary["file_duplicates"] = sum(1 for it in items.values() if it.get("file_dups"))
     existing = {m["name"].lower() for m in db.rows(c, "SELECT name FROM msps WHERE lob_id=?", (lob_id,))}
     summary["new_msps"] = sorted({(it.get("msp") or "").strip() for it in items.values()
                                   if (it.get("msp") or "").strip() and (it.get("msp") or "").strip().lower() not in existing})

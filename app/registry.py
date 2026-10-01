@@ -245,9 +245,19 @@ def refresh(c):
     from .addrparse import parse_addresses
     from .commatrix import load_rules
     import bisect
-    v4 = sorted((db.ip_to_num(s["ip"]), k) for k, s in reg.items() if s["ip"] and ":" not in s["ip"])
+    # values that are not a valid IP (typos, "NOT IN USE", Excel errors like #REF!) cannot match a rule: skip them
+    v4, v6 = [], []
+    for k, s in reg.items():
+        try:
+            a = ipaddress.ip_address((s["ip"] or "").strip())
+        except ValueError:
+            continue
+        if a.version == 4:
+            v4.append((int(a), k))
+        else:
+            v6.append((a, k))
+    v4.sort()
     v4n = [n for n, _ in v4]
-    v6 = [(ipaddress.ip_address(s["ip"]), k) for k, s in reg.items() if s["ip"] and ":" in s["ip"]]
     by_name = {}
     for k, s in reg.items():
         for n in s["names"]:

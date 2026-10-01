@@ -99,6 +99,7 @@ export default function Lob() {
         { id: "overview", label: "Overview" },
         { id: "inventory", label: "Inventory", count: s.nodes },
         { id: "unlisted", label: "Not in inventory", count: s.unlisted },
+        ...(s.dup_rows ? [{ id: "dups", label: "Duplicate rows", count: s.dup_rows }] : []),
         { id: "vulns", label: "Vulnerabilities" },
         { id: "tags", label: "Agent tags" },
         { id: "history", label: "History", count: versions?.rows.length },
@@ -183,6 +184,16 @@ export default function Lob() {
 
       {tab === "inventory" && (
         <InventoryTable lobId={id} state={state} set={set} reset={() => goTab("inventory")} versions={versions?.rows} types={types} />
+      )}
+      {tab === "dups" && (
+        <>
+          <Callout className="mb-3">
+            Rows of the uploaded inventory that share their key (IP, or node name) with another row. They are <b>not merged</b> — every row
+            is kept as uploaded, because other fields (OS, node name, MSP …) may differ. Rows with the same key are listed together; fix them
+            in the source file if they should be one node.
+          </Callout>
+          <InventoryTable lobId={id} state={{ ...state, dup: "file", sort: state.sort || "ip" }} set={set} reset={() => goTab("dups")} types={types} />
+        </>
       )}
       {tab === "unlisted" && (
         <>

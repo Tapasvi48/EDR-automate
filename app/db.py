@@ -224,7 +224,7 @@ CREATE TABLE IF NOT EXISTS inventory_rows (
     edr_feasible TEXT, edr_installed TEXT, remarks TEXT,
     extra TEXT,
     row_hash TEXT,
-    file_dups INTEGER DEFAULT 0,    -- extra rows in the uploaded file with the same key (merged into this one)
+    file_dups INTEGER DEFAULT 0,    -- other rows in the uploaded file with the same key (rows are never merged)
     PRIMARY KEY (version_id, item_key)
 );
 

@@ -327,7 +327,7 @@ export function Preview({ p }: { p: any }) {
       {p.scope_msp && <Callout className="mb-3">Only <b>{p.scope_msp}</b>&apos;s nodes are compared and replaced. Other MSPs are unchanged.</Callout>}
       {p.file_duplicates > 0 && (
         <Callout tone="warn" className="mb-3">
-          <b>{fmtN(p.file_duplicates)}</b> duplicate row{p.file_duplicates === 1 ? "" : "s"} in the file share a key with an earlier row. Each is merged into its first occurrence, which is tagged <Badge tone="serious">DUP</Badge> so you can filter them in the inventory.
+          <b>{fmtN(p.file_duplicates)}</b> row{p.file_duplicates === 1 ? "" : "s"} in the file share their key (IP / node name) with another row. Nothing is merged — every row is kept and tagged <Badge tone="serious">DUP</Badge>, and they are listed on the LOB&apos;s <b>Duplicate rows</b> tab.
         </Callout>
       )}
       {p.new_msps?.length > 0 && <Callout className="mb-3">New MSPs will be created: <b>{p.new_msps.join(", ")}</b></Callout>}

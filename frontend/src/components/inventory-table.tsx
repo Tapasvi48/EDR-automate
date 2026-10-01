@@ -80,7 +80,7 @@ const CHECKS: [string, string][] = [
   ["marked_no", "Inventory says No · agent running"],
 ];
 const DUPS: [string, string, string][] = [
-  ["any", "Any duplicate", "any_dup"], ["file", "Repeated rows in uploaded file", "file_dup"],
+  ["any", "Any duplicate", "any_dup"], ["file", "Duplicate rows (same key in the file)", "file_dup"],
   ["ip", "Same IP on several rows", "ip_dup"], ["name", "Same node name on several rows", "name_dup"], ["cross_msp", "IP in more than one MSP", ""],
   ["cross_lob", "IP also in another LOB", ""],
 ];

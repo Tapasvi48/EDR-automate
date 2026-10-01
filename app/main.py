@@ -515,7 +515,8 @@ def lob_detail(lob_id: int):
         d = db.one(c, """SELECT COUNT(DISTINCT CASE WHEN ic.dup_ip>1 THEN ic.ip END) dup_ips,
             COUNT(DISTINCT CASE WHEN EXISTS (SELECT 1 FROM inventory_current x WHERE x.ip=ic.ip AND x.lob_id<>ic.lob_id) THEN ic.ip END) cross_lob_ips
             FROM inventory_current ic WHERE ic.lob_id=? AND COALESCE(ic.ip,'')<>''""", (lob_id,))
-        summary = {**summary, "dup_ips": d["dup_ips"] or 0, "cross_lob_ips": d["cross_lob_ips"] or 0}
+        summary = {**summary, "dup_ips": d["dup_ips"] or 0, "cross_lob_ips": d["cross_lob_ips"] or 0,
+                   "dup_rows": c.execute("SELECT COUNT(*) FROM inventory_current WHERE lob_id=? AND file_dups>0", (lob_id,)).fetchone()[0]}
         types = _lob_types(c, lob_id)
     return {"lob": lob, "summary": summary, "facets": facets, "current_version": current, "msps": msps, "node_types": node_types,
             "types": types}
