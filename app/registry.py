@@ -18,6 +18,7 @@ Not counted as exposed:
   whitelist   - IPs / subnets listed on the Internet exposed page (known, accepted addresses)
   CGNAT       - 100.64.0.0/10 (carrier-grade NAT, RFC 6598): not directly reachable; shown on their own tab"""
 import ipaddress
+from functools import lru_cache
 import json
 import re
 
@@ -43,7 +44,10 @@ _DOC_V4 = [ipaddress.ip_network(n) for n in ("192.0.2.0/24", "198.51.100.0/24", 
 CGNAT = ipaddress.ip_network("100.64.0.0/10")
 
 
+@lru_cache(maxsize=1 << 20)
 def is_cgnat(ip):
+    if isinstance(ip, str) and not ip.startswith("100."):  # 100.64.0.0/10 only
+        return False
     try:
         a = ipaddress.ip_address(ip)
     except ValueError:
@@ -71,8 +75,10 @@ def _nets(v):
 
 
 def _net_fn(entries):
-    """ip -> the matching entry's label (or None)."""
+    """ip -> the matching entry's label (or None). No entries -> a no-op (fast path for large registries)."""
     nets = [(n, e) for e in entries for n in _nets(e.get("value"))]
+    if not nets:
+        return lambda ip: None
 
     def hit(ip):
         try:
@@ -98,7 +104,13 @@ def _whitelisted_fn(c):
     return _net_fn(whitelist(c))
 
 
+_PRIVATE_PREFIX = ("10.", "192.168.", "127.", "169.254.") + tuple(f"172.{i}." for i in range(16, 32))
+
+
+@lru_cache(maxsize=1 << 20)
 def is_public(ip):
+    if not ip or (isinstance(ip, str) and ip.startswith(_PRIVATE_PREFIX)):  # fast path for the common private ranges
+        return False
     try:
         a = ipaddress.ip_address(ip)
     except ValueError:
@@ -117,9 +129,16 @@ def _norm(h):
     return re.sub(r"[^a-z0-9]", "", str(h or "").lower())
 
 
+_EXPOSURE_HINT = re.compile(r"public|nat|internet|expos|facing|dmz|zone|wan|vip|external|segment", re.I)
+
+
 def inventory_exposure(extra):
     """(facing reason or None, [public / NAT IPs]) from an inventory row's extra columns."""
     facing, nat = None, []
+    if isinstance(extra, str):  # raw JSON: most rows have no exposure-related column at all, so skip parsing them
+        if not extra or extra == "{}" or not _EXPOSURE_HINT.search(extra):
+            return facing, nat
+        extra = db.jloads(extra, {})
     for k, v in (extra or {}).items():
         nk, sv = _norm(k), str(v or "").strip()
         if not sv:
@@ -152,7 +171,7 @@ def refresh(c):
             s["names"].append(n)
 
     WHERE = {"inventory": "Inventory", "matrix": "Communication matrix", "scan": "VA scan", "ip": "Public IP", "indirect": "Indirect range",
-             "manual": "Marked manually", "edr": "CrowdStrike"}
+             "manual": "Marked manually", "edr": "CrowdStrike", "passive": "Passive scan"}
 
     def reason(s, src, text, where=None):
         """where: short label of the source for the 'Exposed by' column (Inventory · LOB, Matrix · workbook › sheet…)."""
@@ -190,7 +209,7 @@ def refresh(c):
             s["edr_status"] = st
             if st != "Not Installed":
                 s.update(aid=r["matched_aid"], cs_hostname=r["cs_hostname"], edr_last_seen=r["cs_last_seen"], in_edr=1)
-        facing, nat = inventory_exposure(db.jloads(r["extra"], {}))
+        facing, nat = inventory_exposure(r["extra"])
         if facing:
             reason(s, "inventory", f"Inventory ({r['lob']}): {facing}", f"Inventory · {r['lob']}")
         for p in nat:
@@ -200,9 +219,9 @@ def refresh(c):
     # CONNECTION IP (the interface it reaches the CrowdStrike cloud from; local IP only when there is none). An agent already
     # matched to an inventory node stays on that node's row. The local IP is never exposure evidence; a public connection IP is.
     placed = {s["aid"]: k for k, s in reg.items() if s.get("aid")}
-    for h in db.rows(c, """SELECT aid, hostname, COALESCE(NULLIF(connection_ip,''), local_ip) ip, connection_ip, console_state, online_state,
+    for h in db.rows(c, """SELECT aid, hostname, connection_ip ip, connection_ip, console_state, online_state,
                           last_seen, removal_type, os_version FROM hosts
-                          WHERE COALESCE(NULLIF(connection_ip,''), local_ip, '')<>'' AND (console_state='active' OR (console_state='removed' AND gone_primary=1))
+                          WHERE COALESCE(connection_ip,'')<>'' AND (console_state='active' OR (console_state='removed' AND gone_primary=1))
                           ORDER BY console_state='active' DESC, online_state='online' DESC, last_seen DESC"""):
         s = reg[placed[h["aid"]]] if h["aid"] in placed else slot(h["ip"], h["ip"])
         s["in_edr"] = 1
@@ -248,14 +267,18 @@ def refresh(c):
     # values that are not a valid IP (typos, "NOT IN USE", Excel errors like #REF!) cannot match a rule: skip them
     v4, v6 = [], []
     for k, s in reg.items():
+        ip = (s["ip"] or "").strip()
+        if not ip:
+            continue
+        if ":" not in ip:
+            n = db.ip_to_num(ip)
+            if n is not None:
+                v4.append((n, k))
+            continue
         try:
-            a = ipaddress.ip_address((s["ip"] or "").strip())
+            v6.append((ipaddress.ip_address(ip), k))
         except ValueError:
             continue
-        if a.version == 4:
-            v4.append((int(a), k))
-        else:
-            v6.append((a, k))
     v4.sort()
     v4n = [n for n, _ in v4]
     by_name = {}
@@ -329,6 +352,19 @@ def refresh(c):
         if exposed_by_itself(s["ip"]) and (s["in_inventory"] or s["in_niam"] or s["in_scan"]):
             src = "scan" if s["in_scan"] else "ip"
             reason(s, src, "Public IP, covered by a VA scan (external scan)" if s["in_scan"] else "Public IP address")
+    # --- passive internet scan (Shodan InternetDB): open ports seen from the internet on a public IP of the asset
+    by_pub = {}
+    for k, s in reg.items():
+        for p in ([s["ip"]] if s["ip"] else []) + list(s["public_ips"]):
+            by_pub.setdefault(p, set()).add(k)
+    for r in c.execute("SELECT ip, asset_ip, ports, scanned_at FROM passive_results WHERE status='ok' AND ports<>'[]'"):
+        ports = ", ".join(str(x) for x in (db.jloads(r["ports"], []) or [])[:12])
+        hit = set(by_pub.get(r["ip"], set()))
+        if r["asset_ip"] and r["asset_ip"] in reg:
+            hit.add(r["asset_ip"])
+        for k in hit:
+            reason(reg[k], "passive", f"Passive scan (Shodan InternetDB, {(r['scanned_at'] or '')[:10]}): open ports {ports} on {r['ip']}",
+                   "Passive scan")
     # --- EDR feasibility of assets in no inventory: CrowdStrike has it -> feasible (and applicable); anything else found only
     # by a VA scan / NIAM (or a future source) is unidentified and stays out of the applicable count
     for s in reg.values():
@@ -375,6 +411,9 @@ def refresh(c):
                      exposed, json.dumps(s["reasons"]), "," + ",".join(sorted(s["exp_src"])) + ",",
                      ", ".join(sorted(s["public_ips"])) or None, ", ".join(sorted(x for x in s["nat_of"] if x)) or None,
                      1 if is_public(s["ip"]) else 0, ",".join(srcs), s["os"], s["os_source"], s["feasible"], s["feasible_reason"], wl, cg))
+    hidden = {r[0] for r in c.execute("SELECT asset_key FROM registry_hidden")}  # deleted by hand on All inventory
+    if hidden:
+        rows = [r for r in rows if r[0] not in hidden]
     c.execute("DELETE FROM asset_registry")
     c.executemany(f"INSERT INTO asset_registry VALUES ({','.join('?' * 39)})", rows)
 
@@ -386,6 +425,7 @@ SORTS = {"ip": "r.ip_num", "name": "r.name COLLATE NOCASE", "lobs": "r.lobs", "m
 
 def query(p):
     w, params = [], []
+
     for src in (p.get("has") or "").split("|"):
         if src in SOURCES:
             w.append(f"r.in_{src}=1")
@@ -560,7 +600,7 @@ def exposure_summary():
         s = db.one(c, """SELECT SUM(exposed) exposed, SUM(exposed AND exposure_src LIKE '%,inventory,%') by_inventory,
             SUM(exposed AND exposure_src LIKE '%,scan,%') by_scan,
             SUM(exposed AND exposure_src LIKE '%,ip,%') by_ip, SUM(exposed AND exposure_src LIKE '%,matrix,%') by_matrix, SUM(exposed AND exposure_src LIKE '%,manual,%') by_manual,
-            SUM(exposed AND exposure_src LIKE '%,edr,%') by_edr,
+            SUM(exposed AND exposure_src LIKE '%,edr,%') by_edr, SUM(exposed AND exposure_src LIKE '%,passive,%') by_passive,
             SUM(exposed AND edr_status='Not Installed') no_edr,
             SUM(exposed AND (crit + high) > 0) crit_high, SUM(exposed AND in_inventory=0) not_in_inventory,
             SUM(exposed AND in_inventory=1) in_inventory,
@@ -686,3 +726,61 @@ def exposure_shadow_ranges_save(data: dict = Body(...)):
     """IPs / subnets to watch for shadow exposure (e.g. your own public ranges): any known IP in them that no inbound matrix
     rule covers is listed on the Shadow exposure tab."""
     return _save_list("shadow", data)
+
+
+
+@router.post("/api/registry/delete")
+def registry_delete(data: dict = Body(...)):
+    """Delete selected All-inventory rows. Inventory rows behind them are removed from their LOB inventory (current
+    version; logged in the item history as removed by hand). Every selected row is also hidden from All inventory, so a
+    row that CrowdStrike, a VA scan or NIAM still reports does not come back. Re-matching then runs in the background."""
+    keys = [str(k) for k in (data.get("keys") or []) if k][:20000]
+    if not keys:
+        raise HTTPException(400, "Select at least one row")
+    who, now = str(data.get("by") or ""), db.now_iso()
+    removed = 0
+    with db.get_conn() as c:
+        regs = {r["asset_key"]: r for k0 in range(0, len(keys), 900)
+                for r in db.rows(c, f"SELECT asset_key, ip, name, in_inventory FROM asset_registry WHERE asset_key IN ({','.join('?' * len(keys[k0:k0 + 900]))})",
+                                 keys[k0:k0 + 900])}
+        for k in keys:
+            r = regs.get(k)
+            if not r:
+                continue
+            if r["in_inventory"]:
+                cond, arg = ("ic.ip=?", r["ip"]) if r["ip"] else ("LOWER(ic.node_name)=?", k.split("name:", 1)[-1])
+                for it in db.rows(c, f"""SELECT ic.lob_id, ic.item_key, ic.type_id, l.current_version_id lob_ver, t.current_version_id type_ver
+                                         FROM inventory_current ic JOIN lobs l ON l.id=ic.lob_id LEFT JOIN lob_types t ON t.id=ic.type_id
+                                         WHERE {cond}""", (arg,)):
+                    ver = it["type_ver"] if it["type_id"] else it["lob_ver"]
+                    c.execute("DELETE FROM inventory_current WHERE lob_id=? AND item_key=?", (it["lob_id"], it["item_key"]))
+                    if ver:
+                        c.execute("DELETE FROM inventory_rows WHERE version_id=? AND item_key=?", (ver, it["item_key"]))
+                        c.execute("""INSERT INTO inventory_changes(lob_id, version_id, item_key, change_type, field, old_value, new_value)
+                                     VALUES (?,?,?,'removed','deleted by hand',?,?)""", (it["lob_id"], ver, it["item_key"], who or "All inventory", now))
+                    removed += 1
+            c.execute("INSERT OR REPLACE INTO registry_hidden VALUES (?,?,?,?,?,?)", (k, r["ip"], r["name"], data.get("note") or "", who, now))
+            c.execute("DELETE FROM asset_registry WHERE asset_key=?", (k,))  # gone from the list (and every count) right away
+    from . import inventory
+    inventory.refresh_async(f"Updating after deleting {len(keys):,} row(s)")
+    return {"ok": True, "hidden": len(keys), "inventory_rows_removed": removed,
+            "message": f"{len(keys):,} row(s) deleted" + (f" · {removed:,} inventory row(s) removed from their LOB inventory" if removed else "")}
+
+
+@router.get("/api/registry/deleted")
+def registry_deleted():
+    with db.get_conn() as c:
+        return {"rows": db.rows(c, "SELECT * FROM registry_hidden ORDER BY hidden_at DESC LIMIT 5000")}
+
+
+@router.post("/api/registry/restore")
+def registry_restore(data: dict = Body(...)):
+    """Show deleted rows again (they come back as their sources still report them). Inventory rows removed with them are not
+    re-created: re-upload the inventory or restore a version on the LOB page."""
+    keys = [str(k) for k in (data.get("keys") or []) if k]
+    with db.get_conn() as c:
+        for k0 in range(0, len(keys), 900):
+            c.execute(f"DELETE FROM registry_hidden WHERE asset_key IN ({','.join('?' * len(keys[k0:k0 + 900]))})", keys[k0:k0 + 900])
+    from . import inventory
+    inventory.refresh_async("Restoring deleted rows")
+    return {"ok": True, "restored": len(keys)}

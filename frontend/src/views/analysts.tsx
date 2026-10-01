@@ -45,6 +45,8 @@ export default function Analysts() {
       </div>
       {data.splunk_error && <Callout tone="warn" className="mb-4">Splunk: {data.splunk_error}. Showing CrowdStrike only. Connect it under Integrations.</Callout>}
       {data.splunk_simulated && <Callout tone="info" className="mb-4">Sample data: Splunk numbers are simulated.</Callout>}
+      {!data.splunk_simulated && !k.cs_total && <Callout tone="warn" className="mb-4">No CrowdStrike alerts in this range{data.cs_fetched_at ? "" : " — alerts have never been fetched"}.
+        Check <a className="underline" href="/settings/">Sync &amp; settings → CrowdStrike API features</a>: the API client needs <b>Alerts: Read</b>, and analysts must assign alerts to themselves in CrowdStrike for them to count here.</Callout>}
       <KpiGrid className="mb-4">
         <Kpi label="Alerts (both)" value={k.total} tone="info" foot={`${fmtN(k.cs_total)} CrowdStrike · ${fmtN(k.splunk_total)} Splunk`} />
         <Kpi label="Closed" value={k.closed} tone="good" foot={k.total ? `${Math.round((100 * k.closed) / k.total)}% of alerts` : ""} />

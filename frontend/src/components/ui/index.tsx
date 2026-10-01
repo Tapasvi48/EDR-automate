@@ -276,11 +276,19 @@ export function Callout({ tone = "info", children, className }: { tone?: "info" 
   return <div className={cn("rounded-lg px-3 py-2.5 text-[12.5px]", cls, className)}>{children}</div>;
 }
 export function PageHeader({ title, sub, actions }: { title: React.ReactNode; sub?: React.ReactNode; actions?: React.ReactNode }) {
+  // long descriptions stay to one line; "more" shows the rest
+  const [more, setMore] = React.useState(false);
+  const long = typeof sub === "string" && sub.length > 150;
   return (
     <div className="mb-5 flex flex-wrap items-end gap-3">
-      <div className="min-w-0">
+      <div className="min-w-0 max-w-4xl">
         <h1 className="text-[21px] font-semibold tracking-tight">{title}</h1>
-        {sub && <div className="mt-1 max-w-4xl text-[12.5px] text-muted">{sub}</div>}
+        {sub && (long ? (
+          <div className="mt-1 flex items-start gap-1.5 text-[12.5px] text-muted">
+            <span className={more ? "" : "line-clamp-1"}>{sub}</span>
+            <button className="shrink-0 text-accent-fg hover:underline" onClick={() => setMore(!more)}>{more ? "less" : "more"}</button>
+          </div>
+        ) : <div className="mt-1 text-[12.5px] text-muted">{sub}</div>)}
       </div>
       {actions && <div className="ml-auto flex flex-wrap items-center gap-2">{actions}</div>}
     </div>

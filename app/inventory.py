@@ -1,6 +1,7 @@
 """LOB inventory: file parsing, template column mapping, versioning/diffing and EDR verification."""
 import csv
 import hashlib
+import threading
 import io
 import json
 import re
@@ -297,8 +298,12 @@ def merge_scope(prev_items, new_items, scope_msp):
 
 
 def _hash(it):
-    payload = json.dumps([it.get(f) or "" for f in FIELDS] + [it.get("extra") or {}], sort_keys=True)
-    return hashlib.sha1(payload.encode()).hexdigest()
+    """Content hash of a row (fields + extra columns). Memoised on the item: a 1-lakh-row upload hashes each row several times."""
+    h = it.get("_h")
+    if h is None:
+        payload = json.dumps([it.get(f) or "" for f in FIELDS] + [it.get("extra") or {}], sort_keys=True)
+        h = it["_h"] = hashlib.sha1(payload.encode()).hexdigest()
+    return h
 
 
 def diff_items(old, new):
@@ -384,7 +389,7 @@ def type_key_prefix(type_id):
 
 
 def commit_version(c, lob_id, items, *, filename, note, uploaded_by, template_id, key_field, mapping,
-                   warnings=None, restored_from=None, scope_msp=None, type_id=None):
+                   warnings=None, restored_from=None, scope_msp=None, type_id=None, defer_refresh=False):
     lob = db.one(c, "SELECT * FROM lobs WHERE id=?", (lob_id,))
     if not lob:
         raise ValueError("LOB not found")
@@ -433,7 +438,8 @@ def commit_version(c, lob_id, items, *, filename, note, uploaded_by, template_id
         c.execute("UPDATE lob_types SET current_version_id=? WHERE id=?", (vid, type_id))
     else:
         c.execute("UPDATE lobs SET current_version_id=? WHERE id=?", (vid, lob_id))
-    refresh_matches(c, lob_id)
+    if not defer_refresh:  # large uploads: the caller starts refresh_async() once this transaction is committed
+        refresh_matches(c, lob_id)
     return {"version_id": vid, "version_no": vno, "type_id": type_id, **{k: v for k, v in summary.items() if k != "samples"}}
 
 
@@ -545,7 +551,7 @@ PRESENT = ("Online", "Offline", "Inactive")
 INSTALLED_STATES = ("Online", "Offline")
 # edr_actual (detailed) -> edr_state (what the dashboards count)
 # bumped when matching / state rules change so stored results are recomputed on startup
-MATCH_REV = "20"
+MATCH_REV = "21"
 # EDR has two states: Online, or Offline - offline in the console, or an agent that has left the console (removed by the
 # inactivity policy, deleted, hidden, or known only from an old EDR inventory upload). Only a node with no agent at all is
 # "Not Installed". edr_actual keeps the detail.
@@ -630,13 +636,12 @@ def refresh_matches(c, lob_id=None):
         hosts[r["aid"]] = r
         if r["connection_ip"]:
             by_conn.setdefault(r["connection_ip"], set()).add(r["aid"])
-        if r["local_ip"]:
-            by_nic.setdefault(r["local_ip"], set()).add(r["aid"])
+        # CrowdStrike assets are identified by their CONNECTION IP only (local / NIC IPs are not used for matching)
         if r["hostname_norm"]:
             by_hn.setdefault(r["hostname_norm"], set()).add(r["aid"])
     for r in c.execute("""SELECT DISTINCT ih.ip, ih.aid FROM ip_history ih JOIN hosts h ON h.aid=ih.aid
-                          WHERE ih.kind='local' AND h.console_state<>'hidden'"""):
-        by_nic.setdefault(r["ip"], set()).add(r["aid"])
+                          WHERE ih.kind='connection' AND h.console_state<>'hidden'"""):
+        by_nic.setdefault(r["ip"], set()).add(r["aid"])  # earlier connection IPs of the agent
     # NAT: a public IP maps to the private IPs behind it (matrix NAT / source NAT rows, inventory NAT columns), and each agent
     # reports the public IP it leaves through (external IP)
     from .commatrix import nat_map
@@ -675,7 +680,7 @@ def refresh_matches(c, lob_id=None):
 
     # Matching an inventory node to a CrowdStrike agent:
     #   1. the node IP is the agent's connection IP -> match (an IP alone is enough here)
-    #   2. the node IP is another NIC IP of the agent (local IP / IP history) -> match only if the hostname is the same
+    #   2. the node IP is an earlier connection IP of the agent (IP history) -> match only if the hostname is the same
     #      (case-insensitive, domain dropped: HOST.corp.local = host)
     #   3. same hostname, no IP in common -> match
     #   4. the IP is a NAT IP (matrix NAT / source NAT, inventory NAT column, or the agent's external IP) or the private IP
@@ -845,9 +850,9 @@ def resolve_agents(c, values):
         ipv = {db.canon_ip(v): v for v in ch if out[v] is None and db.is_ip(v)}
         if ipv:
             ph3 = ",".join("?" * len(ipv))
-            for r in c.execute(f"""SELECT aid, local_ip FROM hosts WHERE local_ip IN ({ph3})
+            for r in c.execute(f"""SELECT aid, connection_ip FROM hosts WHERE connection_ip IN ({ph3})
                                    ORDER BY console_state='active' DESC, last_seen DESC""", list(ipv)):
-                v = ipv[r["local_ip"]]
+                v = ipv[r["connection_ip"]]
                 if out.get(v) is None:
                     out[v] = r["aid"]
     return out
@@ -897,3 +902,39 @@ def commit_tags(c, lob_id, rows, source, replace_scope=None):
     c.executemany("INSERT OR REPLACE INTO agent_tags(aid, lob_id, msp_id, source, tagged_at) VALUES (?,?,?,?,?)", data)
     rebuild_host_map(c)
     return len(data)
+
+
+
+# ------------------------------------------------------------------ background re-matching (large uploads)
+REFRESH = {"running": False, "again": False, "label": "", "started_at": None, "finished_at": None, "seconds": None, "error": None}
+_refresh_lock = threading.Lock()
+DEFER_ROWS = 5000  # uploads bigger than this return as soon as the version is saved; matching runs in the background
+
+
+def refresh_async(label="Re-matching inventory with CrowdStrike"):
+    """Run refresh_matches in a background thread (one at a time; a request made while one runs triggers one more pass)."""
+    with _refresh_lock:
+        if REFRESH["running"]:
+            REFRESH["again"] = True
+            return
+        REFRESH.update(running=True, again=False, label=label, started_at=db.now_iso(), error=None)
+    threading.Thread(target=_refresh_worker, daemon=True).start()
+
+
+def _refresh_worker():
+    import time
+    while True:
+        t = time.time()
+        try:
+            with db.get_conn() as c:
+                refresh_matches(c)
+            REFRESH["error"] = None
+        except Exception as e:  # noqa: BLE001
+            REFRESH["error"] = str(e)
+        with _refresh_lock:
+            REFRESH.update(finished_at=db.now_iso(), seconds=round(time.time() - t, 1))
+            if REFRESH["again"]:
+                REFRESH.update(again=False, started_at=db.now_iso())
+                continue
+            REFRESH["running"] = False
+            return

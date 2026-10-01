@@ -34,6 +34,10 @@ import, two Nessus scans per LOB and a NIAM dump, so every page has something to
 back to your own data.
 
 ### Connect to Falcon
+
+**Sync & settings → CrowdStrike API features** lists every feature the console takes from CrowdStrike: its API scope, what the last
+sync said, and how much data is in the console. For example, Analyst workload needs Alerts: Read *and* alerts assigned to analysts.
+"Check every feature now" runs a live, read-only check of each one.
 1. In Falcon go to **Support and resources → API clients and keys**. Create a client with the **Hosts: Read** scope.
 2. Open **Sync & settings** in the app. Paste the client ID and secret, and pick your cloud region. Click **Test connection**.
    It checks authentication plus each permission the sync uses, and shows the exact error if something fails.
@@ -162,6 +166,18 @@ Each row says what saw it (VA scan / CrowdStrike connection IP / shadow range). 
 The same applies to exposure: a public connection IP makes the asset internet exposed unless it is whitelisted, CGNAT or in an
 indirect range.
 
+**Internet DB scan (passive)** (Vulnerability → Internet DB scan) looks public IPs up in **Shodan InternetDB**
+(`internetdb.shodan.io`, free, no API key). It returns the open ports, known CVEs, software (CPE), hostnames and tags that
+internet-wide scanning already recorded. Nothing is sent to the assets themselves; only the public IP is sent to Shodan.
+- **Scan one IP now** on the page, or **Scan now** on Asset 360 → Exposure.
+- **Scan an Excel file:** any layout; the column with the most IPs is pre-selected.
+- **All inventory:** tick rows → **Passive scan**.
+
+Private IPs are looked up through the public / NAT IP the console knows for them; without one they are skipped, with the reason. Jobs
+run in the background (4 lookups at a time, with back-off when rate-limited). Open ports found count as internet-exposure evidence
+("Passive scan"). Results export to Excel. The server needs outbound HTTPS to internetdb.shodan.io (a corporate proxy set in
+`HTTPS_PROXY` is honoured). Sample mode simulates the answers.
+
 **IPv6:** a global IPv6 address is **not** exposure evidence on its own, since IPv6 has no NAT and most addresses are global. An IPv6 asset is
 exposed only when one of these says so:
 - a communication-matrix row (inbound rule, NAT list, pool, register, source NAT)
@@ -178,6 +194,13 @@ Searching a public / NAT IP in Asset 360 lists the hosts behind it:
 - plus CrowdStrike agents whose external (egress) IP it is.
 
 An agent's external IP is used for this lookup and for matching only, not as exposure evidence: every agent has one.
+
+**Offline** on CrowdStrike assets (and the Overview link) is offline in the console **plus EDR history**: agents that left the console,
+one per device. That is the same definition as the Offline count. A switch splits the view: All offline · In the console · EDR history.
+
+**CrowdStrike assets are identified by their connection IP only**. This covers inventory matching (current connection IP, then earlier
+connection IPs plus the same hostname), All inventory, NIAM, VA-scan linking, search, IP ranges and lookups. The local IP is shown on
+the agent but not used. Old-EDR imports use their single IP as the connection IP.
 
 **CrowdStrike assets are listed under their connection IP**: the interface the agent reaches the CrowdStrike cloud from. The local IP is
 used only when there is no connection IP. An agent already matched to an inventory node stays on that node's row.
@@ -375,6 +398,17 @@ Cells with several IPs use the first one. Searches accept exact IPs, IPv4 prefix
      `MNRA` vs `MNRA1` / `MNRA2` / `MNRA3` is rejected): **not** a match. It is listed on **CrowdStrike → Possible matches** for review
      and counted nowhere.
   A NIC IP on a differently named agent is shown as "IP Used by Other Host" and never counted as installed.
+- **Large uploads (1 lakh rows)**: the new version is saved and confirmed in seconds. Uploads over 5,000 rows then re-match with
+  CrowdStrike and recompute exposure and risk **in the background**. The top bar shows "Matching … inventory rows" and pages refresh by
+  themselves when it ends.
+- **Large exports**: Excel files are written with XlsxWriter. A single list of more than ~600,000 cells (e.g. 1 lakh rows × 6+ columns)
+  downloads as CSV, which opens in Excel and is several times faster.
+- **All inventory → select and delete**: tick rows (or a whole page) and use *Delete selected*.
+  - Rows that come from a LOB inventory are removed from it (current version; logged in the item history as "deleted by hand").
+  - Every selected row leaves All inventory and every count.
+  - *Deleted rows* lists them, with Restore.
+
+  The **Found in** filter shows only assets from a LOB inventory, CrowdStrike, a VA scan or NIAM.
 - **Workbooks with several sheets**: the upload lists every sheet and pre-ticks the ones that look like inventory (an IP or node-name
   column is found). Tick or untick sheets, then click a sheet to set its header row and map its columns; each sheet keeps its own
   mapping. The ticked sheets become **one** new version, and every row keeps its sheet name in an extra "Sheet" column. When two sheets

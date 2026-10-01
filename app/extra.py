@@ -30,14 +30,14 @@ def _lookup(c, text, stale_h):
     terms = [db.canon_ip(t) if db.is_ip(t) else t for t in terms]
     ips = [t for t in terms if db.is_ip(t)]
     names = [t for t in terms if t not in ips]
-    host_cols = "aid, hostname, hostname_norm, local_ip, console_state, online_state, last_seen, first_seen, agent_version, os_version, platform_name"
+    host_cols = "aid, hostname, hostname_norm, connection_ip local_ip, connection_ip, console_state, online_state, last_seen, first_seen, agent_version, os_version, platform_name"
     by_ip, by_hn, hist = {}, {}, {}
     for ch in _chunks(ips):
         ph = ",".join("?" * len(ch))
-        for r in db.rows(c, f"SELECT {host_cols} FROM hosts WHERE local_ip IN ({ph})", ch):
+        for r in db.rows(c, f"SELECT {host_cols} FROM hosts WHERE connection_ip IN ({ph})", ch):  # CrowdStrike asset IP = connection IP
             by_ip.setdefault(r["local_ip"], []).append(r)
-        for r in db.rows(c, f"""SELECT ih.ip, h.aid, h.hostname, h.local_ip, h.console_state, h.online_state, h.last_seen
-                               FROM ip_history ih JOIN hosts h ON h.aid=ih.aid WHERE ih.kind='local' AND ih.ip IN ({ph})""", ch):
+        for r in db.rows(c, f"""SELECT ih.ip, h.aid, h.hostname, h.connection_ip local_ip, h.console_state, h.online_state, h.last_seen
+                               FROM ip_history ih JOIN hosts h ON h.aid=ih.aid WHERE ih.kind='connection' AND ih.ip IN ({ph})""", ch):
             hist.setdefault(r["ip"], {})[r["aid"]] = r
     norms = [db.norm_hostname(n) for n in names]
     for ch in _chunks(norms):
@@ -103,7 +103,7 @@ def _lookup(c, text, stale_h):
 
 
 LOOKUP_COLS = [("term", "Input"), ("type", "Type"), ("status", "EDR Status"), ("hostname", "Falcon Hostname"), ("aid", "Agent ID"),
-               ("local_ip", "Current IP"), ("last_seen", "Last Seen (UTC)"), ("first_seen", "First Seen (UTC)"),
+               ("local_ip", "Current connection IP"), ("last_seen", "Last Seen (UTC)"), ("first_seen", "First Seen (UTC)"),
                ("active_agents", "Active Agents"), ("total_agents", "Total Agents"), ("os_version", "OS"),
                ("agent_version", "Sensor"), ("lobs", "LOB"), ("inv_edr_installed", "Inventory EDR Installed"),
                ("inv_verification", "Inventory Verification"), ("crit", "Open Critical"), ("high", "Open High"),

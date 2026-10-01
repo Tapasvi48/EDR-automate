@@ -304,7 +304,9 @@ export function UploadWizard({ lob, open, onOpenChange, mspId, typeId }: { lob: 
           <div className="mx-auto mb-3 grid size-12 place-items-center rounded-full bg-good-soft"><Check className="size-6 text-good-fg" /></div>
           <div className="text-[17px] font-semibold">{typeName ? `${typeName} ` : ""}Version v{result.version_no} created</div>
           <div className="mt-1 text-muted">{fmtN(result.total)} items · <span className="text-accent-fg">+{fmtN(result.added)} new</span> · <span className="text-crit-fg">−{fmtN(result.removed)} removed</span> · <span className="text-warn-fg">{fmtN(result.modified)} modified</span> · {fmtN(result.unchanged)} unchanged</div>
-          <div className="mt-1 text-xs text-muted">EDR verification has been recalculated against the current Falcon data.</div>
+          <div className="mt-1 text-xs text-muted">{result.matching
+            ? "Large upload: matching with CrowdStrike, exposure and risk are being recalculated in the background (status at the top). Pages update by themselves when it finishes."
+            : "EDR verification has been recalculated against the current Falcon data."}</div>
           {result.warnings?.length > 0 && <Callout tone="warn" className="mx-auto mt-4 max-w-xl text-left">{result.warnings.map((w: string) => <div key={w}>{w}</div>)}</Callout>}
         </div>
       )}

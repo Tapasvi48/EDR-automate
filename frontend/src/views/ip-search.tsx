@@ -1,7 +1,7 @@
 "use client";
 import * as React from "react";
 import Link from "next/link";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, ArrowUpRight, Copy, Crosshair, Download, FileSpreadsheet, Globe2, History, LayoutGrid, Logs, PackageCheck, Printer, Route, Search, Server, ShieldAlert, ShieldCheck, ShieldX, ClipboardCheck } from "lucide-react";
 import { api, downloadExcel } from "@/lib/api";
 import { useUrlState } from "@/lib/hooks";
@@ -9,6 +9,7 @@ import { fmtDt, fmtN, fmtRel } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { Badge, Button, Card, CardHeader, Loading, PageHeader, SearchInput, Segmented, Tabs } from "@/components/ui";
 import { MbssReport } from "@/components/mbss-report";
+import { CveChips, PortChips } from "./passive-scan";
 import { SimpleTable } from "@/components/data-table";
 import { PathView } from "./attack-paths";
 import { toast } from "sonner";
@@ -103,7 +104,7 @@ function Profile({ r }: { r: any }) {
         ))}
       </nav>
       {view === "overview" && <Overview s={s} r={r} go={go} />}
-      {view === "exposure" && <div className="space-y-4"><InternetSection i={r.internet} />
+      {view === "exposure" && <div className="space-y-4"><InternetSection i={r.internet} /><PassiveCard s={s} />
         {r.behind_nat?.length > 0 && <RangeView r={{ rows: r.behind_nat, total: r.behind_nat.length, by_nat: s.ips[0] }} q={s.ips[0]} />}<Card><CardHeader title="Open ports" hint="from vulnerability scan findings" /><PortsTable rows={r.ports || []} /></Card></div>}
       {view === "attack" && <AttackCard s={s} r={r} />}
       {view === "detections" && <DetectionsSection agents={r.agents} ips={s.ips} names={s.hostnames} />}
@@ -126,6 +127,7 @@ function Overview({ s, r, go }: { s: any; r: any; go: (v: string) => void }) {
   return (
     <div className="space-y-4">
       <PostureTiles s={s} r={r} go={go} />
+      <InventoryStatus s={s} r={r} go={go} />
       <div className="grid gap-4 lg:grid-cols-2">
         <Card>
           <CardHeader title="Why this score" hint="each factor and its points" />
@@ -637,7 +639,7 @@ function Hero({ s, r }: { s: any; r: any }) {
             {s.hostnames.slice(1).map((h: string) => <Chip key={h} onClick={() => copy(h)} title="Also known as · copy">{h}</Chip>)}
           </div>
           <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-[12.5px] 2xl:grid-cols-[auto_1fr_auto_1fr]">
-            <dt className="text-muted">Owner</dt><dd>{s.lobs.length ? s.lobs.join(", ") : <span className="text-violet-fg">Not in inventory</span>}{s.msps.length ? <span className="text-muted"> · MSP {s.msps.join(", ")}</span> : null}</dd>
+            <dt className="text-muted">Owner</dt><dd>{s.lobs.length ? s.lobs.join(", ") : <span className="text-violet-fg">Not in any inventory</span>}{s.msps.length ? <span className="text-muted"> · MSP {s.msps.join(", ")}</span> : null}</dd>
             <dt className="text-muted">OS</dt><dd><OsCell os={s.os} src={s.os_source} /></dd>
             <dt className="text-muted">EDR feasibility</dt><dd>{s.feasibility ? <span className="inline-flex items-center gap-1.5"><FeasibleBadge v={s.feasibility} reason={s.feasibility_reason} /><span className="text-[11.5px] text-muted">{s.feasibility_reason}</span></span> : "–"}</dd>
             <dt className="text-muted">Inventory says</dt><dd>{s.in_inventory ? `EDR ${s.inventory_claim.join("/") || "–"}` : "–"}</dd>
@@ -716,6 +718,88 @@ function AttackCard({ s, r }: { s: any; r: any }) {
         right={b && <Link className="flex items-center gap-1 text-[12.5px] text-accent-fg hover:underline print:hidden" href={`/attack-paths/?ip=${encodeURIComponent(b.ip)}&all=1`}>Open in Attack paths <ArrowUpRight className="size-3.5" /></Link>} />
       {!p ? <Loading /> : !b ? <div className="px-4 pb-4 text-[13px] text-muted">No internal IP for this asset in the registry, so no path can be traced.</div>
         : <PathView ip={b.ip} depth="2" compact />}
+    </Card>
+  );
+}
+
+
+/* ---------------- Inventory status: which LOB inventory the asset is in, and what each record says ---------------- */
+function InventoryStatus({ s, r, go }: { s: any; r: any; go: (v: string) => void }) {
+  const rows: any[] = r.inventory || [];
+  if (!rows.length) return (
+    <Card className="flex flex-wrap items-center gap-3 border-violet/30 p-4">
+      <Badge tone="violet">Not in any inventory</Badge>
+      <span className="text-[12.5px] text-fg-2">No LOB inventory lists this asset{s.edr_status !== "Not Installed" ? " — CrowdStrike knows it" : ""}{r.scans?.length ? ", a VA scan covered it" : ""}{r.niam?.length ? ", it is in the NIAM dump" : ""}.
+        Add it to its LOB inventory so it is owned and counted.</span>
+    </Card>
+  );
+  return (
+    <Card>
+      <CardHeader title={<span className="flex items-center gap-2"><Server className="size-4" /> Inventory
+        <span className="text-[12px] font-normal text-muted">{rows.length} record{rows.length > 1 ? "s" : ""} · {Array.from(new Set(rows.map((x) => x.lob))).join(", ")}</span></span>}
+        right={<button className="text-[12.5px] text-accent-fg hover:underline" onClick={() => go("records")}>All records →</button>} />
+      <div className="grid gap-3 px-4 pb-4 md:grid-cols-2">
+        {rows.map((x) => (
+          <div key={`${x.lob_id}|${x.item_key}`} className="rounded-xl border border-border p-3 text-[12.5px]">
+            <div className="flex flex-wrap items-center gap-2">
+              <Link className="text-[13.5px] font-semibold hover:underline" href={`/lob/?id=${x.lob_id}&tab=inventory&q=${encodeURIComponent(x.ip || x.node_name)}`}>{x.lob}</Link>
+              <Badge tone="info">{x.inventory_name}</Badge>
+              {x.current_version && <span className="text-[11.5px] text-muted" title={x.current_version.filename}>v{x.current_version.version_no} · {fmtDt(x.current_version.uploaded_at).slice(0, 10)}</span>}
+              {x.file_dups > 0 && <Badge tone="warn" title="Other rows of the upload share this IP / name">DUP</Badge>}
+              <span className="ml-auto"><CoverageBadge v={x.coverage_status} /></span>
+            </div>
+            <dl className="mt-2 grid grid-cols-[auto_1fr_auto_1fr] gap-x-3 gap-y-1">
+              <dt className="text-muted">Node</dt><dd className="truncate">{x.node_name || "–"}</dd>
+              <dt className="text-muted">MSP</dt><dd>{x.msp || <span className="text-muted">Unassigned</span>}</dd>
+              <dt className="text-muted">Node type</dt><dd>{x.node_type || "–"}</dd>
+              <dt className="text-muted">Live</dt><dd><Live v={x.live} /></dd>
+              <dt className="text-muted">EDR feasible</dt><dd>{x.feasible || "–"}</dd>
+              <dt className="text-muted">Says EDR</dt><dd><YN v={x.edr_installed} /></dd>
+              <dt className="text-muted">NIAM</dt><dd>{x.niam_eff}{x.ne_id ? <span className="font-mono text-[11px] text-muted"> · {x.ne_id}</span> : null}</dd>
+              <dt className="text-muted">Matched agent</dt><dd className="truncate">{x.cs_hostname || <span className="text-muted">none</span>}{x.match_method ? <span className="text-[11px] text-muted"> · {x.match_method}</span> : null}</dd>
+            </dl>
+            {x.remarks && <div className="mt-1.5 text-[11.5px] text-fg-2">Remarks: {x.remarks}</div>}
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+
+/* ---------------- Passive internet scan (Shodan InternetDB) for this asset ---------------- */
+function PassiveCard({ s }: { s: any }) {
+  const qc = useQueryClient();
+  const ips = s.ips.join(",");
+  const { data, refetch } = useQuery({ queryKey: ["asset-passive", ips], queryFn: () => api<any>("/api/asset/passive", { params: { ips } }) });
+  const [busy, setBusy] = React.useState(false);
+  const scan = async () => {
+    setBusy(true);
+    try {
+      await api("/api/passive/scan-one", { method: "POST", body: { ip: s.ips[0] } });
+      refetch();
+      qc.invalidateQueries({ queryKey: ["asset"] });
+    } catch (e: any) { toast.error(e.message); } finally { setBusy(false); }
+  };
+  const rows = data?.rows || [];
+  return (
+    <Card>
+      <CardHeader title={<span className="inline-flex items-center gap-2"><Search className="size-4" /> Internet DB scan (passive)
+        <span className="text-[12px] font-normal text-muted">what the internet already sees on this asset's public IPs (Shodan InternetDB)</span></span>}
+        right={<Button size="sm" loading={busy} onClick={scan}>Scan now</Button>} />
+      <div className="px-4 pb-4">
+        {!rows.length ? <div className="text-[13px] text-muted">Not scanned yet. Private IPs are looked up through their public / NAT IP.</div> : (
+          <SimpleTable rows={rows} columns={[
+            { key: "ip", label: "Public IP", render: (x: any) => <Mono>{x.ip}</Mono> },
+            { key: "status", label: "Result", render: (x: any) => x.status === "none" ? <Badge>no data</Badge> : x.status === "error" ? <Badge tone="crit" title={x.error}>error</Badge>
+              : x.ports.length ? <Badge tone="crit">{x.ports.length} open</Badge> : <Badge tone="good">nothing open</Badge> },
+            { key: "ports", label: "Open ports", wrap: true, render: (x: any) => <PortChips ports={x.ports} /> },
+            { key: "vulns", label: "CVEs", wrap: true, render: (x: any) => <CveChips vulns={x.vulns} max={8} /> },
+            { key: "cpes", label: "Software", wrap: true, render: (x: any) => <span className="text-[11.5px]">{x.cpes.map((c: string) => c.replace(/^cpe:\/[aoh]:/, "")).join(", ") || "–"}</span> },
+            { key: "scanned_at", label: "Looked up", render: (x: any) => <When ts={x.scanned_at} /> },
+          ]} />
+        )}
+      </div>
     </Card>
   );
 }

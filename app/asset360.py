@@ -58,10 +58,10 @@ def profile(c, q):
     ips = {q} if ip_q else set()
     agents = []
     if ip_q:
-        agents = db.rows(c, f"SELECT {AGENT_COLS} FROM hosts h WHERE h.console_state<>'hidden' AND (h.connection_ip=? OR h.local_ip=?)", (q, q))
+        agents = db.rows(c, f"SELECT {AGENT_COLS} FROM hosts h WHERE h.console_state<>'hidden' AND h.connection_ip=?", (q,))
     else:
         agents = db.rows(c, f"SELECT {AGENT_COLS} FROM hosts h WHERE h.console_state<>'hidden' AND (h.aid=? OR h.hostname_norm=?)", (q.lower(), hn))
-        ips |= {a["connection_ip"] or a["local_ip"] for a in agents if a["connection_ip"] or a["local_ip"]}
+        ips |= {a["connection_ip"] for a in agents if a["connection_ip"]}
     inv = db.rows(c, f"""SELECT l.name lob, l.id lob_id, ic.* FROM inventory_current ic JOIN lobs l ON l.id=ic.lob_id
         WHERE {'ic.ip=?' if ip_q else 'LOWER(ic.node_name)=? OR LOWER(ic.node_name) LIKE ?'}""",
                      (q,) if ip_q else (q.lower(), hn + ".%"))
@@ -74,7 +74,7 @@ def profile(c, q):
                 WHERE ic.ip IN ({_in(len(ips))})""", list(ips))
         if not agents and ips:  # found only via inventory / NIAM -> agents on its IPs
             agents = db.rows(c, f"""SELECT {AGENT_COLS} FROM hosts h WHERE h.console_state<>'hidden'
-                                    AND (h.connection_ip IN ({_in(len(ips))}) OR h.local_ip IN ({_in(len(ips))}))""", list(ips) * 2)
+                                    AND h.connection_ip IN ({_in(len(ips))})""", list(ips))
     ipl = sorted(ips)
     vulns, counts, scans, history, niam, risk, ports = [], {}, [], [], [], [], []
     if ipl:
@@ -153,6 +153,15 @@ def profile(c, q):
                          AND v.version_no=ic.last_changed_version_no AND COALESCE(v.type_id,0)=COALESCE(ic.type_id,0) LIMIT 1""",
                    (r["lob_id"], r["item_key"]))
         r["source"] = {"kind": "manual", "label": "Manual upload", **(v or {})}
+        # which inventory of the LOB (main or a type) and its current version
+        t = db.one(c, "SELECT name, current_version_id FROM lob_types WHERE id=?", (r["type_id"],)) if r.get("type_id") else None
+        cur = db.one(c, "SELECT version_no, uploaded_at, filename FROM inventory_versions WHERE id=?",
+                     (t["current_version_id"] if t else db.one(c, "SELECT current_version_id v FROM lobs WHERE id=?", (r["lob_id"],))["v"],))
+        r["inventory_name"] = f"{t['name']} inventory" if t else "Main inventory"
+        r["current_version"] = cur
+        r["extra"] = db.jloads(r.get("extra"), {}) if isinstance(r.get("extra"), str) else (r.get("extra") or {})
+        r["niam_eff"] = r.get("niam_integrated") or ("Yes" if (r.get("ip") and c.execute(
+            "SELECT 1 FROM niam_nodes WHERE present=1 AND ip=?", (r["ip"],)).fetchone()) else "No")
     return {"mode": "single", "summary": summary, "agents": agents, "inventory": inv, "vulns": vulns, "scans": scans, "history": history,
             "niam": niam, "ports": ports, "flows": flows, "internet": internet_detail(c, ipl, agents, flows)}
 
@@ -334,21 +343,21 @@ def range_rows(c, q):
     q = q.strip()
     lo, hi = queries.cidr_range(q)
     if lo is not None:  # IPv4 network or prefix: indexed integer range
-        cond_h, cond_i, cond_v, prm = "h.local_ip_num BETWEEN ? AND ?", "ic.ip IS NOT NULL", "a.ip_num BETWEEN ? AND ?", [lo, hi]
+        cond_h, cond_i, cond_v, prm = "h.connection_ip_num BETWEEN ? AND ?", "ic.ip IS NOT NULL", "a.ip_num BETWEEN ? AND ?", [lo, hi]
     elif db.parse_net(q):  # IPv6 network
-        cond_h, cond_i, cond_v, prm = "ip_in(h.local_ip, ?)", "ip_in(ic.ip, ?)", "ip_in(a.ip, ?)", [q]
+        cond_h, cond_i, cond_v, prm = "ip_in(h.connection_ip, ?)", "ip_in(ic.ip, ?)", "ip_in(a.ip, ?)", [q]
     else:  # IPv6 text prefix such as "2001:db8:"
         pre = q.lower()
-        cond_h, cond_i, cond_v, prm = "h.local_ip LIKE ?", "ic.ip LIKE ?", "a.ip LIKE ?", [pre + "%"]
+        cond_h, cond_i, cond_v, prm = "h.connection_ip LIKE ?", "ic.ip LIKE ?", "a.ip LIKE ?", [pre + "%"]
     ips = {}
 
     def slot(ip):
         return ips.setdefault(ip, {"ip": ip, "hostname": None, "edr_status": "Not Installed", "agents": 0, "aid": None, "lobs": set(),
                                    "msps": set(), "in_inventory": False, "crit": 0, "high": 0, "med": 0, "low": 0, "last_scan": None,
                                    "node_name": None, "last_seen": None, "ne_ids": set(), "risk": None})
-    for h in db.rows(c, f"""SELECT aid, hostname, local_ip, console_state, online_state, removal_type, last_seen FROM hosts h
+    for h in db.rows(c, f"""SELECT aid, hostname, connection_ip, console_state, online_state, removal_type, last_seen FROM hosts h
                             WHERE h.console_state<>'hidden' AND {cond_h} ORDER BY console_state='active' DESC, online_state='online' DESC, last_seen DESC LIMIT 20000""", prm):
-        s = slot(h["local_ip"])
+        s = slot(h["connection_ip"])
         s["agents"] += 1 if h["console_state"] == "active" else 0
         st = agent_status(h)
         if s.get("_rank") is None or agent_rank(h) < s["_rank"]:
@@ -415,8 +424,8 @@ def nat_rows(c, ip):
     NAT, inventory NAT column) and CrowdStrike agents that leave through it (external IP)."""
     ips = {r["ip"] for r in c.execute("SELECT ip FROM asset_registry WHERE ip IS NOT NULL AND ip<>? AND (', ' || public_ips || ', ') LIKE ?",
                                       (ip, f"%, {ip}, %"))}
-    ips |= {r["ip"] for r in c.execute("""SELECT COALESCE(NULLIF(connection_ip,''), local_ip) ip FROM hosts WHERE console_state='active' AND external_ip=?
-                                        AND COALESCE(NULLIF(connection_ip,''), local_ip, '') NOT IN ('', ?) LIMIT 2000""", (ip, ip))}
+    ips |= {r["ip"] for r in c.execute("""SELECT connection_ip ip FROM hosts WHERE console_state='active' AND external_ip=?
+                                        AND COALESCE(connection_ip, '') NOT IN ('', ?) LIMIT 2000""", (ip, ip))}
     out = []
     for x in sorted(ips, key=lambda i: ip_sort_key({"ip": i}))[:500]:
         out += range_rows(c, _exact(x))
@@ -430,8 +439,8 @@ def _exact(ip):
 
 def name_rows(c, q):
     like = f"%{q.lower()}%"
-    ips = {r["local_ip"] for r in c.execute("""SELECT local_ip FROM hosts WHERE console_state<>'hidden' AND LOWER(hostname) LIKE ?
-                                              AND COALESCE(local_ip,'')<>'' LIMIT 300""", (like,))}
+    ips = {r["connection_ip"] for r in c.execute("""SELECT connection_ip FROM hosts WHERE console_state<>'hidden' AND LOWER(hostname) LIKE ?
+                                              AND COALESCE(connection_ip,'')<>'' LIMIT 300""", (like,))}
     ips |= {r["ip"] for r in c.execute("SELECT ip FROM inventory_current WHERE LOWER(node_name) LIKE ? AND COALESCE(ip,'')<>'' LIMIT 300", (like,))}
     out = []
     for ip in sorted(ips, key=lambda i: ip_sort_key({"ip": i}))[:300]:

@@ -77,7 +77,7 @@ class Progress:
 
 
 HOST_COLS = [
-    "aid", "cid", "hostname", "hostname_norm", "local_ip", "local_ip_num", "external_ip", "connection_ip",
+    "aid", "cid", "hostname", "hostname_norm", "local_ip", "local_ip_num", "external_ip", "connection_ip", "connection_ip_num",
     "default_gateway_ip", "mac_address", "platform_name", "os_version", "os_product_name", "os_build",
     "kernel_version", "product_type_desc", "chassis_type_desc", "machine_domain", "site_name", "ou",
     "agent_version", "containment_status", "rfm", "system_manufacturer", "system_product_name",
@@ -102,6 +102,7 @@ def map_host(d):
         "local_ip_num": db.ip_to_num(ip),
         "external_ip": db.canon_ip(d.get("external_ip")),
         "connection_ip": db.canon_ip(d.get("connection_ip")),
+        "connection_ip_num": db.ip_to_num(db.canon_ip(d.get("connection_ip"))),
         "default_gateway_ip": db.canon_ip(d.get("default_gateway_ip")),
         "mac_address": d.get("mac_address") or "",
         "platform_name": d.get("platform_name") or "",

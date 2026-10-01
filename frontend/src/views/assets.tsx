@@ -3,11 +3,11 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { useUrlState } from "@/lib/hooks";
 import { fmtN, pct } from "@/lib/format";
-import { Kpi, KpiGrid, PageHeader } from "@/components/ui";
+import { Kpi, KpiGrid, PageHeader, Segmented } from "@/components/ui";
 import { HostTable } from "@/components/host-table";
 import { NotConnected } from "@/components/sync-progress";
 
-const TILE_KEYS = ["status", "unmapped", "rfm", "outdated"];
+const TILE_KEYS = ["status", "unmapped", "rfm", "outdated", "history"];
 
 export default function Assets() {
   const [state, set, replaceAll] = useUrlState();
@@ -27,7 +27,7 @@ export default function Assets() {
       />
       <NotConnected />
       {k && (
-        <KpiGrid className="mb-4 grid-cols-[repeat(auto-fill,minmax(170px,1fr))]">
+        <KpiGrid className="mb-4 grid-cols-[repeat(auto-fill,minmax(150px,1fr))]">
           <Kpi label="Total hosts" value={k.active + gone} tone="info" foot={`${fmtN(k.active)} in console · ${fmtN(gone)} in EDR history`} active={none} onClick={() => only({})} />
           <Kpi label="Online" value={k.online} foot={`${pct(k.online, k.active + gone)}% of hosts`} tone="good" active={state.status === "online"} onClick={() => only({ status: "online" })} />
           <Kpi label="Offline" value={k.offline + gone} foot={`${fmtN(k.offline)} in console · ${fmtN(gone)} left the console`} tone="warn" active={state.status === "offline"} onClick={() => only({ status: "offline" })} />
@@ -36,6 +36,13 @@ export default function Assets() {
           <Kpi label="RFM" value={k.rfm} foot="reduced functionality" tone="warn" active={state.rfm === "1"} onClick={() => only({ rfm: "1" })} />
           <Kpi label="Outdated sensor" value={k.outdated_sensor} foot="older than N-2" tone="warn" active={state.outdated === "1"} onClick={() => only({ outdated: "1" })} />
         </KpiGrid>
+      )}
+      {k && state.status === "offline" && (
+        <div className="mb-3 flex flex-wrap items-center gap-3">
+          <Segmented value={state.history || "1"} onChange={(v) => set({ history: v === "1" ? undefined : v })}
+            options={[["1", `All offline (${fmtN(k.offline + gone)})`], ["0", `In the console (${fmtN(k.offline)})`], ["only", `EDR history (${fmtN(gone)})`]]} />
+          <span className="text-[12px] text-muted">EDR history = agents that left the console (removed, or only in the old EDR sheet), one per device</span>
+        </div>
       )}
       <HostTable state={state} set={set} reset={() => replaceAll({})} fixed={fixed} />
     </div>

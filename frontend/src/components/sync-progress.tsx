@@ -12,7 +12,7 @@ export function useSyncStatus() {
   return useQuery({
     queryKey: ["sync-status"],
     queryFn: () => api<any>("/api/sync/status"),
-    refetchInterval: (q) => ((q.state.data as any)?.running ? 1500 : 30000),
+    refetchInterval: (q) => ((q.state.data as any)?.running || (q.state.data as any)?.refresh?.running ? 1500 : 30000),
   });
 }
 

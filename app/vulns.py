@@ -223,10 +223,10 @@ def refresh_assets(c, lob_id=None):
                            FROM inventory_current {where} ORDER BY applicable DESC""", params):
         inv.setdefault((r["lob_id"], (r["ip"] or "").strip()), r)
     hosts = {}
-    for r in c.execute("""SELECT aid, hostname, local_ip, console_state, online_state, last_seen FROM hosts
+    for r in c.execute("""SELECT aid, hostname, connection_ip, console_state, online_state, last_seen FROM hosts
                           WHERE console_state<>'hidden' ORDER BY console_state='active' DESC, online_state='online' DESC, last_seen DESC"""):
-        if r["local_ip"]:
-            hosts.setdefault(r["local_ip"], r)
+        if r["connection_ip"]:  # CrowdStrike assets by connection IP
+            hosts.setdefault(r["connection_ip"], r)
     hmap = {}
     for r in c.execute("SELECT aid, lob_id, msp_id FROM host_map"):
         hmap.setdefault((r["aid"], r["lob_id"]), r["msp_id"])

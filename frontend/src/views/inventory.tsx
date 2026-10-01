@@ -27,7 +27,7 @@ export default function Inventory() {
           <Kpi label="Internet exposed" value={s.exposed} tone="crit" active={on("exposed", "1")} onClick={() => replaceAll({ exposed: "1" })} />
         </KpiGrid>
       )}
-      <RegistryTable state={state} set={set} reset={() => replaceAll({})} />
+      <RegistryTable state={state} set={set} reset={() => replaceAll({})} allowDelete />
     </div>
   );
 }

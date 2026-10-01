@@ -94,7 +94,7 @@ def build(parsed, mapping):
 def classify(c, rows):
     known = {r["aid"]: r["console_state"] for r in c.execute("SELECT aid, console_state FROM hosts")}
     active_hn = {r[0] for r in c.execute("SELECT hostname_norm FROM hosts WHERE console_state='active' AND hostname_norm<>''")}
-    active_ip = {r[0] for r in c.execute("SELECT local_ip FROM hosts WHERE console_state='active' AND local_ip<>''")}
+    active_ip = {r[0] for r in c.execute("SELECT connection_ip FROM hosts WHERE console_state='active' AND connection_ip<>''")}
     res = {"new": [], "live_now": [], "known": [], "reinstalled": 0}
     for h in rows:
         st = known.get(h["aid"])
@@ -154,6 +154,9 @@ def edr_commit(data: dict = Body(...)):
                 VALUES (?,{','.join('?' * len(cols))},?,?,'removed','imported',?,'import',?,1,?,?,?)""",
             [(h["aid"], *[h[k] for k in cols], db.norm_hostname(h["hostname"]), db.ip_to_num(h["local_ip"]),
               h["last_seen"] or now, iid, json.dumps(h["_raw"], default=str), now, now) for h in r["new"]])
+        # an old EDR export has one IP per device: it is the device's connection IP (how CrowdStrike assets are identified)
+        c.execute("""UPDATE hosts SET connection_ip=local_ip, connection_ip_num=local_ip_num
+                     WHERE import_id=? AND COALESCE(connection_ip,'')='' AND COALESCE(local_ip,'')<>''""", (iid,))
         c.executemany("""INSERT OR IGNORE INTO ip_history(aid, ip, ip_num, mac, kind, source, first_seen, last_seen)
                          VALUES (?,?,?,?,'local','import',?,?)""",
                       [(h["aid"], h["local_ip"], db.ip_to_num(h["local_ip"]), h["mac_address"], h["first_seen"] or h["last_seen"] or now,

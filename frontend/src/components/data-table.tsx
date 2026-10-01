@@ -43,6 +43,9 @@ type Props<T> = {
   sortable?: boolean;
   emptyText?: React.ReactNode;
   onData?: (d: any) => void;
+  /** row checkboxes: the parent keeps the selected row keys (e.g. for a bulk delete) */
+  selected?: Set<string>;
+  onSelectedChange?: (s: Set<string>) => void;
 };
 
 export function DataTable<T extends Record<string, any>>(p: Props<T>) {
@@ -191,6 +194,17 @@ export function DataTable<T extends Record<string, any>>(p: Props<T>) {
           <thead>
             <tr>
               {p.renderExpanded && <th className="sticky top-0 z-10 w-8 border-b border-border bg-surface-2" />}
+              {p.onSelectedChange && (
+                <th className="sticky top-0 z-10 w-9 border-b border-border bg-surface-2 px-3">
+                  <input type="checkbox" className="accent-[var(--accent)]" title="Select this page"
+                    checked={rows.length > 0 && rows.every((r) => p.selected?.has(rk(r)))}
+                    onChange={(e) => {
+                      const n = new Set(p.selected);
+                      rows.forEach((r) => (e.target.checked ? n.add(rk(r)) : n.delete(rk(r))));
+                      p.onSelectedChange!(n);
+                    }} />
+                </th>
+              )}
               {cols.map((c) => {
                 const s = c.sort === false || p.sortable === false ? null : c.sort || c.key;
                 const on = s && p.state.sort === s;
@@ -249,6 +263,16 @@ export function DataTable<T extends Record<string, any>>(p: Props<T>) {
                     {p.renderExpanded && (
                       <td className="border-b border-border px-2 text-muted group-hover:bg-surface-2">
                         <ChevronRight className={cn("size-4 transition-transform", isOpen && "rotate-90")} />
+                      </td>
+                    )}
+                    {p.onSelectedChange && (
+                      <td className={cn("border-b border-border px-3 group-hover:bg-surface-2", p.selected?.has(key) && "bg-accent-soft/60")}>
+                        <input type="checkbox" className="accent-[var(--accent)]" checked={!!p.selected?.has(key)}
+                          onChange={(e) => {
+                            const n = new Set(p.selected);
+                            e.target.checked ? n.add(key) : n.delete(key);
+                            p.onSelectedChange!(n);
+                          }} />
                       </td>
                     )}
                     {cols.map((c) => (

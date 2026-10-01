@@ -347,7 +347,7 @@ export default function Overview() {
               { label: "Not in inventory", n: k.online_not_inv || 0, href: "/assets/?status=online&unmapped=1" },
             ] },
             { label: "Offline", n: k.offline + rd.devices, href: "/assets/?status=offline", color: "var(--warn)", parts: [
-              { label: "Offline in the console", n: k.offline, href: "/assets/?status=offline" },
+              { label: "Offline in the console", n: k.offline, href: "/assets/?status=offline&history=0" },
               { label: "EDR history · removed from console (tracked by sync)", n: rd.from_console, href: "/edr-history/?view=console",
                 hint: "Agents that left the console (auto-removed after the inactivity window, or deleted), one per device" },
               { label: "EDR history · old EDR sheet only", n: rd.import_only, href: "/edr-history/?view=import",

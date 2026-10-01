@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import asset360, commatrix, config, cs_posture, db, detections, satellite, seceon, splunk, falcon, feasibility, sensor_support, filetemplates, sod, inventory, legacy, niam, posture, queries, registry, sync, threats, vulns
+from . import asset360, commatrix, config, cs_posture, db, detections, satellite, seceon, splunk, falcon, feasibility, sensor_support, filetemplates, sod, inventory, legacy, niam, posture, queries, registry, sync, threats, passive, vulns
 from .exporter import xlsx_response
 from .extra import router as extra_router
 
@@ -162,6 +162,56 @@ def test_connection(data: dict = Body(default={})):
     return falcon.test_connection(cid, secret, base, member)
 
 
+# every CrowdStrike API feature the console uses: scope, what it feeds, last sync result and how much data it brought
+FALCON_FEATURES = [
+    ("hosts", "Hosts: Read", "Asset list, OS, connection / external IP, sensor version", "list", "SELECT COUNT(*) n, MAX(db_last_synced) at FROM hosts WHERE source='falcon'"),
+    ("online", "Hosts: Read", "Online / offline status", "online", None),
+    ("hidden", "Hosts: Read", "Hidden hosts (left out everywhere)", "hidden", "SELECT COUNT(*) n, NULL at FROM hosts WHERE console_state='hidden'"),
+    ("nic", "Hosts: Read", "Connection-IP history (matching inventory rows to agents)", "nic", "SELECT COUNT(*) n, MAX(last_seen) at FROM ip_history WHERE kind='connection'"),
+    ("detections", "Alerts: Read", "Recent detections (Asset 360, Top riskiest assets)", "detections", "SELECT COUNT(*) n, MAX(fetched_at) at FROM detections"),
+    ("analysts", "Alerts: Read", "Analyst workload (who worked on which alert)", "detections",
+     "SELECT COUNT(*) n, MAX(fetched_at) at FROM detections WHERE COALESCE(assigned_to,'')<>''"),
+    ("spotlight", "Vulnerabilities: Read", "Spotlight vulnerabilities (Asset 360 → EDR & logging)", "posture", "SELECT COUNT(*) n, MAX(fetched_at) at FROM spotlight_vulns"),
+    ("prevention", "Prevention policies: Read", "Prevention policy names", "posture", "SELECT COUNT(*) n, MAX(modified_at) at FROM prevention_policies"),
+    ("sensors", "Sensor update policies: Read", "Sensor builds N / N-1 / N-2 and supported OS (EDR feasibility)", "sensors",
+     "SELECT COUNT(*) n, MAX(fetched_at) at FROM sensor_builds"),
+]
+CHECK_FOR = {"hosts": "Hosts: list", "online": "Hosts: online state", "hidden": "Hosts: hidden hosts", "nic": "Hosts: NIC / IP history",
+             "detections": "Alerts: recent detections", "analysts": "Alerts: analyst assignment (Analyst workload)",
+             "spotlight": "Vulnerabilities: Spotlight", "prevention": "Prevention policies: read", "sensors": "Sensor update policies: builds (N / N-1 / N-2)"}
+
+
+@app.get("/api/falcon/features")
+def falcon_features():
+    """Per feature: the scope it needs, what the last sync said for its step, and the data now in the console."""
+    out = []
+    with db.get_conn() as c:
+        last_run = db.one(c, "SELECT id, started_at, status FROM sync_runs WHERE mode<>'sample' ORDER BY id DESC LIMIT 1")
+        for key, scope, what, step, sql in FALCON_FEATURES:
+            log = db.one(c, "SELECT level, message, ts FROM sync_log WHERE run_id=? AND step=? ORDER BY id DESC LIMIT 1",
+                         (last_run["id"], step)) if last_run else None
+            data = db.one(c, sql) if sql else None
+            status = ("error" if log and log["level"] == "error" else "warning" if log and log["level"] in ("warn", "warning") else
+                      "ok" if log else "not run")
+            if key == "analysts" and data is not None and not data["n"]:
+                status = "warning" if status == "ok" else status
+            out.append({"key": key, "scope": scope, "feature": what, "status": status, "detail": log["message"] if log else None,
+                        "at": log["ts"] if log else None, "count": data["n"] if data else None, "data_at": data["at"] if data else None,
+                        "check": CHECK_FOR.get(key)})
+    return {"features": out, "configured": falcon.is_configured(), "demo": config.DEMO, "last_run": last_run}
+
+
+@app.post("/api/falcon/features/test")
+def falcon_features_test():
+    """Live check of every feature with the saved credentials (read-only calls)."""
+    if config.DEMO:
+        raise HTTPException(400, "Sample data mode: there is no CrowdStrike connection to test")
+    cid, secret, base, member = _creds_from({})
+    if not cid or not secret:
+        raise HTTPException(400, "CrowdStrike is not connected: add the API client under Sync & settings")
+    return falcon.test_connection(cid, secret, base, member)
+
+
 @app.put("/api/connection")
 def save_connection(data: dict = Body(...)):
     cid, secret, base, member = _creds_from(data)
@@ -211,6 +261,7 @@ def sync_status():
         tail = db.rows(c, "SELECT ts, level, step, message FROM sync_log WHERE run_id=? ORDER BY id DESC LIMIT 12",
                        (sync.STATUS["run_id"],)) if sync.STATUS["run_id"] else []
     return {**sync.STATUS, "runs": runs, "log_tail": list(reversed(tail)), "configured": falcon.is_configured(), "demo": config.DEMO,
+            "refresh": inventory.REFRESH,
             "interval_minutes": int(db.get_settings().get("sync_interval_minutes") or 0), "next_sync_at": sync.next_sync_at()}
 
 
@@ -309,16 +360,16 @@ def host_detail(aid: str):
         for r in inv:
             r["extra"] = db.jloads(r.get("extra"), {})
         niam = db.rows(c, """SELECT ne_id, host, ip, extra, first_seen_at, last_seen_at FROM niam_nodes
-                             WHERE present=1 AND ip=? AND ip<>''""", (h["local_ip"] or "",))
+                             WHERE present=1 AND ip=? AND ip<>''""", (h["connection_ip"] or "",))
         for n in niam:
             n["extra"] = db.jloads(n["extra"], {})
         vulns, scans = [], []
-        if h["local_ip"]:
+        if h["connection_ip"]:  # CrowdStrike asset IP = connection IP
             vulns = db.rows(c, """SELECT f.id, l.name lob, f.severity, f.sev_rank, f.name, f.plugin_id, f.port, f.protocol, f.cve,
                 f.exploit_ease, f.first_discovered, f.last_observed, f.status, f.fixed_at FROM vuln_findings f
-                JOIN lobs l ON l.id=f.lob_id WHERE f.ip=? ORDER BY f.status='open' DESC, f.sev_rank DESC LIMIT 500""", (h["local_ip"],))
+                JOIN lobs l ON l.id=f.lob_id WHERE f.ip=? ORDER BY f.status='open' DESC, f.sev_rank DESC LIMIT 500""", (h["connection_ip"],))
             scans = db.rows(c, """SELECT l.name lob, sh.scanned_at FROM vuln_scan_hosts sh JOIN lobs l ON l.id=sh.lob_id
-                WHERE sh.ip=? ORDER BY sh.scanned_at DESC""", (h["local_ip"],))
+                WHERE sh.ip=? ORDER BY sh.scanned_at DESC""", (h["connection_ip"],))
     return {"host": h, "ip_history": ips, "events": events, "same_ip": same_ip, "same_hostname": same_hn,
             "replaced_by": replaced_by, "inventory": inv, "vulns": vulns, "scans": scans, "niam": niam}
 
@@ -399,7 +450,7 @@ def _events(c, p, limit=None, offset=0):
         w.append("e.ts < date(?, '+1 day')")
         params.append(p["to"])
     if p.get("q"):
-        w.append("(h.hostname LIKE ? OR h.local_ip LIKE ? OR e.aid = ?)")
+        w.append("(h.hostname LIKE ? OR h.connection_ip LIKE ? OR e.aid = ?)")
         params += [f"%{p['q']}%", p["q"] + "%", p["q"]]
     where = ("WHERE " + " AND ".join(w)) if w else ""
     total = c.execute(f"SELECT COUNT(*) FROM host_events e LEFT JOIN hosts h ON h.aid=e.aid {where}", params).fetchone()[0]
@@ -669,7 +720,7 @@ def tags_list(lob_id: int, request: Request):
         w.append("t.msp_id IS NULL" if p["msp"] == "none" else "t.msp_id=?")
         params += [] if p["msp"] == "none" else [int(p["msp"])]
     if p.get("q"):
-        w.append("(h.hostname LIKE ? OR h.local_ip LIKE ? OR t.aid=?)")
+        w.append("(h.hostname LIKE ? OR h.connection_ip LIKE ? OR t.aid=?)")
         params += [f"%{p['q']}%", p["q"] + "%", p["q"].lower()]
     sql = f"""FROM agent_tags t LEFT JOIN hosts h ON h.aid=t.aid LEFT JOIN msps m ON m.id=t.msp_id WHERE {' AND '.join(w)}"""
     with db.get_conn() as c:
@@ -1201,13 +1252,21 @@ def upload_commit(lob_id: int, data: dict = Body(...)):
         if data.get("save_template_name"):
             template_id = _save_template(c, {"name": data["save_template_name"], "key_field": key_field, "mapping": mapping,
                                              "sheet_name": parsed["sheet"], "header_row": parsed["header_row"]})
+        defer = len(items) > inventory.DEFER_ROWS
         res = inventory.commit_version(c, lob_id, items, filename=parsed["filename"], note=data.get("note", ""),
                                        uploaded_by=data.get("uploaded_by", ""), template_id=template_id,
                                        key_field=key_field, mapping=mapping, warnings=warnings, scope_msp=scope,
-                                       type_id=data.get("type_id"))
+                                       type_id=data.get("type_id"), defer_refresh=defer)
         if data.get("set_default_template") and template_id:
             c.execute("UPDATE lobs SET default_template_id=? WHERE id=?", (template_id, lob_id))
-    return {**res, "warnings": warnings}
+    if defer:  # the version is saved; matching with CrowdStrike, exposure and risk follow in the background
+        inventory.refresh_async(f"Matching {len(items):,} inventory rows with CrowdStrike")
+    return {**res, "warnings": warnings, "matching": defer}
+
+
+@app.get("/api/refresh/status")
+def refresh_status():
+    return inventory.REFRESH
 
 
 # ------------------------------------------------------------------ templates
@@ -1361,6 +1420,7 @@ app.include_router(cs_posture.router)
 app.include_router(splunk.router)
 app.include_router(seceon.router)
 app.include_router(threats.router)
+app.include_router(passive.router)
 
 FRONTEND = config.BASE_DIR / "frontend" / "out"
 

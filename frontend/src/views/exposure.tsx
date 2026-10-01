@@ -19,6 +19,7 @@ const RULES: [string, string, string][] = [
   ["matrix", "Communication matrix", "An internet-facing row of any matrix sheet (inbound rule from Internet / ISP / any, public IP pool, NAT list, SOD NAT, exposure register) names the asset's private IP, public / NAT IP, subnet, range or host name; or a row source-NATs the asset to a public IP (every host behind a shared NAT IP counts). Rows can be marked internet-facing by hand."],
   ["ip", "Public IP", "The asset's own IPv4 is globally routable and comes from an inventory, the NIAM dump or a VA scan. A global IPv6 address alone is not evidence (IPv6 needs no NAT, so most IPv6 addresses are global): IPv6 assets are exposed only through the communication matrix, an inventory Internet Facing / Public IP column, or Mark exposed."],
   ["edr", "CrowdStrike connection IP", "The agent's connection IP (the interface it reaches the CrowdStrike cloud from) is a public IPv4. CrowdStrike assets are listed under their connection IP; the local IP and the external (egress / NAT) IP are not exposure evidence."],
+  ["passive", "Passive scan", "Shodan InternetDB (Internet DB scan page) sees open ports on the asset's public IP or the public / NAT IP it sits behind."],
   ["manual", "Marked by hand", "The IP or its subnet is on the Mark exposed list, with a note saying where you know it from."],
 ];
 const TABS = [["exposed", "Directly exposed"], ["cgnat", "Indirectly exposed"], ["shadow", "Shadow exposure"], ["whitelisted", "Whitelisted"]] as const;
@@ -44,19 +45,25 @@ export default function Exposure() {
           <Button onClick={() => setIndOpen(true)}><Network /> Indirect ranges ({fmtN(s.indirect?.length || 0)})</Button>
           <Button onClick={() => setWlOpen(true)}><ShieldOff /> Whitelist ({fmtN(s.whitelist?.length || 0)})</Button>
         </>} />
-      <KpiGrid className="grid-cols-[repeat(auto-fill,minmax(160px,1fr))]">
+      <KpiGrid className="grid-cols-[repeat(auto-fill,minmax(170px,1fr))]">
         <Kpi label="Exposed assets" value={s.exposed} tone="crit" active={tab === "exposed" && !Object.keys(state).some((k) => !["page", "size", "sort", "dir", "tab"].includes(k))} onClick={() => only({})} />
-        <Kpi label="From inventory" value={s.by_inventory} foot="facing column / public IP" active={state.exposure_src === "inventory"} onClick={() => only({ exposure_src: "inventory" })} />
-        <Kpi label="From VA scan" value={s.by_scan} foot="public IP was scanned" active={state.exposure_src === "scan"} onClick={() => only({ exposure_src: "scan" })} />
-        <Kpi label="From comm. matrix" value={s.by_matrix} foot="internet-facing matrix row" active={state.exposure_src === "matrix"} onClick={() => only({ exposure_src: "matrix" })} />
-        <Kpi label="From CrowdStrike" value={s.by_edr} foot="public connection IP" active={state.exposure_src === "edr"} onClick={() => only({ exposure_src: "edr" })} />
-        <Kpi label="Marked by hand" value={s.by_manual} tone="warn" foot="Mark exposed list" active={state.exposure_src === "manual"} onClick={() => only({ exposure_src: "manual" })} />
         <Kpi label="No EDR agent" value={s.no_edr} tone="crit" foot="exposed and unprotected" active={state.edr_status === "Not Installed"} onClick={() => only({ edr_status: "Not Installed" })} />
         <Kpi label="Crit / high vulns" value={s.crit_high} tone="serious" active={state.vulns === "crit_high"} onClick={() => only({ vulns: "crit_high" })} />
         <Kpi label="Not in any inventory" value={s.not_in_inventory} tone="violet" active={state.missing === "inventory"} onClick={() => only({ missing: "inventory" })} />
-        <Kpi label="Shadow exposure" value={sh?.shadow_ips ?? "–"} tone="serious" foot={sh ? `public IPs · ${fmtN(sh.shadow)} ports / IPs no matrix rule covers` : "public IPs no matrix rule covers"} active={tab === "shadow"} onClick={() => replaceAll({ tab: "shadow" })} />
-        <Kpi label="Indirectly exposed" value={s.cgnat} foot="CGNAT + your telecom ranges" active={tab === "cgnat"} onClick={() => replaceAll({ tab: "cgnat" })} />
+        <Kpi label="Shadow exposure" value={sh?.shadow_ips ?? "–"} tone="serious" foot="public IPs no matrix rule covers" active={tab === "shadow"} onClick={() => replaceAll({ tab: "shadow" })} />
+        <Kpi label="Indirectly exposed" value={s.cgnat} foot="CGNAT + telecom ranges" active={tab === "cgnat"} onClick={() => replaceAll({ tab: "cgnat" })} />
       </KpiGrid>
+      <div className="mt-3 flex flex-wrap items-center gap-1.5 text-[12.5px]">
+        <span className="mr-1 text-muted">Exposed by</span>
+        {([["inventory", "Inventory", s.by_inventory], ["scan", "VA scan", s.by_scan], ["matrix", "Comm. matrix", s.by_matrix], ["passive", "Passive scan", s.by_passive],
+          ["edr", "CrowdStrike", s.by_edr], ["manual", "Marked by hand", s.by_manual]] as [string, string, number][]).map(([k, l, n]) => (
+          <button key={k} onClick={() => only({ exposure_src: k })}
+            className={cn("rounded-full border px-2.5 py-0.5 transition-colors", state.exposure_src === k ? "border-accent bg-accent-soft text-accent-fg" : "border-border hover:border-border-strong")}>
+            {l} <b className="tabular">{fmtN(n || 0)}</b>
+          </button>
+        ))}
+        <span className="ml-1 text-[11.5px] text-muted">an asset can have several</span>
+      </div>
 
       <Card className="mt-4">
         <button className="flex w-full items-center gap-2 px-4 py-3 text-left text-[13px] font-semibold" onClick={() => setHow(!how)}>
@@ -82,7 +89,7 @@ export default function Exposure() {
         <Tabs value={tab} onChange={(v) => replaceAll({ tab: v })}
           tabs={TABS.map(([id, label]) => ({ id, label, count: id === "exposed" ? s.exposed : id === "cgnat" ? s.cgnat : id === "shadow" ? sh?.shadow : s.whitelisted }))} />
         {tab === "shadow" ? <ShadowTable data={sh} />
-          : <RegistryTable key={tab} state={state} set={set} reset={() => replaceAll({ tab })} fixed={fixed} storageKey="exposure" hideExposure />}
+          : <RegistryTable key={tab} state={state} set={set} reset={() => replaceAll({ tab })} fixed={fixed} storageKey="exposure-v2" hideExposure />}
       </div>
 
       <ListDialog kind="whitelist" open={wlOpen} onOpenChange={setWlOpen} entries={s.whitelist || []} />

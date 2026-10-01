@@ -65,9 +65,9 @@ HOST_LIST_COLS = """h.aid, h.hostname, h.local_ip, h.connection_ip, h.external_i
     hm.inv_lobs, hm.inv_msps, hm.tag_only, COALESCE(NULLIF(inv.inv_node_type, ''), h.product_type_desc) node_type,
     inv.inv_node_name, inv.inv_node_type, inv.inv_domain, inv.inv_live, inv.inv_os,
     inv.inv_edr_feasible, inv.inv_edr_installed, inv.inv_remarks, inv.inv_verification,
-    (SELECT GROUP_CONCAT(n.ne_id, ', ') FROM niam_nodes n WHERE n.present=1 AND n.ip=h.local_ip AND h.local_ip<>'') niam_ne_ids,
+    (SELECT GROUP_CONCAT(n.ne_id, ', ') FROM niam_nodes n WHERE n.present=1 AND n.ip=h.connection_ip AND h.connection_ip<>'') niam_ne_ids,
     MAX(COALESCE((SELECT MAX(r.exposed) FROM asset_registry r WHERE r.aid=h.aid), 0),
-        COALESCE((SELECT r.exposed FROM asset_registry r WHERE r.ip=COALESCE(NULLIF(h.connection_ip,''), h.local_ip)), 0)) internet_exposed"""
+        COALESCE((SELECT r.exposed FROM asset_registry r WHERE r.ip=h.connection_ip AND h.connection_ip<>''), 0)) internet_exposed"""
 
 HOST_EXPORT_COLUMNS = [
     ("hostname", "Hostname"), ("aid", "Agent ID"), ("connection_ip", "Connection IP"), ("local_ip", "Local IP"), ("external_ip", "External IP"),
@@ -87,7 +87,7 @@ HOST_EXPORT_COLUMNS = [
 ]
 
 HOST_SORTS = {
-    "hostname": "h.hostname COLLATE NOCASE", "local_ip": "h.local_ip_num", "first_seen": "h.first_seen",
+    "hostname": "h.hostname COLLATE NOCASE", "local_ip": "h.local_ip_num", "connection_ip": "h.connection_ip_num", "first_seen": "h.first_seen",
     "last_seen": "h.last_seen", "platform_name": "h.platform_name", "os_version": "h.os_version",
     "agent_version": "h.agent_version", "online_state": "h.online_state", "dup_count": "dup_count",
     "machine_domain": "h.machine_domain", "site_name": "h.site_name", "product_type_desc": "h.product_type_desc",
@@ -110,9 +110,17 @@ def build_host_query(p: dict, settings):
     w = []
     if p.get("exposed") in ("0", "1"):  # internet exposed per the asset registry (matrix, NAT / public IP, scans, inventory)
         w.append(("" if p["exposed"] == "1" else "NOT ") + """(EXISTS (SELECT 1 FROM asset_registry r WHERE r.aid=h.aid AND r.exposed=1)
-                  OR EXISTS (SELECT 1 FROM asset_registry r WHERE r.ip=COALESCE(NULLIF(h.connection_ip,''), h.local_ip) AND r.exposed=1))""")
+                  OR EXISTS (SELECT 1 FROM asset_registry r WHERE r.ip=h.connection_ip AND h.connection_ip<>'' AND r.exposed=1))""")
     state = p.get("state") or "active"
-    if state == "gone":
+    # "Offline" on CrowdStrike assets = offline in the console + EDR history (agents that left the console, one per device),
+    # the same definition as the Offline count. history=0: in the console only; history=only: EDR history only.
+    hist = p.get("history") or "1"
+    offline_all = state == "active" and p.get("status") == "offline" and hist in ("1", "only")
+    if offline_all:
+        p = {**p, "status": None, "online": None}
+        gone_sql = "(h.console_state='removed' AND h.gone_primary=1)"
+        w.append(gone_sql if hist == "only" else f"((h.console_state='active' AND h.online_state='offline') OR {gone_sql})")
+    elif state == "gone":
         w.append("h.console_state='removed' AND h.gone_primary=1")  # EDR history: one row per device
         if p.get("gone_source") in ("console", "import"):
             w.append("h.gone_source=?")
@@ -125,17 +133,17 @@ def build_host_query(p: dict, settings):
         terms = [t for t in re.split(r"[\s,;]+", q) if t]
         if len(terms) > 1:  # bulk paste of hostnames / IPs
             ph = ",".join("?" * len(terms))
-            w.append(f"(h.local_ip IN ({ph}) OR h.hostname_norm IN ({ph}) OR h.aid IN ({ph}))")
+            w.append(f"(h.connection_ip IN ({ph}) OR h.hostname_norm IN ({ph}) OR h.aid IN ({ph}))")
             params += [db.canon_ip(t) for t in terms] + [db.norm_hostname(t) for t in terms] + [t.lower() for t in terms]
         elif "/" in q and db.is_range_query(q):
-            w.append("ip_in(h.local_ip, ?)")
+            w.append("ip_in(h.connection_ip, ?)")
             params.append(q)
         elif db.is_ip(q):
             ip = db.canon_ip(q)
-            w.append("(h.local_ip = ? OR h.external_ip = ? OR h.connection_ip = ?)")
-            params += [ip, ip, ip]
+            w.append("(h.connection_ip = ? OR h.external_ip = ?)")
+            params += [ip, ip]
         else:
-            w.append("""(h.hostname LIKE ? ESCAPE '\\' OR h.local_ip LIKE ? ESCAPE '\\' OR h.aid = ? OR h.external_ip = ?
+            w.append("""(h.hostname LIKE ? ESCAPE '\\' OR h.connection_ip LIKE ? ESCAPE '\\' OR h.aid = ? OR h.external_ip = ?
                         OR h.serial_number LIKE ? ESCAPE '\\' OR h.mac_address LIKE ? ESCAPE '\\' OR h.last_login_user LIKE ? ESCAPE '\\'
                         OR h.tags LIKE ? ESCAPE '\\')""")
             lk = _like(q)
@@ -149,7 +157,7 @@ def build_host_query(p: dict, settings):
             w.append(f"{col} IN ({','.join('?' * len(vals))})")
             params += vals
     if p.get("dedupe") == "1" and p.get("duplicate") != "1":
-        w.append("h.is_primary = 1")
+        w.append("(h.is_primary = 1 OR h.console_state='removed')" if offline_all else "h.is_primary = 1")
     status = p.get("status")
     if status == "stale":
         p = {**p, "online": "online", "stale_online": "1"}
@@ -193,7 +201,7 @@ def build_host_query(p: dict, settings):
     if p.get("contained") == "1":
         w.append("h.containment_status <> 'normal' AND h.containment_status <> ''")
     if p.get("niam") in ("0", "1"):
-        w.append(("" if p["niam"] == "1" else "NOT ") + "EXISTS (SELECT 1 FROM niam_nodes n WHERE n.present=1 AND n.ip=h.local_ip AND h.local_ip<>'')")
+        w.append(("" if p["niam"] == "1" else "NOT ") + "EXISTS (SELECT 1 FROM niam_nodes n WHERE n.present=1 AND n.ip=h.connection_ip AND h.connection_ip<>'')")
     if p.get("inventory") == "none" or p.get("unmapped") == "1":
         # not in inventory: no LOB inventory row matches the agent (an agent tag alone does not put it in an inventory)
         w.append("NOT EXISTS (SELECT 1 FROM host_map x WHERE x.aid=h.aid AND x.source='inventory')")
@@ -237,10 +245,10 @@ def build_host_query(p: dict, settings):
     if p.get("ip_range"):
         lo, hi = cidr_range(p["ip_range"])
         if lo is not None:
-            w.append("h.local_ip_num BETWEEN ? AND ?")
+            w.append("h.connection_ip_num BETWEEN ? AND ?")
             params += [lo, hi]
         elif db.parse_net(p["ip_range"]):  # IPv6
-            w.append("ip_in(h.local_ip, ?)")
+            w.append("ip_in(h.connection_ip, ?)")
             params.append(p["ip_range"])
     sort = HOST_SORTS.get(p.get("sort") or "", "h.last_seen")
     direction = "ASC" if (p.get("dir") or "desc").lower() == "asc" else "DESC"
@@ -541,10 +549,10 @@ def compute_gone(c):
     console with a new agent is not listed. Hidden hosts are ignored everywhere. Sets hosts.gone_primary / gone_group /
     gone_source on the representative agent of each device."""
     active_hn = {r[0] for r in c.execute("SELECT hostname_norm FROM hosts WHERE console_state='active' AND hostname_norm<>''")}
-    active_ip = {r[0] for r in c.execute("SELECT local_ip FROM hosts WHERE console_state='active' AND local_ip<>''")}
+    active_ip = {r[0] for r in c.execute("SELECT connection_ip FROM hosts WHERE console_state='active' AND connection_ip<>''")}
     groups = {}
-    for r in c.execute("SELECT aid, hostname_norm, local_ip, removal_type, last_seen FROM hosts WHERE console_state='removed'"):
-        hn, ip = r["hostname_norm"] or "", r["local_ip"] or ""
+    for r in c.execute("SELECT aid, hostname_norm, connection_ip, removal_type, last_seen FROM hosts WHERE console_state='removed'"):
+        hn, ip = r["hostname_norm"] or "", r["connection_ip"] or ""
         if (hn and hn in active_hn) or (not hn and ip and ip in active_ip):
             continue
         key = ("hn", hn) if hn else ("ip", ip) if ip else ("aid", r["aid"])
@@ -623,11 +631,11 @@ def ip_search(c, q):
     lo, hi = (None, None)
     if "/" in q:
         lo, hi = cidr_range(q)
-    host_cols = """h.aid, h.hostname, h.local_ip, h.external_ip, h.platform_name, h.os_version, h.console_state,
+    host_cols = """h.aid, h.hostname, h.connection_ip, h.local_ip, h.external_ip, h.platform_name, h.os_version, h.console_state,
                    h.online_state, h.first_seen, h.last_seen, h.agent_version, h.removal_type, h.is_reinstall"""
     if lo is not None:
         out["mode"] = "cidr"
-        out["current"] = db.rows(c, f"SELECT {host_cols} FROM hosts h WHERE local_ip_num BETWEEN ? AND ? ORDER BY local_ip_num LIMIT 2000", (lo, hi))
+        out["current"] = db.rows(c, f"SELECT {host_cols} FROM hosts h WHERE connection_ip_num BETWEEN ? AND ? ORDER BY connection_ip_num LIMIT 2000", (lo, hi))
         hist_where, hp = "ih.ip_num BETWEEN ? AND ?", [lo, hi]
         inv_where, ip_ = "ic.ip <> ''", []
         inv_filter = lambda r: (db.ip_to_num(r["ip"]) or -1) >= lo and (db.ip_to_num(r["ip"]) or -1) <= hi  # noqa: E731
@@ -635,8 +643,8 @@ def ip_search(c, q):
         exact = db.ip_to_num(q) is not None
         out["mode"] = "exact" if exact else "prefix"
         op, val = ("=", q) if exact else ("LIKE", q + "%")
-        out["current"] = db.rows(c, f"""SELECT {host_cols} FROM hosts h WHERE local_ip {op} ? OR external_ip = ? OR connection_ip {op} ?
-                                         ORDER BY console_state, last_seen DESC LIMIT 2000""", (val, q, val))
+        out["current"] = db.rows(c, f"""SELECT {host_cols} FROM hosts h WHERE connection_ip {op} ? OR external_ip = ?
+                                         ORDER BY console_state, last_seen DESC LIMIT 2000""", (val, q))
         hist_where, hp = f"ih.ip {op} ?", [val]
         inv_where, ip_ = f"ic.ip {op} ?", [val]
         inv_filter = None
@@ -653,7 +661,7 @@ def ip_search(c, q):
         inv_where, ip_ = "LOWER(ic.node_name) LIKE ?", [q.lower() + "%"]
         inv_filter = None
     out["history"] = db.rows(c, f"""SELECT ih.ip, ih.kind, ih.source, ih.mac, ih.first_seen ip_first_seen, ih.last_seen ip_last_seen,
-            h.aid, h.hostname, h.local_ip current_ip, h.console_state, h.online_state, h.last_seen, h.platform_name, h.os_version
+            h.aid, h.hostname, h.connection_ip current_ip, h.console_state, h.online_state, h.last_seen, h.platform_name, h.os_version
             FROM ip_history ih JOIN hosts h ON h.aid = ih.aid WHERE {hist_where}
             ORDER BY ih.last_seen DESC LIMIT 3000""", hp)
     inv = db.rows(c, f"""SELECT l.name lob, l.id lob_id, ic.item_key, ic.ip, ic.node_name, ic.node_type, ic.live,

@@ -817,7 +817,7 @@ def nat_map(c):
                 if n.num_addresses == 1 and is_public(str(n.network_address)):
                     add(str(n.network_address), r[src])
     for r in c.execute("SELECT ip, extra FROM inventory_current WHERE COALESCE(ip,'')<>'' AND extra IS NOT NULL"):
-        for p in inventory_exposure(db.jloads(r["extra"], {}))[1]:
+        for p in inventory_exposure(r["extra"])[1]:
             if p != r["ip"]:
                 out.setdefault(p, set()).add(r["ip"])
     return out

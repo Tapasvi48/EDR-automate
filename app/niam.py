@@ -105,16 +105,16 @@ def refresh(c):
             inv_hn.setdefault(db.norm_hostname(r["nn"]), []).append(r)
     from .asset360 import agent_rank, agent_status
     agents_ip, agents_hn = {}, {}
-    for h in db.rows(c, """SELECT aid, hostname, hostname_norm, local_ip, console_state, online_state, removal_type, last_seen FROM hosts
+    for h in db.rows(c, """SELECT aid, hostname, hostname_norm, connection_ip, console_state, online_state, removal_type, last_seen FROM hosts
                           WHERE console_state<>'hidden'"""):
         st = agent_status(h)
-        if h["local_ip"]:
-            agents_ip.setdefault(h["local_ip"], []).append((st, h))
+        if h["connection_ip"]:  # CrowdStrike assets by connection IP
+            agents_ip.setdefault(h["connection_ip"], []).append((st, h))
         if h["hostname_norm"]:
             agents_hn.setdefault(h["hostname_norm"], []).append((st, h))
     hist = {}
-    for r in db.rows(c, """SELECT ih.ip, h.aid, h.hostname, h.hostname_norm, h.local_ip, h.console_state, h.online_state, h.removal_type,
-                          h.last_seen FROM ip_history ih JOIN hosts h ON h.aid=ih.aid WHERE ih.kind='local' AND h.console_state<>'hidden'"""):
+    for r in db.rows(c, """SELECT ih.ip, h.aid, h.hostname, h.hostname_norm, h.connection_ip, h.console_state, h.online_state, h.removal_type,
+                          h.last_seen FROM ip_history ih JOIN hosts h ON h.aid=ih.aid WHERE ih.kind='connection' AND h.console_state<>'hidden'"""):
         hist.setdefault(r["ip"], []).append((agent_status(r), r))
     vul = {r["ip"]: r for r in db.rows(c, """SELECT ip, SUM(crit) crit, SUM(high) high, SUM(med) med, SUM(low) low,
                                              MAX(last_scanned_at) last_scan FROM vuln_assets GROUP BY ip""")}
@@ -249,7 +249,7 @@ def niam_preview(data: dict = Body(...)):
     with db.get_conn() as c:
         cur, added, changed, removed = plan(c, nodes)
         ips = {n["ip"] for n in nodes if n["ip"]}
-        edr_ips = {r[0] for r in c.execute("SELECT local_ip FROM hosts WHERE console_state='active' AND local_ip<>''")}
+        edr_ips = {r[0] for r in c.execute("SELECT connection_ip FROM hosts WHERE console_state='active' AND connection_ip<>''")}
         inv_ips = {r[0] for r in c.execute("SELECT ip FROM inventory_current WHERE ip<>''")}
     return {"rows": len(nodes), "ne_ids": len({n["ne_id"] for n in nodes}), "added": len(added), "changed": len(changed),
             "removed": len(removed), "first": not cur, "warnings": warnings,

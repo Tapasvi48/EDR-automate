@@ -487,6 +487,22 @@ CREATE TABLE IF NOT EXISTS comm_uploads (
     rows INTEGER, replaced INTEGER, mapping TEXT, warnings TEXT
 );
 
+-- Passive internet scan (Shodan InternetDB): latest answer per public IP, and the scan jobs
+CREATE TABLE IF NOT EXISTS passive_results (
+    ip TEXT PRIMARY KEY, asset_ip TEXT, asset_name TEXT, status TEXT, ports TEXT, vulns TEXT, cpes TEXT, hostnames TEXT, tags TEXT,
+    error TEXT, scanned_at TEXT, job_id INTEGER, source TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_passive_asset ON passive_results(asset_ip);
+CREATE TABLE IF NOT EXISTS passive_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, started_at TEXT, finished_at TEXT, source TEXT, note TEXT, total INTEGER, done INTEGER,
+    found INTEGER, errors INTEGER, skipped TEXT
+);
+
+-- All inventory: rows deleted by hand (hidden from the list; inventory rows behind them are removed from their LOB inventory)
+CREATE TABLE IF NOT EXISTS registry_hidden (
+    asset_key TEXT PRIMARY KEY, ip TEXT, name TEXT, note TEXT, hidden_by TEXT, hidden_at TEXT
+);
+
 -- Manual "internet-facing" decisions on matrix rows, kept across re-uploads of the same workbook / sheet / row
 CREATE TABLE IF NOT EXISTS comm_overrides (
     workbook TEXT NOT NULL DEFAULT '', sheet TEXT NOT NULL DEFAULT '', rule_id TEXT NOT NULL, inbound INTEGER NOT NULL, note TEXT, set_at TEXT,
@@ -547,6 +563,7 @@ MIGRATIONS = [
     ("comm_rules", "workbook", "TEXT"), ("comm_rules", "sheet", "TEXT"), ("comm_rules", "sheet_type", "TEXT"),
     ("comm_uploads", "sheets", "TEXT"),               # JSON: [{sheet, type, rows}]
     ("comm_rules", "inbound_auto", "INTEGER"),
+    ("hosts", "connection_ip_num", "INTEGER"),        # CrowdStrike assets are identified by their connection IP (range searches)
     ("inventory_rows", "niam_integrated", "TEXT"), ("inventory_rows", "ne_id", "TEXT"),
     ("inventory_current", "niam_integrated", "TEXT"),  # as the inventory says; blank -> NIAM dump decides
     ("inventory_current", "ne_id", "TEXT"),        # internet-facing as computed from the row; inbound_internet may be a manual override
@@ -658,8 +675,13 @@ def all_ips(v):
     return out
 
 
+@lru_cache(maxsize=1 << 20)
 def ip_to_num(ip):
     """Integer for IPv4 (used for fast range queries). IPv6 has no number column; ranges use ip_in()."""
+    if isinstance(ip, str) and ip.count(".") == 3 and ":" not in ip:  # fast path: plain dotted IPv4, no ipaddress objects
+        p = ip.split(".")
+        if all(x.isdigit() and len(x) <= 3 and (x == "0" or x[0] != "0") and int(x) <= 255 for x in p):
+            return (int(p[0]) << 24) | (int(p[1]) << 16) | (int(p[2]) << 8) | int(p[3])
     ip = _parse_ip(ip)
     if not ip or ":" in ip:
         return None
@@ -791,6 +813,13 @@ def init_db():
                      VALUES (?,?,?,?,?,?)""",
                   (config.STANDARD_TEMPLATE, "Default inventory layout: IP, Node Name, MSP, Node Type, Domain, Live/Non Live, "
                    "OS, EDR Feasible, EDR Installed, Remarks, NIAM Integrated, NE ID", "ip", json.dumps(dict(config.INVENTORY_FIELDS)), now_iso(), now_iso()))
+        # connection IP is the CrowdStrike asset IP: integer column for ranges, old-EDR imports use their only IP
+        c.execute("CREATE INDEX IF NOT EXISTS ix_hosts_cipnum ON hosts(connection_ip_num)")
+        c.execute("CREATE INDEX IF NOT EXISTS ix_hosts_cip ON hosts(connection_ip)")
+        c.execute("UPDATE hosts SET connection_ip=local_ip WHERE COALESCE(connection_ip,'')='' AND source='import' AND COALESCE(local_ip,'')<>''")
+        todo = c.execute("SELECT aid, connection_ip FROM hosts WHERE connection_ip_num IS NULL AND COALESCE(connection_ip,'')<>''").fetchall()
+        if todo:
+            c.executemany("UPDATE hosts SET connection_ip_num=? WHERE aid=?", [(ip_to_num(r[1]), r[0]) for r in todo])
         # built-in template: keep its columns in step with the standard fields (new fields added later)
         c.execute("UPDATE templates SET mapping=?, description=? WHERE name=?",
                   (json.dumps(dict(config.INVENTORY_FIELDS)), "Default inventory layout: IP, Node Name, MSP, Node Type, Domain, Live/Non Live, "

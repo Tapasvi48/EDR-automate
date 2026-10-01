@@ -307,9 +307,23 @@ def test_connection(client_id, client_secret, base_url, member_cid=""):
         run("Hosts: online state", online)
         run("Hosts: hidden hosts", hidden, required=False)
         run("Hosts: NIC / IP history", nic, required=False)
-        run("Alerts: recent detections",
-            lambda: f"{((state['c']._call(state['c'].alerts.query_alerts_v2, 'Detections', limit=1).get('meta') or {}).get('pagination') or {}).get('total', 0):,} alerts",
-            required=False)
+        def alerts():
+            body = state["c"]._call(state["c"].alerts.query_alerts_v2, "Detections", limit=20, sort="created_timestamp.desc")
+            state["alert_ids"] = body.get("resources") or []
+            return f"{((body.get('meta') or {}).get('pagination') or {}).get('total', 0):,} alerts"
+
+        def analysts():
+            ids = state.get("alert_ids") or []
+            if not ids:
+                return "No alerts in the console to check"
+            res = state["c"]._call(state["c"].alerts.get_alerts_v2, "Detection details", composite_ids=ids[:20]).get("resources") or []
+            named = [a for a in res if a.get("assigned_to_name") or a.get("assigned_to_uid")]
+            if not named:
+                raise ValueError(f"None of the {len(res)} latest alerts is assigned to an analyst in CrowdStrike, so Analyst workload "
+                                 "has nothing to count. Analysts must assign alerts to themselves (Assign to) when they work on them.")
+            return f"{len(named)} of the {len(res)} latest alerts are assigned (e.g. {named[0].get('assigned_to_name') or named[0].get('assigned_to_uid')})"
+        if run("Alerts: recent detections", alerts, required=False):
+            run("Alerts: analyst assignment (Analyst workload)", analysts, required=False)
         run("Vulnerabilities: Spotlight", lambda: "readable" if state["c"]._call(state["c"].spotlight.query_vulnerabilities,
             "Spotlight vulnerabilities", limit=1, filter="status:'open'") is not None else "", required=False)
         run("Prevention policies: read", lambda: f"{len(state['c']._call(state['c'].prevention.query_combined_policies, 'Prevention policies', limit=100).get('resources') or [])} policies", required=False)

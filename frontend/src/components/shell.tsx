@@ -8,7 +8,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import {
   BadgeCheck, Boxes, Flame, Globe2, Waypoints, History, Radar, ShieldAlert, Upload,
   AlertTriangle, Building2, Copy, Network, FileSpreadsheet, FileText, Globe, LayoutDashboard, Menu, Monitor,
-  Moon, PackagePlus, PlugZap, RefreshCw, Search, Settings, ShieldCheck, Sun, Target, WifiOff, ShieldQuestion, GitCompare, Database, PackageCheck, ClipboardCheck, Plug, Route, Siren, UsersRound, ListTree } from "lucide-react";
+  Moon, PackagePlus, PlugZap, RefreshCw, Search, Settings, ShieldCheck, Sun, Target, WifiOff, ShieldQuestion, GitCompare, Database, PackageCheck, ClipboardCheck, Plug, Route, Siren, UsersRound, ListTree, ScanSearch, ChevronRight } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { fmtN, fmtRel } from "@/lib/format";
@@ -50,6 +50,7 @@ const NAV: { section?: string; items: { href: string; label: string; icon: React
   { section: "Vulnerability", items: [
     { href: "/vulnerabilities/", label: "Vulnerabilities", icon: ShieldAlert },
     { href: "/scan-gaps/", label: "Scan coverage", icon: Radar },
+    { href: "/passive-scan/", label: "Internet DB scan", icon: ScanSearch },
     { href: "/risk/", label: "Risk ranking", icon: Flame },
     { href: "/exceptions/", label: "Exceptions (SOD)", icon: BadgeCheck },
   ] },
@@ -68,7 +69,17 @@ const NAV: { section?: string; items: { href: string; label: string; icon: React
 function useSync() {
   const qc = useQueryClient();
   const wasRunning = React.useRef(false);
+  const wasRefreshing = React.useRef(false);
   const q = useSyncStatus();
+  React.useEffect(() => {  // background re-matching after a large upload: refresh every page's data when it ends
+    const r = !!q.data?.refresh?.running;
+    if (wasRefreshing.current && !r) {
+      if (q.data?.refresh?.error) toast.error(`Matching failed: ${q.data.refresh.error}`);
+      else toast.success(`Inventory matched with CrowdStrike · ${q.data?.refresh?.seconds ?? ""}s`);
+      qc.invalidateQueries({ predicate: (x) => x.queryKey[0] !== "sync-status" });
+    }
+    wasRefreshing.current = r;
+  }, [q.data, qc]);
   React.useEffect(() => {
     const running = !!q.data?.running;
     if (wasRunning.current && !running) {
@@ -108,6 +119,17 @@ export function Shell({ children }: { children: React.ReactNode }) {
   }, []);
   React.useEffect(() => setMobileNav(false), [pathname]);
 
+  // sidebar sections fold away; the section of the current page is always open; your choice is remembered
+  const [openSections, setOpenSections] = React.useState<Set<string>>(new Set());
+  React.useEffect(() => {
+    try { const v = localStorage.getItem("nav-open"); if (v) setOpenSections(new Set(JSON.parse(v))); } catch {}
+  }, []);
+  const toggleSection = (sec: string) => setOpenSections((prev) => {
+    const n = new Set(prev);
+    n.has(sec) ? n.delete(sec) : n.add(sec);
+    try { localStorage.setItem("nav-open", JSON.stringify([...n])); } catch {}
+    return n;
+  });
   const isActive = (href: string) => (href === "/" ? pathname === "/" : pathname.startsWith(href.replace(/\/$/, "")));
 
   return (
@@ -130,19 +152,30 @@ export function Shell({ children }: { children: React.ReactNode }) {
           <kbd className="ml-auto rounded bg-white/10 px-1.5 text-[10px]">⌘K</kbd>
         </button>
         <nav className="flex-1 overflow-y-auto px-2.5 pb-4 scroll-thin">
-          {NAV.map((g, i) => (
-            <div key={i}>
-              {g.section && <div className="px-2.5 pb-1.5 pt-4 text-[10.5px] font-semibold uppercase tracking-[.08em] text-[#5f6879]">{g.section}</div>}
-              {g.items.map((it) => (
-                <Link key={it.href} href={it.href}
-                  className={cn("mt-0.5 flex items-center gap-2.5 rounded-lg px-2.5 py-[7px] text-[13px] font-medium transition-colors",
-                    isActive(it.href) ? "bg-white/10 text-white" : "hover:bg-white/5 hover:text-white")}>
-                  <it.icon className="size-[17px] opacity-90" />
-                  {it.label}
-                </Link>
-              ))}
-            </div>
-          ))}
+          {NAV.map((g, i) => {
+            const hasActive = g.items.some((it) => isActive(it.href));
+            const open = !g.section || hasActive || openSections.has(g.section);
+            return (
+              <div key={i} className={g.section ? "mt-1" : ""}>
+                {g.section && (
+                  <button onClick={() => toggleSection(g.section!)}
+                    className={cn("flex w-full items-center rounded-md px-2.5 pb-1 pt-3 text-[10.5px] font-semibold uppercase tracking-[.08em] transition-colors hover:text-white",
+                      hasActive ? "text-[#c3cad6]" : "text-[#5f6879]")}>
+                    {g.section}
+                    <ChevronRight className={cn("ml-auto size-3.5 transition-transform", open && "rotate-90")} />
+                  </button>
+                )}
+                {open && g.items.map((it) => (
+                  <Link key={it.href} href={it.href}
+                    className={cn("mt-0.5 flex items-center gap-2.5 rounded-lg px-2.5 py-[6px] text-[13px] font-medium transition-colors",
+                      isActive(it.href) ? "bg-white/10 text-white" : "hover:bg-white/5 hover:text-white")}>
+                    <it.icon className="size-[16px] opacity-90" />
+                    {it.label}
+                  </Link>
+                ))}
+              </div>
+            );
+          })}
         </nav>
         <div className="border-t border-white/10 p-3 text-[11.5px]">
           {status?.demo ? (
@@ -179,6 +212,8 @@ export function Shell({ children }: { children: React.ReactNode }) {
           </button>
           <div className="flex-1" />
           {status?.running && <Link href="/settings/"><Badge tone="info"><RefreshCw className="size-3 animate-spin" /> {status.stage}</Badge></Link>}
+          {status?.refresh?.running && <Badge tone="info" title="Inventory, exposure and risk are being re-matched in the background; pages update when it finishes">
+            <span className="mr-1 inline-block size-2 animate-pulse rounded-full bg-accent" />{status.refresh.label || "Updating matches"}…</Badge>}
           {status?.demo && <Badge tone="violet" title="Started with --demo: sample data in data/demo.db, syncing off. Your real database is not used.">Sample data</Badge>}
           {status && !status.configured && !status.demo && <Link href="/settings/"><Badge tone="warn">Not connected</Badge></Link>}
           <ThemeToggle />

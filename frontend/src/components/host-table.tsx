@@ -13,8 +13,8 @@ import { useHostDrawer } from "./host-drawer";
 export function hostColumns(): Column[] {
   return [
     { key: "hostname", label: "Hostname", render: (r) => <span><b>{r.hostname || "(no hostname)"}</b><HostFlags r={r} /></span> },
-    { key: "connection_ip", label: "Connection IP", render: (r) => <Mono>{r.connection_ip}</Mono> },
-    { key: "local_ip", label: "Local IP", render: (r) => <Mono>{r.local_ip}</Mono> },
+    { key: "connection_ip", label: "IP (connection)", render: (r) => <Mono>{r.connection_ip}</Mono> },
+    { key: "local_ip", label: "Local IP", hidden: true, render: (r) => <Mono>{r.local_ip}</Mono> },
     { key: "online_state", label: "Status", render: (r) => <HostStatus r={r} /> },
     { key: "inv_lobs", label: "LOB", render: (r) => (r.inv_lobs ? r.inv_lobs : <Badge tone="warn">Not in inventory</Badge>) },
     { key: "inv_msps", label: "MSP", render: (r) => r.inv_msps || (r.inv_lobs ? <span className="text-muted">Unassigned</span> : "") },
@@ -139,7 +139,7 @@ export function HostTable({ state, set, reset, storageKey = "hosts", title, extr
       setState={set}
       fixed={fixed}
       omit={omit}
-      storageKey={storageKey + "-v2"}
+      storageKey={storageKey + "-v3"}
       noun="hosts"
       title={title}
       onRowClick={(r) => open(r.aid)}

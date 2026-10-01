@@ -8,6 +8,7 @@ import { fmtDt, parseTs } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { Badge, Button, Callout, Card, CardHeader, Checkbox, Field, Input, Loading, PageHeader, Select, useConfirm } from "@/components/ui";
 import { SyncProgress, nextSyncLabel, useSyncStatus } from "@/components/sync-progress";
+import { FalconFeatures } from "@/components/falcon-features";
 
 const CLOUD_LABEL: Record<string, string> = { "us-1": "US-1", "us-2": "US-2", "eu-1": "EU-1", "us-gov-1": "US-GOV-1", "us-gov-2": "US-GOV-2" };
 const INTERVALS: [string, string][] = [["15", "Every 15 minutes"], ["30", "Every 30 minutes"], ["60", "Every hour"], ["120", "Every 2 hours"], ["360", "Every 6 hours"], ["720", "Every 12 hours"], ["1440", "Once a day"], ["0", "Manual only"]];
@@ -46,6 +47,7 @@ export default function SettingsPage() {
         </Card>
       </div>
       <SatelliteCard />
+      <FalconFeatures />
       <History runs={st.runs} />
       <Detection />
       <Danger />
