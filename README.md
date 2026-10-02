@@ -111,6 +111,12 @@ fewer than half of the previously active hosts, so an API or scope problem can't
   - Each IP keeps its **last scan date**.
   - Scanned IPs are matched to the LOB inventory (MSP, node type) and to CrowdStrike (EDR status). This powers the highest-risk
     view: *critical/high findings on hosts without active EDR*.
+- **Spotlight vulnerabilities** (CrowdStrike → Spotlight vulnerabilities, `/spotlight/`): what CrowdStrike's own agent reports
+  (needs the *Vulnerabilities: Read* scope). It is a separate, read-only section. Spotlight findings are never added to the
+  VA-scan findings, so vulnerability counts, risk scores and the Overview do not change.
+  - The Findings, By CVE and By host tabs can be filtered by severity, ExPRT rating, exploit available, LOB and search.
+  - The **In VA scan** column shows whether the VA scan reports the same CVE on that connection IP; "Spotlight only" lists the
+    gaps. Each view can be exported to Excel.
 - **Old EDR inventory:** upload an older CrowdStrike host export. Agents that are no longer in the live console are stored as
   **Old EDR import**.
   - They appear in **EDR history** next to agents that were auto-removed (> N days), deleted manually, or hidden.

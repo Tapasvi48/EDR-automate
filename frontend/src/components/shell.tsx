@@ -8,7 +8,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import {
   BadgeCheck, Boxes, Flame, Globe2, Waypoints, History, Radar, ShieldAlert, Upload,
   AlertTriangle, Building2, Copy, Network, FileSpreadsheet, FileText, Globe, LayoutDashboard, Menu, Monitor,
-  Moon, PackagePlus, PlugZap, RefreshCw, Search, Settings, ShieldCheck, Sun, Target, WifiOff, ShieldQuestion, GitCompare, Database, PackageCheck, ClipboardCheck, Plug, Route, Siren, UsersRound, ListTree, ScanSearch, ChevronRight, Earth, BellRing } from "lucide-react";
+  Moon, PackagePlus, PlugZap, RefreshCw, Search, Settings, ShieldCheck, Sun, Target, WifiOff, ShieldQuestion, GitCompare, Database, PackageCheck, ClipboardCheck, Plug, Route, Siren, UsersRound, ListTree, ScanSearch, ChevronRight, Earth, BellRing, Bug } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { fmtN, fmtRel } from "@/lib/format";
@@ -42,6 +42,7 @@ const NAV: { section?: string; items: { href: string; label: string; icon: React
     { href: "/installs/", label: "New installs", icon: PackagePlus },
     { href: "/feasibility/", label: "EDR feasibility", icon: ShieldQuestion },
     { href: "/possible-matches/", label: "Possible matches", icon: GitCompare },
+    { href: "/spotlight/", label: "Spotlight vulnerabilities", icon: Bug },
   ] },
   { section: "Inventory", items: [
     { href: "/inventory/", label: "All inventory", icon: Boxes },
