@@ -1,4 +1,5 @@
 "use client";
+import { VirusTotalCard } from "@/components/intel-panel";
 import * as React from "react";
 import Link from "next/link";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -69,6 +70,7 @@ export default function Connectors() {
       <div className="mb-2 mt-6 text-[12px] font-semibold uppercase tracking-wider text-muted">Connect</div>
       <SatelliteCard />
       <SplunkCard />
+      <VirusTotalCard />
       <SeceonCard />
 
       <div className="mb-2 mt-6 text-[12px] font-semibold uppercase tracking-wider text-muted">Planned</div>

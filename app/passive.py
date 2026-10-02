@@ -19,20 +19,31 @@ from .exporter import xlsx_response
 
 router = APIRouter()
 URL = "https://internetdb.shodan.io/{ip}"
-WORKERS = 4
+WORKERS = 16  # InternetDB answers in ~0.1-0.3 s and tolerates parallel lookups; one HTTPS session per worker thread
 JOB = {"running": False, "id": None, "total": 0, "done": 0, "found": 0, "errors": 0, "source": "", "started_at": None, "finished_at": None,
        "message": ""}
 _lock = threading.Lock()
+
+
+_tls = threading.local()
+
+
+def _session():
+    """One keep-alive HTTPS session per thread: no new TLS handshake for every IP (that was most of the time per lookup)."""
+    if getattr(_tls, "s", None) is None:
+        import requests
+        _tls.s = requests.Session()
+        _tls.s.headers["User-Agent"] = "EDR-Asset-Console"
+    return _tls.s
 
 
 def _lookup(ip):
     """(status, data, error) for one public IP. status: ok | none (InternetDB has nothing) | error."""
     if config.DEMO:
         return _demo(ip)
-    import requests
     for attempt in range(4):
         try:
-            r = requests.get(URL.format(ip=ip), timeout=12, headers={"User-Agent": "EDR-Asset-Console"})
+            r = _session().get(URL.format(ip=ip), timeout=12)
         except Exception as e:  # noqa: BLE001
             if attempt == 3:
                 return "error", None, str(e)[:300]
@@ -203,8 +214,8 @@ def passive_scan_one(data: dict = Body(...)):
         scan_now(c, targets[:8], source="manual")
         rows = [_row(r) for r in db.rows(c, f"SELECT * FROM passive_results WHERE ip IN ({','.join('?' * len(targets[:8]))})",
                                          [t[0] for t in targets[:8]])]
-        from . import registry
-        registry.refresh(c)
+    from . import inventory
+    inventory.refresh_async("Updating exposure from the passive scan")  # answer now; exposure catches up in the background
     return {"rows": rows}
 
 

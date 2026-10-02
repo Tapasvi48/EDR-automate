@@ -8,7 +8,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import {
   BadgeCheck, Boxes, Flame, Globe2, Waypoints, History, Radar, ShieldAlert, Upload,
   AlertTriangle, Building2, Copy, Network, FileSpreadsheet, FileText, Globe, LayoutDashboard, Menu, Monitor,
-  Moon, PackagePlus, PlugZap, RefreshCw, Search, Settings, ShieldCheck, Sun, Target, WifiOff, ShieldQuestion, GitCompare, Database, PackageCheck, ClipboardCheck, Plug, Route, Siren, UsersRound, ListTree, ScanSearch, ChevronRight } from "lucide-react";
+  Moon, PackagePlus, PlugZap, RefreshCw, Search, Settings, ShieldCheck, Sun, Target, WifiOff, ShieldQuestion, GitCompare, Database, PackageCheck, ClipboardCheck, Plug, Route, Siren, UsersRound, ListTree, ScanSearch, ChevronRight, Earth, BellRing } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { fmtN, fmtRel } from "@/lib/format";
@@ -23,7 +23,12 @@ const NAV: { section?: string; items: { href: string; label: string; icon: React
     { href: "/", label: "Overview", icon: LayoutDashboard },
     { href: "/ip-search/", label: "Asset 360 search", icon: Globe },
   ] },
+  { section: "Attack surface", items: [
+    { href: "/surface/", label: "Attack surface", icon: Earth },
+    { href: "/passive-scan/", label: "Internet DB scan", icon: ScanSearch },
+  ] },
   { section: "Leadership & SOC", items: [
+    { href: "/alerts/", label: "Alerts", icon: BellRing },
     { href: "/top-risks/", label: "Top riskiest assets", icon: Siren },
     { href: "/attack-paths/", label: "Attack paths", icon: Route },
     { href: "/analysts/", label: "Analyst workload", icon: UsersRound },
@@ -50,7 +55,6 @@ const NAV: { section?: string; items: { href: string; label: string; icon: React
   { section: "Vulnerability", items: [
     { href: "/vulnerabilities/", label: "Vulnerabilities", icon: ShieldAlert },
     { href: "/scan-gaps/", label: "Scan coverage", icon: Radar },
-    { href: "/passive-scan/", label: "Internet DB scan", icon: ScanSearch },
     { href: "/risk/", label: "Risk ranking", icon: Flame },
     { href: "/exceptions/", label: "Exceptions (SOD)", icon: BadgeCheck },
   ] },

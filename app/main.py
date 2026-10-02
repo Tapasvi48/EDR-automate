@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import asset360, commatrix, config, cs_posture, db, detections, satellite, seceon, splunk, falcon, feasibility, sensor_support, filetemplates, sod, inventory, legacy, niam, posture, queries, registry, sync, threats, passive, vulns
+from . import asset360, commatrix, config, cs_posture, db, detections, satellite, seceon, splunk, falcon, feasibility, sensor_support, filetemplates, sod, inventory, legacy, niam, posture, queries, registry, sync, threats, passive, surface, alerts, intel, vulns
 from .exporter import xlsx_response
 from .extra import router as extra_router
 
@@ -1421,6 +1421,9 @@ app.include_router(splunk.router)
 app.include_router(seceon.router)
 app.include_router(threats.router)
 app.include_router(passive.router)
+app.include_router(surface.router)
+app.include_router(alerts.router)
+app.include_router(intel.router)
 
 FRONTEND = config.BASE_DIR / "frontend" / "out"
 

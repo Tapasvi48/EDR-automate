@@ -76,7 +76,7 @@ DEFAULT_SETTINGS = {
     "servicenow_url": "",
     "servicenow_table": "cmdb_ci_server",
 }
-SECRET_SETTINGS = {"falcon_client_secret", "satellite_token", "splunk_token", "seceon_webhook_token"}
+SECRET_SETTINGS = {"falcon_client_secret", "satellite_token", "splunk_token", "seceon_webhook_token", "virustotal_api_key"}
 
 # Standard inventory template fields: key -> label
 INVENTORY_FIELDS = [

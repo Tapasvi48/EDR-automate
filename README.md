@@ -178,6 +178,43 @@ run in the background (4 lookups at a time, with back-off when rate-limited). Op
 ("Passive scan"). Results export to Excel. The server needs outbound HTTPS to internetdb.shodan.io (a corporate proxy set in
 `HTTPS_PROXY` is honoured). Sample mode simulates the answers.
 
+**Attack surface** (left menu → Attack surface) lists every public IPv4 the console knows. Sources: inventory own / Public / NAT IP,
+communication matrix, CrowdStrike public connection IPs, VA scans, passive scans and *Your ranges*. The IPs are grouped by /24 and by
+the **advertised BGP prefix**.
+- **Look up prefixes:** RIPEstat (free, no key) returns each IP's prefix, origin ASN and holder; GreyNoise community returns whether
+  the IP is seen scanning the internet.
+- **Your ASNs:** mark the ASNs that are yours, and *Advertised by your ASNs* lists every prefix they announce. The prefixes are
+  fetched from RIPEstat automatically when an ASN is added and refreshed in the background once they are more than a week old;
+  removing an ASN drops its prefixes. Prefixes with no known
+  IP are uninventoried public space. Do not mark your ISP's ASN if your IPs are ISP-provided.
+- **Scan all public IPs:** runs InternetDB on the whole surface; any advertised prefix up to /20 can be scanned to find exposed IPs
+  nobody listed.
+- The Internet DB scan page sits in the same menu section.
+
+**Internet intelligence for any public IP:** Asset 360 → Internet scan, or a public IP searched in Asset 360 that no source knows. One card
+combines four sources:
+- **Shodan InternetDB:** ports, CVEs, software, hostnames (no key).
+- **VirusTotal:** vendors flagging the IP, reputation, owner, country. Needs a free VirusTotal API key, entered under Integrations;
+  free tier is 4 lookups a minute and 500 a day.
+- **GreyNoise:** seen scanning the internet / benign service (no key).
+- **RIPEstat:** advertised prefix, ASN, holder (no key).
+
+Links open the IP on Shodan (`https://www.shodan.io/search?query=<ip>`), VirusTotal, Censys and GreyNoise. Answers are cached;
+*Look up again* refreshes them.
+
+**Alerts** (Leadership & SOC → Alerts) shows recent alerts in one feed, linked to the asset each one concerns (name, IP, LOB, internet
+exposure), with filters and an Excel export:
+- CrowdStrike (stored on sync)
+- Splunk Enterprise Security notables (asked live, cached for a minute)
+- Seceon NDR (webhook / uploads)
+
+A **Sources** strip shows, per source, whether it is set up, how many alerts are stored and when they were last fetched. When a source
+is empty it gives the reason: not connected, no sync yet, the last sync's error (e.g. a missing Alerts: Read scope), or no Seceon alert
+received. **Fetch CrowdStrike alerts now** pulls alerts without a full sync and shows the exact error if it fails.
+
+**Passive scan speed:** InternetDB answers in about 0.1–0.3 s per IP. Lookups now reuse one HTTPS connection per worker (no TLS
+handshake per IP) and run 16 at a time. A single-IP scan returns at once while exposure is recomputed in the background.
+
 **IPv6:** a global IPv6 address is **not** exposure evidence on its own, since IPv6 has no NAT and most addresses are global. An IPv6 asset is
 exposed only when one of these says so:
 - a communication-matrix row (inbound rule, NAT list, pool, register, source NAT)
@@ -281,6 +318,11 @@ Each Satellite host's latest OpenSCAP report is stored with **every** rule resul
 - **MBSS page:** compliance by control (fleet), failed rules, and by asset. Clicking an asset opens its report.
 - **Report contents:** compliance ring, compliance per control, and a rule list filtered by result. Failed rules expand to their fix. Downloadable as Excel (summary, by control, all rules).
 - Asset 360 → Patches & MBSS shows the same report.
+
+Asset 360 tabs: Overview (status tiles only) · Inventory (records, NIAM) · Exposure · Internet scan (InternetDB, RIPEstat prefix / ASN,
+GreyNoise, links to Shodan / Censys / GreyNoise / VirusTotal) · Attack path · Detections · Vulnerabilities (VA findings, CVEs seen
+from the internet, SOD exceptions, scans) · Patches & MBSS · EDR & logging · Related assets (grouped by relation). The header links
+every public IP of the asset to Shodan, Censys, GreyNoise and VirusTotal.
 
 ### Asset 360 layout
 

@@ -2,13 +2,14 @@
 import * as React from "react";
 import Link from "next/link";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, ArrowUpRight, Copy, Crosshair, Download, FileSpreadsheet, Globe2, History, LayoutGrid, Logs, PackageCheck, Printer, Route, Search, Server, ShieldAlert, ShieldCheck, ShieldX, ClipboardCheck } from "lucide-react";
+import { Activity, ArrowUpRight, Network, Radar, RefreshCw, Copy, Crosshair, Download, FileSpreadsheet, Globe2, History, LayoutGrid, Logs, PackageCheck, Printer, Route, Search, Server, ShieldAlert, ShieldCheck, ShieldX, ClipboardCheck } from "lucide-react";
 import { api, downloadExcel } from "@/lib/api";
 import { useUrlState } from "@/lib/hooks";
 import { fmtDt, fmtN, fmtRel } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { Badge, Button, Card, CardHeader, Loading, PageHeader, SearchInput, Segmented, Tabs } from "@/components/ui";
 import { MbssReport } from "@/components/mbss-report";
+import { IntelPanel, LOOKUPS } from "@/components/intel-panel";
 import { CveChips, PortChips } from "./passive-scan";
 import { SimpleTable } from "@/components/data-table";
 import { PathView } from "./attack-paths";
@@ -22,12 +23,13 @@ export default function AssetSearch() {
   return (
     <div>
       <PageHeader title="Asset 360"
-        sub="Everything about one asset: search an IP, hostname (or part of one), agent ID, prefix or CIDR." />
+        sub="Everything about one asset: search an IP, hostname (or part of one), agent ID, prefix or CIDR. Any public IP also shows what the internet knows about it." />
       <div className="flex flex-wrap gap-2">
         <SearchInput big autoFocus className="min-w-[260px] flex-1" value={q} onChange={(v) => set({ q: v })} placeholder="10.20.34.17  ·  2001:db8::17  ·  CORP-WS-0369  ·  NE ID  ·  10.20.34.  ·  10.20.0.0/16  ·  agent ID" />
         <Button className="h-11" disabled={!q} onClick={() => downloadExcel("/api/asset/export", { q })}
           title={r?.mode === "single" ? "Everything on this page in one workbook, for audits and incident tickets" : "Download the list"}>
           {r?.mode === "single" ? <><FileSpreadsheet /> Evidence pack</> : <><Download /> Excel</>}</Button>
+        {r?.mode === "single" && (publicIps(r).length > 0 || (!r.summary.found && isPublicV4(q))) && <RescanButton ips={publicIps(r).length ? publicIps(r) : [q]} />}
         {r?.mode === "single" && <Button className="h-11 print:hidden" onClick={() => window.print()} title="Print or save this page as PDF"><Printer /> PDF</Button>}
       </div>
       {!q && (
@@ -69,10 +71,11 @@ function RangeView({ r, q }: { r: any; q: string }) {
 }
 
 const VIEWS: { id: string; label: string; icon: React.ElementType }[] = [
-  { id: "overview", label: "Overview", icon: LayoutGrid }, { id: "exposure", label: "Exposure", icon: Globe2 },
+  { id: "overview", label: "Overview", icon: LayoutGrid }, { id: "inventory", label: "Inventory", icon: Server },
+  { id: "exposure", label: "Exposure", icon: Globe2 }, { id: "internet", label: "Internet scan", icon: Radar },
   { id: "attack", label: "Attack path", icon: Route }, { id: "detections", label: "Detections", icon: Crosshair },
   { id: "vulns", label: "Vulnerabilities", icon: ShieldAlert }, { id: "patching", label: "Patches & MBSS", icon: PackageCheck },
-  { id: "edr", label: "EDR & logging", icon: ShieldCheck }, { id: "records", label: "Records", icon: History },
+  { id: "edr", label: "EDR & logging", icon: ShieldCheck }, { id: "related", label: "Related assets", icon: Network },
 ];
 
 function Profile({ r }: { r: any }) {
@@ -81,7 +84,13 @@ function Profile({ r }: { r: any }) {
   const view = VIEWS.some((v) => v.id === state.view) ? state.view : "overview";
   const go = (v: string) => { set({ view: v === "overview" ? undefined : v }); window.scrollTo({ top: 0, behavior: "smooth" }); };
   const { data: p } = usePosture(s, r);
-  if (!s.found) return <Card className="mt-5 p-8 text-center text-muted">Nothing found for “{s.query}” in CrowdStrike, any inventory, vulnerability scan or the NIAM dump.</Card>;
+  if (!s.found) return isPublicV4(s.query) ? (
+    <div className="mt-5 space-y-3">
+      <Card className="flex flex-wrap items-center gap-2 px-4 py-3 text-[13px]"><Badge tone="violet">Not a known asset</Badge>
+        <span className="text-muted">{s.query} is in no inventory, CrowdStrike, VA scan or NIAM dump. Here is what the internet knows about it.</span></Card>
+      <IntelPanel ip={s.query} showAsset />
+    </div>
+  ) : <Card className="mt-5 p-8 text-center text-muted">Nothing found for “{s.query}” in CrowdStrike, any inventory, vulnerability scan or the NIAM dump.</Card>;
   const v = s.vulns;
   const badge: Record<string, React.ReactNode> = {
     exposure: r.internet?.verdict === "exposed" ? <Dot tone="crit" /> : null,
@@ -103,15 +112,18 @@ function Profile({ r }: { r: any }) {
           </button>
         ))}
       </nav>
-      {view === "overview" && <Overview s={s} r={r} go={go} />}
-      {view === "exposure" && <div className="space-y-4"><InternetSection i={r.internet} /><PassiveCard s={s} />
+      {view === "overview" && <PostureTiles s={s} r={r} go={go} />}
+      {view === "inventory" && <InventoryView s={s} r={r} />}
+      {view === "internet" && <InternetScanView s={s} r={r} />}
+      {view === "exposure" && <div className="space-y-4"><InternetSection i={r.internet} />
         {r.behind_nat?.length > 0 && <RangeView r={{ rows: r.behind_nat, total: r.behind_nat.length, by_nat: s.ips[0] }} q={s.ips[0]} />}<Card><CardHeader title="Open ports" hint="from vulnerability scan findings" /><PortsTable rows={r.ports || []} /></Card></div>}
       {view === "attack" && <AttackCard s={s} r={r} />}
       {view === "detections" && <DetectionsSection agents={r.agents} ips={s.ips} names={s.hostnames} />}
-      {view === "vulns" && <div className="space-y-4"><Card><CardHeader title="Vulnerabilities" hint={`${v.Critical} critical · ${v.High} high · ${v.Medium} medium · ${v.Low} low open · ${fmtN(v.fixed)} fixed`} /><VulnTable rows={r.vulns} /></Card><ExceptionsCard s={s} agents={r.agents} /></div>}
+      {view === "vulns" && <div className="space-y-4"><Card><CardHeader title="Vulnerabilities" hint={`${v.Critical} critical · ${v.High} high · ${v.Medium} medium · ${v.Low} low open · ${fmtN(v.fixed)} fixed`} /><VulnTable rows={r.vulns} /></Card>
+        <PassiveCves s={s} go={go} /><ExceptionsCard s={s} agents={r.agents} /><ScansCard rows={r.scans} /></div>}
       {view === "patching" && <Card><SatellitePanel ips={s.ips} names={s.hostnames} /></Card>}
       {view === "edr" && <EdrView s={s} r={r} />}
-      {view === "records" && <Records s={s} r={r} />}
+      {view === "related" && <RelatedView s={s} r={r} />}
     </div>
   );
 }
@@ -121,32 +133,6 @@ const Count = ({ n, tone }: { n: number; tone: string }) => (
   <span className={cn("rounded-full px-1.5 text-[10.5px] font-semibold", tone === "crit" ? "bg-crit-soft text-crit-fg" : "bg-warn-soft text-warn-fg")}>{n}</span>
 );
 
-function Overview({ s, r, go }: { s: any; r: any; go: (v: string) => void }) {
-  const { data: p } = usePosture(s, r);
-  const max = Math.max(1, ...((p?.factors || []).map((f: any) => f[1])));
-  return (
-    <div className="space-y-4">
-      <PostureTiles s={s} r={r} go={go} />
-      <InventoryStatus s={s} r={r} go={go} />
-      <div className="grid gap-4 lg:grid-cols-2">
-        <Card>
-          <CardHeader title="Why this score" hint="each factor and its points" />
-          <div className="space-y-2 px-4 pb-4">
-            {!p ? <Loading /> : !(p.factors || []).filter((f: any) => f[1]).length ? <div className="text-[13px] text-good-fg">No risk factors found.</div>
-              : p.factors.filter((f: any) => f[1]).map(([n, pts]: any) => (
-                <div key={n} className="grid grid-cols-[minmax(0,1fr)_120px_36px] items-center gap-3 text-[12.5px]">
-                  <span className="truncate">{n}</span>
-                  <span className="h-1.5 overflow-hidden rounded-full bg-surface-3"><span className="block h-full rounded-full bg-serious" style={{ width: `${(100 * pts) / max}%` }} /></span>
-                  <b className="text-right tabular">+{pts}</b>
-                </div>))}
-          </div>
-        </Card>
-        <LastGoodCard s={s} agents={r.agents} />
-      </div>
-    </div>
-  );
-}
-
 function EdrView({ s, r }: { s: any; r: any }) {
   return (
     <div className="space-y-4">
@@ -154,40 +140,6 @@ function EdrView({ s, r }: { s: any; r: any }) {
       <Card><CardHeader title="Prevention policy & Spotlight" hint="CrowdStrike's own view of this host" /><CrowdStrikePanel agents={r.agents} ips={s.ips} /></Card>
       <Card><CardHeader title="SIEM logging (Splunk)" hint="is this host sending logs?" /><SplunkPanel names={s.hostnames} ips={s.ips} /></Card>
     </div>
-  );
-}
-
-function Records({ s, r }: { s: any; r: any }) {
-  const [sub, setSub] = React.useState("inventory");
-  const opts: [string, React.ReactNode][] = [["inventory", `Inventory (${r.inventory.length})`], ["scans", `Scans (${r.scans.length})`],
-    ...(r.niam?.length ? [["niam", `NIAM (${r.niam.length})`] as [string, string]] : []), ["related", "Related assets"]];
-  return (
-    <Card>
-      <div className="flex items-center gap-2 border-b border-border px-4 py-2.5"><Segmented value={sub} onChange={setSub} options={opts} /></div>
-      {sub === "inventory" && <><InventorySources /><SimpleTable rows={r.inventory} empty="Not in inventory" columns={[
-        { key: "source", label: "Source", render: (x: any) => <span className="text-[12px]"><Badge tone="info">{x.source?.label || "Manual upload"}</Badge>
-          {x.source?.filename && <span className="ml-1.5 text-muted" title={x.source.filename}>v{x.source.version_no} · {fmtDt(x.source.uploaded_at).slice(0, 10)}</span>}</span> },
-        { key: "lob", label: "LOB", render: (x: any) => <Link className="font-semibold hover:underline" href={`/lob/?id=${x.lob_id}&tab=inventory&q=${encodeURIComponent(x.ip || x.node_name)}`}>{x.lob}</Link> },
-        { key: "msp", label: "MSP", render: (x: any) => x.msp || <span className="text-muted">Unassigned</span> },
-        { key: "ip", label: "IP", render: (x: any) => <Mono>{x.ip}</Mono> }, { key: "node_name", label: "Node name" },
-        { key: "node_type", label: "Node type" }, { key: "live", label: "Live", render: (x: any) => <Live v={x.live} /> },
-        { key: "edr_installed", label: "EDR (inventory)", render: (x: any) => <YN v={x.edr_installed} /> },
-        { key: "coverage_status", label: "EDR status", render: (x: any) => <CoverageBadge v={x.coverage_status} /> },
-        { key: "remarks", label: "Remarks", wrap: true },
-      ]} /></>}
-      {sub === "scans" && <SimpleTable rows={r.scans} empty="Never scanned" columns={[
-        { key: "ip", label: "IP", render: (x: any) => <Mono>{x.ip}</Mono> }, { key: "lob", label: "LOB" },
-        { key: "scanned_at", label: "Last scanned", render: (x: any) => <When ts={x.scanned_at} /> }, { key: "filename", label: "Scan file" },
-      ]} />}
-      {sub === "niam" && <SimpleTable rows={r.niam || []} empty="Not in the NIAM dump" columns={[
-        { key: "ne_id", label: "NE ID", render: (x: any) => <b>{x.ne_id}</b> },
-        { key: "host", label: "Host (as in NIAM)", render: (x: any) => <Mono>{x.host}</Mono> },
-        { key: "present", label: "In latest dump", render: (x: any) => x.present ? <Badge tone="good">Yes</Badge> : <Badge tone="neutral">Dropped {fmtDt(x.removed_at).slice(0, 10)}</Badge> },
-        { key: "extra", label: "NIAM details", wrap: true, render: (x: any) => <span className="text-xs text-fg-2">{Object.entries(x.extra || {}).map(([k, v]) => `${k}: ${v}`).join(" · ")}</span> },
-        { key: "first_seen_at", label: "First in NIAM", render: (x: any) => fmtDt(x.first_seen_at) },
-      ]} />}
-      {sub === "related" && <RelatedAssets s={s} agents={r.agents} />}
-    </Card>
   );
 }
 
@@ -251,7 +203,7 @@ function InternetSection({ i }: { i: any }) {
   return (
     <Card>
       <CardHeader title={<span className="inline-flex items-center gap-2"><Globe2 className="size-4" /> Internet exposed <Badge tone={tone as any}>{label}</Badge></span>}
-        hint={i.public_ips.length ? `public / NAT IP ${i.public_ips.join(", ")}` : "no public IP known for this asset"}
+        hint={i.public_ips.length ? `public / NAT IP ${i.public_ips.join(", ")}` : undefined}
         right={i.internal_ip && i.verdict !== "not_exposed" ? <Link className="text-[12.5px] text-accent-fg hover:underline print:hidden" href={`/attack-paths/?ip=${encodeURIComponent(i.internal_ip)}`}>Attack path →</Link> : undefined} />
       <div className="grid gap-3 px-4 pb-4 lg:grid-cols-3">
         <Method title="Communication matrix" hit={i.matrix.length > 0} none="No internet-facing or source-NAT matrix row covers this asset.">
@@ -620,12 +572,10 @@ function Chip({ children, onClick, title }: { children: React.ReactNode; onClick
 }
 
 function Hero({ s, r }: { s: any; r: any }) {
-  const { data: p } = usePosture(s, r);
   const copy = (t: string) => { navigator.clipboard?.writeText(t); toast.success(`Copied ${t}`); };
-  const level = p?.level || "Low";
   return (
     <Card className="relative overflow-hidden">
-      <span className="absolute inset-y-0 left-0 w-1" style={{ background: p?.score != null ? LEVEL_COLOR[level] : "var(--border)" }} />
+      <span className={cn("absolute inset-y-0 left-0 w-1", s.exposure?.length ? "bg-crit" : s.edr_status === "Online" ? "bg-good" : "bg-warn")} />
       <div className="flex flex-wrap items-start gap-5 p-5 pl-6">
         <div className="min-w-[280px] flex-1 space-y-2">
           <div className="flex flex-wrap items-center gap-2">
@@ -642,18 +592,9 @@ function Hero({ s, r }: { s: any; r: any }) {
             <dt className="text-muted">Owner</dt><dd>{s.lobs.length ? s.lobs.join(", ") : <span className="text-violet-fg">Not in any inventory</span>}{s.msps.length ? <span className="text-muted"> · MSP {s.msps.join(", ")}</span> : null}</dd>
             <dt className="text-muted">OS</dt><dd><OsCell os={s.os} src={s.os_source} /></dd>
             <dt className="text-muted">EDR feasibility</dt><dd>{s.feasibility ? <span className="inline-flex items-center gap-1.5"><FeasibleBadge v={s.feasibility} reason={s.feasibility_reason} /><span className="text-[11.5px] text-muted">{s.feasibility_reason}</span></span> : "–"}</dd>
-            <dt className="text-muted">Inventory says</dt><dd>{s.in_inventory ? `EDR ${s.inventory_claim.join("/") || "–"}` : "–"}</dd>
           </dl>
         </div>
-        <div className="flex min-w-[300px] max-w-[460px] flex-1 items-start gap-4 rounded-xl border border-border bg-surface-2/60 p-3">
-          {p?.score != null ? <ScoreRing score={p.score} level={level} /> : <div className="grid size-[76px] place-items-center text-[11px] text-muted">{p ? "no score" : "…"}</div>}
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2 text-[12px] text-muted">Asset risk
-              {p?.level && <Badge tone={level === "Critical" ? "crit" : level === "High" ? "serious" : level === "Medium" ? "warn" : "good"}>{level}</Badge>}
-              <Link className="ml-auto text-[11.5px] text-accent-fg hover:underline print:hidden" href="/top-risks/">Top risks →</Link></div>
-            {p?.action && <div className="mt-1 text-[13.5px] font-semibold leading-snug">{p.action}</div>}
-          </div>
-        </div>
+        <ExternalLookups s={s} r={r} />
       </div>
     </Card>
   );
@@ -666,6 +607,7 @@ const TILE_TONE: Record<string, string> = {
 
 function PostureTiles({ s, r, go }: { s: any; r: any; go: (v: string) => void }) {
   const { data: p } = usePosture(s, r);
+  const { data: pv } = useQuery({ queryKey: ["asset-passive", s.ips.join(",")], queryFn: () => api<any>("/api/asset/passive", { params: { ips: s.ips.join(",") } }) });
   const spl = useQuery({ queryKey: ["asset-splunk", s.hostnames, s.ips], queryFn: () => api<any>("/api/asset/splunk", { params: { hosts: s.hostnames.join(","), ips: s.ips.join(",") } }) });
   const v = s.vulns, a = s.edr_agent, i = r.internet, sat = p?.sat, det = p?.det, ndr = p?.ndr, b = p?.blast;
   const mbssTot = sat ? (sat.compliance_passed || 0) + (sat.compliance_failed || 0) : 0;
@@ -674,7 +616,7 @@ function PostureTiles({ s, r, go }: { s: any; r: any; go: (v: string) => void })
     { key: "edr", icon: s.edr_status === "Online" ? ShieldCheck : ShieldX, label: "EDR", value: s.edr_status === "Not Installed" ? "Not installed" : s.edr_status,
       sub: a ? `sensor ${a.agent_version || "–"} · seen ${fmtRel(a.last_seen)}` : "no agent ever", tone: s.edr_status === "Online" ? "good" : s.edr_status === "Offline" ? "warn" : "crit", go: () => go("edr") },
     { key: "internet", icon: Globe2, label: "Internet", value: i?.verdict === "exposed" ? "Exposed" : i?.verdict === "cgnat" ? "Indirect" : i?.verdict === "whitelisted" ? "Whitelisted" : "Not exposed",
-      sub: i?.verdict === "exposed" ? `${i.matrix.length} rule(s)${i.shadow ? ` · ${i.shadow} shadow port(s)` : ""}` : i?.public_ips?.length ? `public ${i.public_ips[0]}` : "no public IP",
+      sub: i?.verdict === "exposed" ? `${i.matrix.length} rule(s)${i.shadow ? ` · ${i.shadow} shadow port(s)` : ""}` : i?.public_ips?.length ? `public ${i.public_ips[0]}` : undefined,
       tone: i?.verdict === "exposed" ? "crit" : i?.verdict === "cgnat" ? "warn" : "good", go: () => go("exposure") },
     { key: "vulns", icon: ShieldAlert, label: "Vulnerabilities", value: <span className="flex items-baseline gap-1.5">{v.Critical}<span className="text-[11px] font-normal">crit</span>{v.High}<span className="text-[11px] font-normal">high</span></span>,
       sub: s.last_scan ? `scanned ${fmtRel(s.last_scan)}` : "never scanned", tone: v.Critical ? "crit" : v.High ? "warn" : s.last_scan ? "good" : "neutral", go: () => go("vulns") },
@@ -687,11 +629,16 @@ function PostureTiles({ s, r, go }: { s: any; r: any; go: (v: string) => void })
     { key: "siem", icon: Logs, label: "SIEM logging", value: !spl.data ? "…" : !spl.data.configured ? "Not connected" : spl.data.rows?.length ? "Logging" : "No logs",
       sub: spl.data?.rows?.[0] ? `last event ${fmtRel(spl.data.rows[0].last_seen)}` : spl.data?.configured ? `nothing in ${spl.data.days || 7} days` : "Splunk",
       tone: !spl.data?.configured ? "neutral" : spl.data.rows?.length ? "good" : "crit", go: () => go("edr") },
+    { key: "inv", icon: Server, label: "Inventory", value: r.inventory?.length ? (s.lobs.join(", ") || "In inventory") : "Not in inventory",
+      sub: r.inventory?.length ? `${r.inventory.length} record(s) · ${r.inventory[0].inventory_name || ""}` : "no LOB inventory lists it", tone: r.inventory?.length ? "info" : "warn", go: () => go("inventory") },
+    { key: "iscan", icon: Radar, label: "Internet scan", value: !pv ? "…" : pv.rows.length ? `${pv.rows.reduce((a: number, x: any) => a + (x.ports?.length || 0), 0)} open ports` : "Not scanned",
+      sub: pv?.rows?.length ? `${pv.rows.reduce((a: number, x: any) => a + (x.vulns?.length || 0), 0)} CVEs seen from the internet` : publicIps(r).length ? "public IP not looked up yet" : undefined,
+      tone: pv?.rows?.some((x: any) => x.vulns?.length) ? "crit" : pv?.rows?.some((x: any) => x.ports?.length) ? "warn" : "neutral", go: () => go("internet") },
     { key: "blast", icon: Route, label: "Blast radius", value: !p ? "…" : b ? `${b.reach} reachable` : "–",
       sub: b ? `${b.weak} weak · reachable from ${b.reached_by} exposed` : "no matrix data", tone: b?.weak ? "crit" : b?.reach ? "warn" : "good", go: () => go("attack") },
   ];
   return (
-    <div className="grid grid-cols-2 gap-2.5 md:grid-cols-4 2xl:grid-cols-8">
+    <div className="grid grid-cols-2 gap-2.5 md:grid-cols-3 xl:grid-cols-5">
       {tiles.map((t) => (
         <button key={t.key} onClick={t.go}
           className="group flex flex-col gap-1.5 rounded-xl border border-border bg-surface p-3 text-left shadow-card transition-all hover:-translate-y-px hover:border-accent">
@@ -802,4 +749,166 @@ function PassiveCard({ s }: { s: any }) {
       </div>
     </Card>
   );
+}
+
+
+/* ---------------- external lookups for the asset's public IPs ---------------- */
+
+function publicIps(r: any): string[] {
+  return (r.internet?.public_ips || []).filter((x: string) => !x.includes(":"));
+}
+function ExternalLookups({ s, r }: { s: any; r: any }) {
+  const ips = publicIps(r);
+  if (!ips.length) return null;
+  return (
+    <div className="min-w-[260px] rounded-xl border border-border bg-surface-2/60 p-3 text-[12.5px]">
+      <div className="mb-1.5 text-[11.5px] font-medium text-muted">Look up public IP{ips.length > 1 ? "s" : ""} on the internet</div>
+      {ips.slice(0, 3).map((ip) => (
+        <div key={ip} className="flex flex-wrap items-center gap-x-2 gap-y-1 py-0.5">
+          <Mono>{ip}</Mono>
+          {LOOKUPS.map(([n, url]) => <a key={n} href={url(ip)} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-0.5 text-accent-fg hover:underline">{n}<ArrowUpRight className="size-3" /></a>)}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ---------------- Inventory tab ---------------- */
+function InventoryView({ s, r }: { s: any; r: any }) {
+  return (
+    <div className="space-y-4">
+      <InventoryStatus s={s} r={r} go={() => {}} />
+      <Card>
+        <CardHeader title="Inventory records" hint="every row of every LOB inventory for this asset" />
+        <InventorySources />
+        <SimpleTable rows={r.inventory} empty="Not in any LOB inventory" columns={[
+          { key: "lob", label: "LOB", render: (x: any) => <Link className="font-semibold hover:underline" href={`/lob/?id=${x.lob_id}&tab=inventory&q=${encodeURIComponent(x.ip || x.node_name)}`}>{x.lob}</Link> },
+          { key: "inventory_name", label: "Inventory", render: (x: any) => <span>{x.inventory_name}{x.current_version ? <span className="text-[11px] text-muted"> · v{x.current_version.version_no}</span> : null}</span> },
+          { key: "msp", label: "MSP", render: (x: any) => x.msp || <span className="text-muted">Unassigned</span> },
+          { key: "ip", label: "IP", render: (x: any) => <Mono>{x.ip}</Mono> }, { key: "node_name", label: "Node name" },
+          { key: "node_type", label: "Node type" }, { key: "live", label: "Live", render: (x: any) => <Live v={x.live} /> },
+          { key: "coverage_status", label: "EDR status", render: (x: any) => <CoverageBadge v={x.coverage_status} /> },
+          { key: "niam_eff", label: "NIAM", render: (x: any) => <span>{x.niam_eff}{x.ne_id ? <span className="font-mono text-[11px] text-muted"> · {x.ne_id}</span> : null}</span> },
+          { key: "source", label: "Uploaded", render: (x: any) => x.source?.uploaded_at ? <span className="text-[12px] text-muted" title={x.source.filename}>{fmtDt(x.source.uploaded_at).slice(0, 10)}{x.source.uploaded_by ? ` · ${x.source.uploaded_by}` : ""}</span> : "–" },
+          { key: "remarks", label: "Remarks", wrap: true },
+        ]} />
+      </Card>
+      {r.niam?.length > 0 && (
+        <Card>
+          <CardHeader title="NIAM dump" hint="network elements on this IP" />
+          <SimpleTable rows={r.niam} columns={[
+            { key: "ne_id", label: "NE ID", render: (x: any) => <b>{x.ne_id}</b> },
+            { key: "host", label: "Host (as in NIAM)", render: (x: any) => <Mono>{x.host}</Mono> },
+            { key: "present", label: "In latest dump", render: (x: any) => x.present ? <Badge tone="good">Yes</Badge> : <Badge tone="neutral">Dropped {fmtDt(x.removed_at).slice(0, 10)}</Badge> },
+            { key: "extra", label: "NIAM details", wrap: true, render: (x: any) => <span className="text-xs text-fg-2">{Object.entries(x.extra || {}).map(([k, v]) => `${k}: ${v}`).join(" · ")}</span> },
+          ]} />
+        </Card>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Internet scan tab: InternetDB, prefix / ASN, GreyNoise, external lookups ---------------- */
+function InternetScanView({ s, r }: { s: any; r: any }) {
+  const ips = publicIps(r);
+  if (!ips.length) return (
+    <Card className="p-6 text-[13px] text-muted">This asset has no known public IPv4 (own IP, or public / NAT IP in the inventory or the communication matrix).
+      Search any public IP above to see what the internet knows about it.</Card>
+  );
+  return <div className="space-y-4">{ips.slice(0, 4).map((ip) => <IntelPanel key={ip} ip={ip} />)}</div>;
+}
+
+/* ---------------- Vulnerabilities tab: CVEs the internet sees (InternetDB) ---------------- */
+function PassiveCves({ s, go }: { s: any; go: (v: string) => void }) {
+  const ips = s.ips.join(",");
+  const { data } = useQuery({ queryKey: ["asset-passive", ips], queryFn: () => api<any>("/api/asset/passive", { params: { ips } }) });
+  const rows = (data?.rows || []).filter((x: any) => x.vulns?.length || x.ports?.length);
+  if (!rows.length) return null;
+  return (
+    <Card>
+      <CardHeader title="Seen from the internet (Internet DB scan)" hint="CVEs and open ports Shodan InternetDB records for this asset's public IPs"
+        right={<button className="text-[12.5px] text-accent-fg hover:underline" onClick={() => go("internet")}>Internet scan →</button>} />
+      <div className="px-4 pb-4"><SimpleTable rows={rows} columns={[
+        { key: "ip", label: "Public IP", render: (x: any) => <Mono>{x.ip}</Mono> },
+        { key: "vulns", label: "CVEs", wrap: true, render: (x: any) => <CveChips vulns={x.vulns} max={12} /> },
+        { key: "ports", label: "Open ports", wrap: true, render: (x: any) => <PortChips ports={x.ports} /> },
+        { key: "scanned_at", label: "Looked up", render: (x: any) => <When ts={x.scanned_at} /> },
+      ]} /></div>
+    </Card>
+  );
+}
+
+function ScansCard({ rows }: { rows: any[] }) {
+  return (
+    <Card>
+      <CardHeader title="VA scans" hint="which vulnerability scans covered this asset" />
+      <SimpleTable rows={rows} empty="Never scanned" columns={[
+        { key: "ip", label: "IP", render: (x: any) => <Mono>{x.ip}</Mono> }, { key: "lob", label: "LOB" },
+        { key: "scanned_at", label: "Last scanned", render: (x: any) => <When ts={x.scanned_at} /> }, { key: "filename", label: "Scan file" },
+      ]} />
+    </Card>
+  );
+}
+
+/* ---------------- Related assets tab: grouped by how they relate ---------------- */
+const REL_INFO: Record<string, [string, string]> = {
+  "Same public / NAT IP": ["Share a public / NAT IP", "Reach or leave the internet through the same public address"],
+  "Talks to it": ["Talk to this asset", "Sources allowed to reach it by the communication matrix"],
+  "It talks to": ["This asset talks to", "Destinations it is allowed to reach by the communication matrix"],
+  "Same name family": ["Same name family", "Hostnames with the same stem (clusters, pairs, numbered nodes)"],
+  "Same subnet": ["Same subnet", "Neighbours on the same /24"],
+};
+function RelatedView({ s, r }: { s: any; r: any }) {
+  const { data } = useAssetContext(s, r.agents);
+  const [, set] = useUrlState();
+  if (!data) return <Card><Loading /></Card>;
+  const groups: Record<string, any[]> = {};
+  for (const x of data.related || []) (groups[x.kind] ||= []).push(x);
+  const order = Object.keys(REL_INFO).filter((k) => groups[k]).concat(Object.keys(groups).filter((k) => !REL_INFO[k]));
+  if (!order.length) return <Card className="p-6 text-[13px] text-muted">No related assets found.</Card>;
+  return (
+    <div className="space-y-4">
+      {order.map((k) => (
+        <Card key={k}>
+          <CardHeader title={<span className="flex items-center gap-2">{REL_INFO[k]?.[0] || k}<Badge tone="neutral">{groups[k].length}</Badge></span>} hint={REL_INFO[k]?.[1]} />
+          <SimpleTable rows={groups[k]} maxHeight="40vh" onRowClick={(x: any) => set({ q: x.ip, view: undefined })} columns={[
+            { key: "name", label: "Asset", render: (x: any) => <span className="font-medium">{x.name || <span className="text-muted">–</span>}</span> },
+            { key: "ip", label: "IP", render: (x: any) => <Mono>{x.ip}</Mono> },
+            { key: "why", label: "Why", render: (x: any) => <span className="font-mono text-[11.5px] text-fg-2">{x.why}</span> },
+            { key: "lobs", label: "LOB", render: (x: any) => x.lobs || <span className="text-muted">–</span> },
+            { key: "edr_status", label: "EDR", render: (x: any) => <EdrBadge s={x.edr_status} /> },
+            { key: "sev", label: "Crit / high", render: (x: any) => (x.crit || x.high) ? <span className="font-semibold text-crit-fg">{x.crit} / {x.high}</span> : <span className="text-muted">0</span> },
+            { key: "exposed", label: "Internet", render: (x: any) => x.exposed ? <Badge tone="crit">exposed</Badge> : null },
+          ]} />
+        </Card>
+      ))}
+    </div>
+  );
+}
+
+
+/** Public (internet-routable) IPv4: not private, loopback, link-local, CGNAT or multicast. */
+function isPublicV4(q: string) {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec((q || "").trim());
+  if (!m) return false;
+  const [a, b] = [+m[1], +m[2]];
+  if ([+m[1], +m[2], +m[3], +m[4]].some((x) => x > 255)) return false;
+  return !(a === 10 || a === 127 || a === 0 || a >= 224 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254) || (a === 100 && b >= 64 && b <= 127));
+}
+
+
+/** Rescan the asset's public IPs on the internet sources (InternetDB, VirusTotal, GreyNoise, RIPEstat) and refresh the page. */
+function RescanButton({ ips }: { ips: string[] }) {
+  const qc = useQueryClient();
+  const [busy, setBusy] = React.useState(false);
+  const go = async () => {
+    setBusy(true);
+    try {
+      for (const ip of ips.slice(0, 4)) qc.setQueryData(["intel", ip], await api("/api/intel/ip/refresh", { method: "POST", body: { ip } }));
+      qc.invalidateQueries({ queryKey: ["asset-passive"] });
+      qc.invalidateQueries({ queryKey: ["asset-posture"] });
+      toast.success(`Rescanned ${ips.slice(0, 4).join(", ")} on Shodan InternetDB, VirusTotal, GreyNoise and RIPEstat`);
+    } catch (e: any) { toast.error(e.message); } finally { setBusy(false); }
+  };
+  return <Button className="h-11 print:hidden" loading={busy} onClick={go} title={`Look up ${ips.join(", ")} again on the internet sources`}><RefreshCw /> Rescan internet</Button>;
 }

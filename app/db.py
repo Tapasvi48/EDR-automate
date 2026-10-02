@@ -498,6 +498,14 @@ CREATE TABLE IF NOT EXISTS passive_jobs (
     found INTEGER, errors INTEGER, skipped TEXT
 );
 
+-- Attack surface: RIPEstat prefix / ASN / holder and GreyNoise per public IP; prefixes announced by the ASNs marked as yours
+CREATE TABLE IF NOT EXISTS ip_intel (
+    ip TEXT PRIMARY KEY, prefix TEXT, asn TEXT, holder TEXT, gn_noise INTEGER, gn_riot INTEGER, gn_class TEXT, gn_name TEXT,
+    gn_message TEXT, gn_last_seen TEXT, ripe_at TEXT, gn_at TEXT
+);
+CREATE TABLE IF NOT EXISTS vt_results (ip TEXT PRIMARY KEY, data TEXT, fetched_at TEXT);
+CREATE TABLE IF NOT EXISTS asn_prefixes (asn TEXT, prefix TEXT, fetched_at TEXT, PRIMARY KEY (asn, prefix));
+
 -- All inventory: rows deleted by hand (hidden from the list; inventory rows behind them are removed from their LOB inventory)
 CREATE TABLE IF NOT EXISTS registry_hidden (
     asset_key TEXT PRIMARY KEY, ip TEXT, name TEXT, note TEXT, hidden_by TEXT, hidden_at TEXT
