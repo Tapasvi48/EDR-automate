@@ -153,7 +153,8 @@ def _filtered(c, p):
         out = [g for g in out if q in g["label"].lower() or q in g["lobs"].lower() or q in g["msps"].lower()
                or q in g["gateways"].lower() or q in g["vlans"].lower() or _contains(g, q, mode, p)]
     if p.get("lob"):
-        out = [g for g in out if p["lob"] in g["lobs"].split(", ")]
+        want = set(db.multi(p, "lob"))
+        out = [g for g in out if want & set(g["lobs"].split(", "))]
     if p.get("gap") == "1":
         out = [g for g in out if g["gap"]]
     if p.get("exposed") == "1":
@@ -177,7 +178,7 @@ def _contains(g, q, mode, p):
 @router.get("/api/subnets")
 def subnets(request: Request):
     p = dict(request.query_params)
-    page, size = max(1, int(p.get("page") or 1)), min(1000, max(1, int(p.get("size") or 50)))
+    page, size = db.page_args(p)
     with db.get_conn() as c:
         mode, out = _filtered(c, p)
         has_vlan = bool(_vlans(c)) if mode != "vlan" else True

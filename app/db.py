@@ -540,6 +540,15 @@ CREATE TABLE IF NOT EXISTS msp_daily (
 # NIAM dump: Host (IP) -> NE ID. Full snapshot per upload; nodes missing from a later dump keep present=0.
 # columns added after the first release: (table, column, type)
 MIGRATIONS = [
+    ("spotlight_vulns", "title", "TEXT"), ("spotlight_vulns", "description", "TEXT"), ("spotlight_vulns", "published", "TEXT"),
+    ("spotlight_vulns", "vector", "TEXT"), ("spotlight_vulns", "kev", "INTEGER"), ("spotlight_vulns", "kev_due", "TEXT"),
+    ("spotlight_vulns", "vendor_advisory", "TEXT"), ("spotlight_vulns", "refs", "TEXT"), ("spotlight_vulns", "app_vendor", "TEXT"),
+    ("spotlight_vulns", "remediation_link", "TEXT"), ("spotlight_vulns", "raw", "TEXT"),
+    ("detections", "raw", "TEXT"), ("prevention_policies", "raw", "TEXT"),
+    ("hosts", "prevention_policy_id", "TEXT"), ("hosts", "prevention_applied", "INTEGER"), ("hosts", "sensor_policy_id", "TEXT"),
+    ("whois_nets", "emails", "TEXT"), ("whois_nets", "abuse", "TEXT"), ("whois_nets", "address", "TEXT"), ("whois_nets", "phones", "TEXT"),
+    ("whois_nets", "contacts", "TEXT"), ("whois_nets", "remarks", "TEXT"), ("whois_nets", "status", "TEXT"), ("whois_nets", "net_type", "TEXT"),
+    ("whois_nets", "registered", "TEXT"), ("whois_nets", "changed", "TEXT"), ("whois_nets", "parent", "TEXT"),
     ("inventory_rows", "msp", "TEXT"),
     ("inventory_current", "msp", "TEXT"),
     ("inventory_current", "msp_id", "INTEGER"),
@@ -905,10 +914,61 @@ def _init_db():
             c.executemany("UPDATE hosts SET connection_ip_num=? WHERE aid=?", [(ip_to_num(r[1]), r[0]) for r in todo])
         c.execute("CREATE TABLE IF NOT EXISTS host_raw (aid TEXT PRIMARY KEY, raw TEXT)")
         moved = move_raw(c)
+        if not c.execute("SELECT 1 FROM settings WHERE key='host_policy_v1'").fetchone():
+            backfill_policies(c)
+            c.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('host_policy_v1', '1')")
         # built-in template: keep its columns in step with the standard fields (new fields added later)
         c.execute("UPDATE templates SET mapping=?, description=? WHERE name=?",
                   (json.dumps(dict(config.INVENTORY_FIELDS)), "Default inventory layout: IP, Node Name, MSP, Node Type, Domain, Live/Non Live, "
                    "OS, EDR Feasible, EDR Installed, Remarks, NIAM Integrated, NE ID", config.STANDARD_TEMPLATE))
+
+
+ALL_ROWS = 300_000  # "__all=1": the API layer asks for every row (field filters on any column are applied after)
+
+
+def page_args(p, default=50, cap=1000):
+    """(page, size) of a list request; __all=1 returns everything in one page."""
+    if str(p.get("__all") or "") == "1":
+        return 1, ALL_ROWS
+    return max(1, int(p.get("page") or 1)), min(cap, max(1, int(p.get("size") or default)))
+
+
+def multi(p, key):
+    """Values of a multi-select filter: 'a|b|c' -> ['a', 'b', 'c'] (empty when not set)."""
+    return [v for v in str(p.get(key) or "").split("|") if v != ""]
+
+
+def in_clause(col, vals):
+    """('col IN (?,?)', vals) for a multi-select filter."""
+    return f"{col} IN ({','.join('?' * len(vals))})", list(vals)
+
+
+def id_filter(p, key, col, none_sql=None, cast=int):
+    """(sql, params) for a multi-select of ids (LOB, MSP, type …); the value 'none' matches none_sql. ('', []) when unset."""
+    vals = multi(p, key)
+    if not vals:
+        return "", []
+    conds, params = [], []
+    if "none" in vals and none_sql:
+        conds.append(none_sql)
+    ids = [cast(v) for v in vals if v != "none"]
+    if ids:
+        conds.append(f"{col} IN ({','.join('?' * len(ids))})")
+        params += ids
+    return "(" + " OR ".join(conds) + ")" if conds else "1=0", params
+
+
+def add_filter(w, params, part):
+    """Append an id_filter() / in_clause() result to a WHERE list when it is set."""
+    sql, ps = part
+    if sql:
+        w.append(sql)
+        params += ps
+
+
+def or_like(col, vals, fmt="%{}%"):
+    """('(col LIKE ? OR col LIKE ?)', [...]) for a multi-select filter matched as text."""
+    return "(" + " OR ".join(f"{col} LIKE ?" for _ in vals) + ")", [fmt.format(v) for v in vals]
 
 
 def move_raw(c):
@@ -918,6 +978,16 @@ def move_raw(c):
     if n:
         c.execute("UPDATE hosts SET raw=NULL WHERE raw IS NOT NULL")
     return n
+
+
+def backfill_policies(c):
+    """Prevention / sensor-update policy columns of hosts, from the stored device records (one time, after an upgrade)."""
+    from .sync import policy_cols
+    upd = []
+    for aid, raw in c.execute("SELECT aid, raw FROM host_raw"):
+        p = policy_cols(jloads(raw, {}) or {})
+        upd.append((p["prevention_policy_id"], p["prevention_applied"], p["sensor_policy_id"], aid))
+    c.executemany("UPDATE hosts SET prevention_policy_id=?, prevention_applied=?, sensor_policy_id=? WHERE aid=?", upd)
 
 
 def get_raw(c, aid):

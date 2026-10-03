@@ -371,6 +371,10 @@ def seed(c):
     niam.commit(c, nodes, filename="niam_dump.xlsx", note="NIAM export", uploaded_by="demo.user", mapping=niam.suggest_mapping(nh), warnings=nwarn)
     seed_matrix_and_sod(c, rng, nat_map)
     seed_detections_and_satellite(c, rng)
+    # 198.51.100.x stands for our own data centre's public range in the sample: marked enterprise, so the matrix counts it as ours
+    mine = {f"198.51.100.{i}" for i in range(256)}
+    c.executemany("INSERT OR REPLACE INTO ip_class(ip, class, note, set_at) VALUES (?, 'enterprise', 'sample: our DC range', ?)",
+                  [(ip, db.now_iso()) for ip in sorted(mine)])
     sync.capture_daily_stats(c, settings)
     # sample targets loose enough that the scorecards show a spread of grades (real installs keep the strict defaults)
     for k, v in {"target_coverage": "62", "target_offline_pct": "10", "target_scan_coverage": "56", "target_max_critical": "40",
@@ -516,6 +520,22 @@ def seed_detections_and_satellite(c, rng):
     c.executemany("""INSERT OR REPLACE INTO detections(id, aid, hostname, severity, name, tactic, technique, status, created_at,
                      description, filename, cmdline, disposition, product, fetched_at, assigned_to, updated_at)
                      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", rows)
+    # sample raw Alerts API records: MITRE ids, confidence, the process tree and a console link, for the detection detail panel
+    mitre = {"Execution": ("TA0002", "T1059"), "Credential Access": ("TA0006", "T1003"), "Impact": ("TA0040", "T1486"),
+             "Lateral Movement": ("TA0008", "T1021"), "Discovery": ("TA0007", "T1087"), "Machine Learning": ("CSTA0004", "CST0007")}
+    raws = []
+    for r in rows:
+        tid, teid = mitre.get(r[5], ("", ""))
+        h = hashlib.sha256(r[0].encode()).hexdigest()
+        raws.append((json.dumps({"composite_id": r[0], "tactic_id": tid, "technique_id": teid, "confidence": 60 + int(h[:2], 16) % 40,
+                                 "objective": "Falcon Detection Method", "pattern_id": 10000 + int(h[2:5], 16) % 9000, "type": "ldt",
+                                 "filename": r[10], "cmdline": r[11], "sha256": h, "user_name": "CORP\\svc_app",
+                                 "parent_details": {"filename": "cmd.exe" if "powershell" in (r[10] or "").lower() else "explorer.exe",
+                                                    "cmdline": "C:\\Windows\\system32\\cmd.exe /c run.bat", "sha256": h[::-1]},
+                                 "grandparent_details": {"filename": "services.exe", "cmdline": "C:\\Windows\\system32\\services.exe"},
+                                 "falcon_host_link": f"https://falcon.crowdstrike.com/activity-v2/detections/{r[0]} (sample)",
+                                 "tags": ["sample"]}), r[0]))
+    c.executemany("UPDATE detections SET raw=? WHERE id=?", raws)
     linux = db.rows(c, """SELECT ip, node_name, os_resolved FROM inventory_current WHERE ip NOT LIKE '%:%' AND
                           (os_resolved LIKE 'RHEL%' OR os_resolved LIKE '%Red Hat%' OR os_resolved LIKE 'CentOS%') AND COALESCE(node_name,'')<>''""")
     hosts, errata = [], []
@@ -550,28 +570,58 @@ def seed_detections_and_satellite(c, rng):
     # prevention policies and the policy on each agent's device record
     pols = [("pp-std-srv", "Servers - Standard", "Windows", 1), ("pp-strict-dmz", "DMZ - Aggressive", "Windows", 1),
             ("pp-linux", "Linux Servers", "Linux", 1), ("pp-detect-only", "Detect only (exception)", "Windows", 1)]
-    c.executemany("INSERT OR REPLACE INTO prevention_policies VALUES (?,?,?,?,?,?)", [(i, n, pl, e, "", now) for i, n, pl, e in pols])
+    def _settings(level, extra):
+        ml = {"detection": level, "prevention": "CAUTIOUS" if level == "AGGRESSIVE" else "MODERATE" if level != "DISABLED" else "DISABLED"}
+        on = level != "DISABLED"
+        return {"prevention_settings": [
+            {"name": "Cloud Machine Learning", "settings": [{"id": "CloudAntiMalware", "name": "Cloud Anti-malware", "type": "mlslider", "value": ml},
+                                                             {"id": "AdwarePUP", "name": "Adware & PUP", "type": "mlslider", "value": ml}]},
+            {"name": "Sensor Machine Learning", "settings": [{"id": "OnSensorMLSlider", "name": "Sensor Anti-malware", "type": "mlslider", "value": ml}]},
+            {"name": "Malware Protection", "settings": [{"id": "QuarantineEnabled", "name": "Quarantine", "type": "toggle", "value": {"enabled": on}},
+                                                       {"id": "OnWriteDetection", "name": "Detect on write", "type": "toggle", "value": {"enabled": on}}]},
+            {"name": "Execution Blocking", "settings": [{"id": "CustomBlacklisting", "name": "Custom blocking", "type": "toggle", "value": {"enabled": on}},
+                                                       {"id": "SuspiciousProcesses", "name": "Suspicious processes", "type": "toggle", "value": {"enabled": on and extra}},
+                                                       {"id": "IntelPrevention", "name": "Intelligence-sourced threats", "type": "toggle", "value": {"enabled": on}}]},
+            {"name": "Exploit Mitigation", "settings": [{"id": "ForceASLR", "name": "Force ASLR", "type": "toggle", "value": {"enabled": extra}},
+                                                       {"id": "ForceDEP", "name": "Force DEP", "type": "toggle", "value": {"enabled": extra}}]},
+            {"name": "Ransomware", "settings": [{"id": "BackupDeletion", "name": "Backup deletion", "type": "toggle", "value": {"enabled": on}},
+                                               {"id": "Cryptowall", "name": "Cryptowall", "type": "toggle", "value": {"enabled": on}}]}],
+            "groups": [{"name": "Production servers (sample)"}], "created_by": "falcon-admin@corp.example", "modified_by": "falcon-admin@corp.example"}
+    levels = {"pp-std-srv": ("MODERATE", False), "pp-strict-dmz": ("AGGRESSIVE", True), "pp-linux": ("MODERATE", True), "pp-detect-only": ("DISABLED", False)}
+    c.executemany("INSERT OR REPLACE INTO prevention_policies(id, name, platform, enabled, description, modified_at, raw) VALUES (?,?,?,?,?,?,?)",
+                  [(i, n, pl, e, "Detection only: prevention switched off" if i == "pp-detect-only" else "", now, json.dumps(_settings(*levels[i])))
+                   for i, n, pl, e in pols])
     db.move_raw(c)
     for h in db.rows(c, "SELECT h.aid, h.platform_name, r.raw FROM hosts h LEFT JOIN host_raw r ON r.aid=h.aid WHERE h.console_state='active'"):
         d = json.loads(h["raw"] or "{}")
         pid = ("pp-linux" if h["platform_name"] == "Linux" else rng.choice(["pp-std-srv", "pp-std-srv", "pp-strict-dmz", "pp-detect-only"]))
         d["device_policies"] = {"prevention": {"policy_id": pid, "applied": rng.random() > 0.08, "applied_date": ts(rng.uniform(1, 40))}}
         c.execute("INSERT OR REPLACE INTO host_raw(aid, raw) VALUES (?,?)", (h["aid"], json.dumps(d)))
+        c.execute("UPDATE hosts SET prevention_policy_id=?, prevention_applied=? WHERE aid=?",
+                  (pid, 1 if d["device_policies"]["prevention"]["applied"] else 0, h["aid"]))
     # Spotlight: most scanner CVEs also found by the agent, plus some only the agent sees
     spot = []
-    for f in db.rows(c, """SELECT DISTINCT f.cve, f.severity, h.aid, h.hostname, h.local_ip FROM vuln_findings f JOIN hosts h ON h.local_ip=f.ip
+    for f in db.rows(c, """SELECT DISTINCT f.cve, f.severity, f.name, f.solution, h.aid, h.hostname, h.local_ip FROM vuln_findings f JOIN hosts h ON h.local_ip=f.ip
                           WHERE f.status='open' AND COALESCE(f.cve,'')<>'' AND h.console_state='active'"""):
         for cve in [x.strip() for x in f["cve"].split(",") if x.strip()]:
             if rng.random() < 0.75:
                 spot.append((f"demo:spot:{f['aid']}:{cve}", f["aid"], f["hostname"], f["local_ip"], cve, f["severity"].upper(),
                              round(rng.uniform(5, 9.8), 1), rng.choice(["HIGH", "MEDIUM", "LOW"]), rng.choice(["Unproven", "Available", "Easily accessible"]),
-                             "", "Apply the vendor update", "open", ts(rng.uniform(2, 60)), ts(rng.uniform(0, 2)), now))
+                             "", (f["solution"] or "Apply the vendor update")[:300], "open", ts(rng.uniform(2, 60)), ts(rng.uniform(0, 2)), now,
+                             f["name"], f"{f['name']}. Reported by the CrowdStrike sensor for the installed software (sample).",
+                             ts(rng.uniform(200, 900))[:10], "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", 1 if rng.random() < 0.2 else 0))
     for a in rng.sample(agents, min(40, len(agents))):
-        cve, sev, prod = rng.choice([("CVE-2026-21412", "HIGH", "Google Chrome 128"), ("CVE-2026-0102", "CRITICAL", "7-Zip 23.01"),
-                                     ("CVE-2025-49144", "MEDIUM", "Notepad++ 8.6"), ("CVE-2026-3110", "HIGH", "OpenSSH 8.9")])
+        cve, sev, prod, title = rng.choice([("CVE-2026-21412", "HIGH", "Google Chrome 128", "Use-after-free in Google Chrome V8"),
+                                            ("CVE-2026-0102", "CRITICAL", "7-Zip 23.01", "7-Zip archive extraction remote code execution"),
+                                            ("CVE-2025-49144", "MEDIUM", "Notepad++ 8.6", "Notepad++ installer privilege escalation"),
+                                            ("CVE-2026-3110", "HIGH", "OpenSSH 8.9", "OpenSSH server pre-authentication race condition")])
         spot.append((f"demo:spot:{a['aid']}:{cve}", a["aid"], a["hostname"], "", cve, sev, round(rng.uniform(6, 9.8), 1), "HIGH", "Available",
-                     prod, f"Update {prod.split()[0]} to the latest version", "open", ts(rng.uniform(2, 60)), ts(0, 3), now))
-    c.executemany(f"INSERT OR REPLACE INTO spotlight_vulns VALUES ({','.join('?' * 15)})", spot)
+                     prod, f"Update {prod.split()[0]} to the latest version", "open", ts(rng.uniform(2, 60)), ts(0, 3), now,
+                     title, f"{title} in {prod} (sample description).", ts(rng.uniform(30, 200))[:10],
+                     "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H", 1 if cve == "CVE-2026-0102" else 0))
+    c.executemany("""INSERT OR REPLACE INTO spotlight_vulns(id, aid, hostname, ip, cve, severity, score, exprt, exploit_status, product, remediation,
+                     status, created_at, updated_at, fetched_at, title, description, published, vector, kev)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", spot)
     # Seceon NDR alerts: network-side detections, some on hosts that have no EDR agent
     ndr_names = [("Outbound C2 beaconing", "High", "Command and Control"), ("SMB brute force", "Medium", "Credential Access"),
                  ("Port scan from internal host", "Low", "Discovery"), ("Data exfiltration over DNS", "Critical", "Exfiltration"),

@@ -221,15 +221,8 @@ RISK_SORTS = {"score": "r.score", "ip": "r.ip_num", "crit": "r.crit", "high": "r
 
 def risk_query(p):
     w, params = [], []
-    if p.get("lob"):
-        w.append("r.lob_id=?")
-        params.append(int(p["lob"]))
-    if p.get("msp"):
-        if p["msp"] == "none":
-            w.append("r.msp_id IS NULL")
-        else:
-            w.append("r.msp_id=?")
-            params.append(int(p["msp"]))
+    db.add_filter(w, params, db.id_filter(p, "lob", "r.lob_id"))
+    db.add_filter(w, params, db.id_filter(p, "msp", "r.msp_id", "r.msp_id IS NULL"))
     if p.get("level"):
         vals = p["level"].split("|")
         w.append(f"r.level IN ({','.join('?' * len(vals))})")
@@ -282,17 +275,13 @@ def risk_query(p):
 
 
 def _page(p):
-    return max(1, int(p.get("page") or 1)), min(1000, max(1, int(p.get("size") or 50)))
+    return db.page_args(p)
 
 
 def _lobmsp(p):
     w, params = [], []
-    if p.get("lob"):
-        w.append("r.lob_id=?")
-        params.append(int(p["lob"]))
-    if p.get("msp"):
-        w.append("r.msp_id=?" if p["msp"] != "none" else "r.msp_id IS NULL")
-        params += [] if p["msp"] == "none" else [int(p["msp"])]
+    db.add_filter(w, params, db.id_filter(p, "lob", "r.lob_id"))
+    db.add_filter(w, params, db.id_filter(p, "msp", "r.msp_id", "r.msp_id IS NULL"))
     return w, params
 
 

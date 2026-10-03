@@ -527,29 +527,35 @@ SORTS = {"ip": "ic.ip", "node_name": "ic.node_name COLLATE NOCASE", "lob": "l.na
 
 def _query(p):
     w, params = [], []
-    if p.get("lob"):
-        w.append("ic.lob_id=?")
-        params.append(int(p["lob"]))
-    if p.get("feasible") in VALID:
-        w.append("ic.feasible=?")
-        params.append(p["feasible"])
-    reason = p.get("reason")
-    if reason == "rule":
-        w.append("ic.feasible_reason LIKE '%rule:%'")
-    elif reason in ("OS not supported", "OS supported", "OS marked", "Node type marked", "Domain marked", "LOB marked",
-                    "Set manually", "EDR installed", "Feasibility sheet", "Node type"):
-        w.append("ic.feasible_reason LIKE ?")
-        params.append(reason + "%")
+    if db.multi(p, "lob"):
+        s, v = db.in_clause("ic.lob_id", [int(x) for x in db.multi(p, "lob")])
+        w.append(s)
+        params += v
+    fz = [x for x in db.multi(p, "feasible") if x in VALID]
+    if fz:
+        s, v = db.in_clause("ic.feasible", fz)
+        w.append(s)
+        params += v
+    rconds = []
+    for reason in db.multi(p, "reason"):
+        if reason == "rule":
+            rconds.append("ic.feasible_reason LIKE '%rule:%'")
+        elif reason in ("OS not supported", "OS supported", "OS marked", "Node type marked", "Domain marked", "LOB marked",
+                        "Set manually", "EDR installed", "Feasibility sheet", "Node type"):
+            rconds.append("ic.feasible_reason LIKE ?")
+            params.append(reason + "%")
+    if rconds:
+        w.append("(" + " OR ".join(rconds) + ")")
     if p.get("os_support") in ("Supported", "Legacy", "Not supported"):
         w.append("ic.os_support=?")
         params.append(p["os_support"])
     elif p.get("os_support") == "unknown":
         w.append("ic.os_support IS NULL")
-    if p.get("sensor") in ("N", "N-1", "N-2", "older"):
-        from .queries import prepare_outdated_temp
-        w.append("""(SELECT s.lvl FROM _sensor_rel s JOIN hosts h ON h.aid=ic.matched_aid
-                     WHERE s.platform=COALESCE(h.platform_name,'') AND s.v=h.agent_version) = ?""")
-        params.append(p["sensor"])
+    sens = [x for x in db.multi(p, "sensor") if x in ("N", "N-1", "N-2", "older")]
+    if sens:
+        w.append(f"""(SELECT s.lvl FROM _sensor_rel s JOIN hosts h ON h.aid=ic.matched_aid
+                     WHERE s.platform=COALESCE(h.platform_name,'') AND s.v=h.agent_version) IN ({','.join('?' * len(sens))})""")
+        params += sens
     if p.get("differs") == "1":
         w.append("ic.edr_feasible IN ('Yes','No') AND ic.edr_feasible<>ic.feasible")
     if p.get("os_source"):
@@ -559,12 +565,14 @@ def _query(p):
             w.append("ic.os_source=?")
             params.append(p["os_source"])
     for f in ("node_type", "domain"):
-        if p.get(f):
-            w.append(f"ic.{f}=? COLLATE NOCASE")
-            params.append(p[f])
-    if p.get("os"):
-        w.append("ic.os_resolved LIKE ?")
-        params.append(f"%{p['os']}%")
+        if db.multi(p, f):
+            vals = db.multi(p, f)
+            w.append("(" + " OR ".join(f"ic.{f}=? COLLATE NOCASE" for _ in vals) + ")")
+            params += vals
+    if db.multi(p, "os"):
+        s, v = db.or_like("ic.os_resolved", db.multi(p, "os"))
+        w.append(s)
+        params += v
     q = (p.get("q") or "").strip()
     if q:
         if db.is_ip(q):
@@ -589,7 +597,7 @@ COLS = """ic.lob_id, l.name lob, ic.item_key, ic.ip, ic.node_name, ic.msp, ic.no
 @router.get("/api/feasibility/nodes")
 def feasibility_nodes(request: Request):
     p = dict(request.query_params)
-    page, size = max(1, int(p.get("page") or 1)), min(1000, max(1, int(p.get("size") or 50)))
+    page, size = db.page_args(p)
     where, params, order = _query(p)
     with db.get_conn() as c:
         from .queries import prepare_outdated_temp
@@ -613,3 +621,64 @@ def feasibility_export(request: Request):
             ("feasible", "EDR Feasible"), ("cs_agent_version", "Sensor Version"), ("sensor_level", "Sensor Level"),
             ("feasible_reason", "Reason"), ("edr_feasible", "EDR Feasible (inventory sheet)"), ("edr_state", "EDR Status")]
     return xlsx_response([("EDR feasibility", cols, rows)], "edr_feasibility")
+
+
+# ------------------------------------------------------------------ decide by Node type + OS pair (the quick way)
+@router.get("/api/feasibility/pairs")
+def feasibility_pairs(status: str = "", q: str = ""):
+    """Inventory grouped by Node type + OS (OS grouped like the sensor catalog), with how many nodes are feasible / not /
+    to be decided, how many already run CrowdStrike, and the decision you stored for the pair (all LOBs)."""
+    from .sensor_support import classifier
+    want = [s for s in status.split("|") if s]
+    with db.get_conn() as c:
+        cls = classifier(c)
+        dec = {(r["node_type"], r["os_key"]): r["feasible"] for r in db.rows(c, "SELECT * FROM feasibility_pairs WHERE lob_id=0")}
+        groups = {}
+        for r in c.execute("SELECT node_type, os_resolved, feasible, edr_state, lob_id FROM inventory_current"):
+            ok, label, e = os_group(cls, r["os_resolved"])
+            k = (_k(r["node_type"]), ok)
+            g = groups.setdefault(k, {"node_type": (r["node_type"] or "").strip(), "os": label, "os_key": ok, "nodes": 0, "Yes": 0, "No": 0,
+                                      TO_DECIDE: 0, "installed": 0, "lobs": set(), "support": (e or {}).get("status")})
+            g["nodes"] += 1
+            g[r["feasible"] if r["feasible"] in VALID else TO_DECIDE] += 1
+            g["installed"] += r["edr_state"] in ("Online", "Offline")
+            g["lobs"].add(r["lob_id"])
+    out = []
+    for (nt, ok), g in groups.items():
+        g["lobs"] = len(g["lobs"])
+        g["decision"] = dec.get((nt, ok))
+        g["feasible"], g["not_feasible"], g["to_be_decided"] = g.pop("Yes"), g.pop("No"), g.pop(TO_DECIDE)
+        if want and not any((w == TO_DECIDE and g["to_be_decided"]) or (w == "Yes" and g["feasible"]) or (w == "No" and g["not_feasible"])
+                             or (w == "decided" and g["decision"]) for w in want):
+            continue
+        if q and q.lower() not in f"{g['node_type']} {g['os']}".lower():
+            continue
+        out.append(g)
+    out.sort(key=lambda g: (-g["to_be_decided"], -g["nodes"]))
+    return {"rows": out, "total": len(out)}
+
+
+@router.put("/api/feasibility/pair")
+def feasibility_pair_set(data: dict = Body(...)):
+    """Decide one or more Node type + OS pairs for every LOB: {"pairs": [{node_type, os}], "feasible": "Yes" | "No" | null}.
+    null goes back to automatic. Stored like a feasibility-sheet decision (it shows in the sheet and wins over marks)."""
+    feasible = data.get("feasible")
+    if feasible not in ("Yes", "No", None):
+        raise HTTPException(400, "feasible must be Yes, No or null")
+    from .sensor_support import classifier
+    now = db.now_iso()
+    with db.get_conn() as c:
+        cls = classifier(c)
+        n = 0
+        for p in data.get("pairs") or []:
+            nt, os_ = str(p.get("node_type") or "").strip(), str(p.get("os") or "").strip()
+            ok = p.get("os_key") if p.get("os_key") is not None else os_group(cls, os_)[0]
+            if feasible is None:
+                c.execute("DELETE FROM feasibility_pairs WHERE lob_id=0 AND node_type=? AND os_key=?", (_k(nt), ok))
+            else:
+                c.execute("""INSERT OR REPLACE INTO feasibility_pairs(lob_id, node_type, os_key, node_type_label, os_label, feasible, remarks, set_at)
+                             VALUES (0,?,?,?,?,?,?,?)""", (_k(nt), ok, nt, os_, feasible, "set on the EDR feasibility page", now))
+            n += 1
+        from .inventory import refresh_feasibility
+        refresh_feasibility(c)
+    return {"updated": n}

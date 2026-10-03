@@ -186,9 +186,8 @@ def nodes_query(p):
         w.append("(n.crit + n.high + n.med + n.low) > 0")
     if p.get("crit_high") == "1":
         w.append("(n.crit + n.high) > 0")
-    if p.get("lob"):
-        w.append("(', ' || n.lobs || ', ') LIKE ?")
-        params.append(f"%, {p['lob']}, %")
+    if db.multi(p, "lob"):
+        db.add_filter(w, params, db.or_like("(', ' || n.lobs || ', ')", db.multi(p, "lob"), "%, {}, %"))
     q = (p.get("q") or "").strip()
     if q:
         terms = [t for t in re.split(r"[\s,;]+", q) if t]
@@ -274,7 +273,7 @@ def niam_summary():
 @router.get("/api/niam/nodes")
 def niam_nodes(request: Request):
     p = dict(request.query_params)
-    page, size = max(1, int(p.get("page") or 1)), min(1000, max(1, int(p.get("size") or 50)))
+    page, size = db.page_args(p)
     where, params, order = nodes_query(p)
     with db.get_conn() as c:
         total = c.execute(f"SELECT COUNT(*) FROM niam_nodes n {where}", params).fetchone()[0]

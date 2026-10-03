@@ -11,6 +11,7 @@ import { Badge, Button, Callout, Card, CardHeader, Checkbox, FilterSelect, Kpi, 
 import { DataTable, type Column } from "@/components/data-table";
 import { DateRange } from "@/components/date-range";
 import { Mono } from "@/components/badges";
+import { DetectionSheet } from "@/components/detail-sheets";
 
 const SEV_TONE: Record<string, any> = { Critical: "crit", High: "serious", Medium: "warn", Low: "info", Informational: "neutral" };
 const statusTone = (s?: string) => (/closed|resolved|false|ignored/i.test(s || "") ? "good" : /progress|investig/i.test(s || "") ? "info" : "warn");
@@ -24,6 +25,7 @@ export default function Detections() {
   const { data: s, error, refetch } = useQuery({ queryKey: ["detections-summary", range], queryFn: () => api<any>("/api/detections/summary", { params: range }) });
   const { data: st } = useQuery({ queryKey: ["alerts-status"], queryFn: () => api<any>("/api/alerts/status") });
   const [busy, setBusy] = React.useState(false);
+  const [openId, setOpenId] = React.useState<string | null>(null);
   if (!s) return <Loading error={error} retry={() => refetch()} />;
   const cs = st?.crowdstrike;
   const fetchNow = async () => {
@@ -111,13 +113,7 @@ export default function Detections() {
       </div>
       <DataTable endpoint="/api/detections" exportPath="/api/detections/export" state={{ ...state, from, ...(state.to ? { to: state.to } : {}) }} setState={set}
         noun="detections" storageKey="detections" rowKey={(r: any) => r.id} onReset={() => replaceAll({})} sortable={false} columns={cols}
-        renderExpanded={(r: any) => (
-          <div className="space-y-1.5 text-[12px]">
-            {r.description && <div><span className="text-muted">Description </span>{r.description}</div>}
-            {r.cmdline && <div><span className="text-muted">Command line </span><code className="break-all font-mono text-[11.5px]">{r.cmdline}</code></div>}
-            <div className="text-muted">Detection ID <Mono>{r.id}</Mono> · Agent <Mono>{r.aid}</Mono>{r.platform_name ? ` · ${r.platform_name}` : ""}{r.online_state ? ` · agent ${r.online_state}` : ""}</div>
-          </div>
-        )}
+        onRowClick={(r: any) => setOpenId(r.id)}
         filters={<>
           <SearchInput className="w-72" value={state.q || ""} onChange={(v) => set({ q: v })} placeholder="Detection, host, IP, file, command line, analyst…" />
           <FilterSelect label="Severity" value={state.severity} onChange={(v) => set({ severity: v })} any="Any" options={[["Critical|High", "Critical + high"], "Critical", "High", "Medium", "Low", "Informational"]} />
@@ -126,6 +122,7 @@ export default function Detections() {
           <Checkbox checked={state.open === "1"} onChange={(v) => set({ open: v ? "1" : undefined })} label="Open only" />
           {(state.tactic || state.aid) && <Badge tone="info">{state.tactic || "one host"}<button className="ml-1" onClick={() => set({ tactic: undefined, aid: undefined })}>×</button></Badge>}
         </>} />
+      <DetectionSheet id={openId} onClose={() => setOpenId(null)} />
     </div>
   );
 }

@@ -277,7 +277,9 @@ def passive_status():
 FROM = """passive_results r LEFT JOIN ip_whois w ON w.ip=r.ip LEFT JOIN whois_nets n ON n.handle=w.handle
           LEFT JOIN ip_class k ON k.ip=r.ip"""
 COLS = """r.*, n.name whois_name, n.descr whois_descr, n.org whois_org, n.country whois_country, n.cidr whois_range, w.error whois_error,
-          k.class cls"""
+          n.emails whois_emails, n.abuse whois_abuse, n.address whois_address, n.phones whois_phones, n.contacts whois_contacts,
+          n.remarks whois_remarks, n.status whois_status, n.net_type whois_net_type, n.registered whois_registered, n.changed whois_changed,
+          n.parent whois_parent, k.class cls"""
 
 
 def _query(p):
@@ -303,15 +305,18 @@ def _query(p):
         w.append("r.job_id=?")
         params.append(int(p["job"]))
     if p.get("whois"):
-        if p["whois"] == "(not looked up)":
-            w.append("n.name IS NULL")
-        else:
-            w.append("n.name=?")
-            params.append(p["whois"])
+        names = db.multi(p, "whois")
+        conds = ["n.name IS NULL"] if "(not looked up)" in names else []
+        real = [x for x in names if x != "(not looked up)"]
+        if real:
+            conds.append(f"n.name IN ({','.join('?' * len(real))})")
+            params += real
+        w.append("(" + " OR ".join(conds) + ")")
     if p.get("wq"):
         like = f"%{p['wq']}%"
-        w.append("(n.name LIKE ? OR n.descr LIKE ? OR n.org LIKE ? OR n.country LIKE ? OR n.cidr LIKE ?)")
-        params += [like] * 5
+        w.append("(n.name LIKE ? OR n.descr LIKE ? OR n.org LIKE ? OR n.country LIKE ? OR n.cidr LIKE ? OR n.emails LIKE ? OR n.address LIKE ? "
+                 "OR n.contacts LIKE ? OR n.remarks LIKE ? OR n.phones LIKE ? OR n.parent LIKE ?)")
+        params += [like] * 11
     if p.get("cls"):
         vals = p["cls"].split("|")
         cond = [f"k.class IN ({','.join('?' * len([v for v in vals if v != 'none']))})"] if any(v != "none" for v in vals) else []
@@ -325,7 +330,7 @@ def _query(p):
 @router.get("/api/passive/results")
 def passive_results(request: Request):
     p = dict(request.query_params)
-    page, size = max(1, int(p.get("page") or 1)), min(1000, max(1, int(p.get("size") or 50)))
+    page, size = db.page_args(p)
     where, params = _query(p)
     with db.get_conn() as c:
         total = c.execute(f"SELECT COUNT(*) FROM {FROM} {where}", params).fetchone()[0]

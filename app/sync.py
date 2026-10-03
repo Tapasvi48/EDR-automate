@@ -92,6 +92,7 @@ HOST_COLS = [
     "kernel_version", "product_type_desc", "chassis_type_desc", "machine_domain", "site_name", "ou",
     "agent_version", "containment_status", "rfm", "system_manufacturer", "system_product_name",
     "serial_number", "last_login_user", "tags", "groups", "first_seen", "last_seen", "modified_timestamp",
+    "prevention_policy_id", "prevention_applied", "sensor_policy_id",
 ]
 
 
@@ -137,8 +138,17 @@ def map_host(d):
         "first_seen": d.get("first_seen") or "",
         "last_seen": d.get("last_seen") or "",
         "modified_timestamp": d.get("modified_timestamp") or "",
+        **policy_cols(d),
         "raw": json.dumps(d, default=str),
     }
+
+
+def policy_cols(d):
+    """Prevention policy (id, applied?) and sensor update policy of an agent, from its device record."""
+    pol = (d.get("device_policies") or {})
+    prev, su = pol.get("prevention") or {}, pol.get("sensor_update") or {}
+    return {"prevention_policy_id": prev.get("policy_id") or "", "prevention_applied": 1 if prev.get("applied") else 0 if prev else None,
+            "sensor_policy_id": su.get("policy_id") or ""}
 
 
 def compute_devices(c, settings):

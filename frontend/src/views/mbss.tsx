@@ -86,7 +86,7 @@ export default function Mbss() {
           rowKey={(r: any) => String(r.host_id)} onReset={() => replaceAll({ tab })} onRowClick={(r: any) => setHost(r)}
           filters={<>
             <SearchInput className="w-[260px]" value={state.q || ""} onChange={(v) => set({ q: v })} placeholder="Host, IP or OS" />
-            <FilterSelect label="Show" value={state.state} onChange={(v) => set({ state: v })} any="All assets" options={[["noncompliant", "Failing a rule"], ["no_report", "No OpenSCAP report"]]} />
+            <FilterSelect single label="Show" value={state.state} onChange={(v) => set({ state: v })} any="All assets" options={[["noncompliant", "Failing a rule"], ["no_report", "No OpenSCAP report"]]} />
           </>} />
       )}
       <Modal open={!!ruleHosts} onOpenChange={(o) => !o && setRuleHosts(null)} wide title={ruleHosts ? `${ruleHosts.control} · ${ruleHosts.title}` : ""}>

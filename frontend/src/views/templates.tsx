@@ -77,7 +77,7 @@ const GROUPS: [string, string[]][] = [
 ];
 const ICONS: Record<string, React.ElementType> = { inventory: Building2, niam: Radio, old_edr: FileClock, agent_tags: Tags, comm_matrix: Waypoints,
   vulnerability: ShieldAlert, sod: BadgeCheck };
-const UPLOAD_AT: Record<string, string> = { inventory: "/lobs/", niam: "/upload/", old_edr: "/edr-history/", agent_tags: "/upload/",
+const UPLOAD_AT: Record<string, string> = { inventory: "/lobs/", niam: "/upload/", old_edr: "/health/", agent_tags: "/upload/",
   comm_matrix: "/matrix/", vulnerability: "/upload/", sod: "/exceptions/" };
 
 function FileTemplates() {

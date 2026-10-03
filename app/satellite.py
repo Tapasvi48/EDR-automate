@@ -275,9 +275,10 @@ def _host_where(p):
         w.append("h.compliance_failed > 0")
     elif p.get("state") == "no_report":
         w.append("h.compliance_passed IS NULL")
-    if p.get("lob"):
-        w.append("EXISTS (SELECT 1 FROM inventory_current ic WHERE ic.ip=h.ip AND ic.lob_id=?)")
-        params.append(int(p["lob"]))
+    if db.multi(p, "lob"):
+        lobs = [int(x) for x in db.multi(p, "lob")]
+        w.append(f"EXISTS (SELECT 1 FROM inventory_current ic WHERE ic.ip=h.ip AND ic.lob_id IN ({','.join('?' * len(lobs))}))")
+        params += lobs
     return ("WHERE " + " AND ".join(w)) if w else "", params
 
 
@@ -289,7 +290,7 @@ HOST_SORTS = {"name": "h.name", "installable_security": "h.installable_security"
 @router.get("/api/satellite/hosts")
 def satellite_hosts(request: Request):
     p = dict(request.query_params)
-    page, size = max(1, int(p.get("page") or 1)), min(1000, max(1, int(p.get("size") or 50)))
+    page, size = db.page_args(p)
     where, params = _host_where(p)
     order = f"ORDER BY {HOST_SORTS.get(p.get('sort') or '', 'h.installable_security')} {'ASC' if p.get('dir') == 'asc' else 'DESC'}, h.name"
     with db.get_conn() as c:
@@ -320,14 +321,12 @@ def satellite_summary():
 def satellite_errata(request: Request):
     """Errata across the fleet, one row each: how many hosts need it and on how many it can be installed now."""
     p = dict(request.query_params)
-    page, size = max(1, int(p.get("page") or 1)), min(1000, max(1, int(p.get("size") or 50)))
+    page, size = db.page_args(p)
     w, params = [], []
-    if p.get("type"):
-        w.append("e.type=?")
-        params.append(p["type"])
-    if p.get("severity"):
-        w.append("e.severity=?")
-        params.append(p["severity"])
+    if db.multi(p, "type"):
+        db.add_filter(w, params, db.in_clause("e.type", db.multi(p, "type")))
+    if db.multi(p, "severity"):
+        db.add_filter(w, params, db.in_clause("e.severity", db.multi(p, "severity")))
     if p.get("q"):
         like = f"%{p['q']}%"
         w.append("(e.errata_id LIKE ? OR e.title LIKE ? OR e.cves LIKE ?)")
@@ -423,11 +422,10 @@ def satellite_mbss_rule(rule_id: str):
 def satellite_mbss(request: Request):
     """Failed MBSS (OpenSCAP) rules across the fleet, grouped by control, with the fix text."""
     p = dict(request.query_params)
-    page, size = max(1, int(p.get("page") or 1)), min(1000, max(1, int(p.get("size") or 50)))
+    page, size = db.page_args(p)
     w, params = [], []
-    if p.get("severity"):
-        w.append("m.severity=?")
-        params.append(p["severity"])
+    if db.multi(p, "severity"):
+        db.add_filter(w, params, db.in_clause("m.severity", db.multi(p, "severity")))
     if p.get("q"):
         like = f"%{p['q']}%"
         w.append("(m.title LIKE ? OR m.control LIKE ? OR m.rule_id LIKE ?)")

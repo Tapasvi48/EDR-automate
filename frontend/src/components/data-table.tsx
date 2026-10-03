@@ -1,12 +1,12 @@
 "use client";
 import * as React from "react";
 import * as Popover from "@radix-ui/react-popover";
-import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { ArrowDown, ArrowUp, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Columns3, Download, GripVertical, RotateCcw } from "lucide-react";
+import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ArrowDown, ArrowUp, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Columns3, Download, Filter, GripVertical, RotateCcw, X } from "lucide-react";
 import { api, downloadExcel } from "@/lib/api";
 import { fmtN } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import { Button, Card, Empty } from "./ui";
+import { Button, Card, Empty, Input } from "./ui";
 
 export type Column<T = any> = {
   key: string;
@@ -62,6 +62,13 @@ export function DataTable<T extends Record<string, any>>(p: Props<T>) {
     queryFn: () => api<{ rows: T[]; total: number }>(p.endpoint, { params: apiParams }),
     placeholderData: keepPreviousData,
   });
+  // the next page is fetched in the background, so paging forward is instant
+  const qc = useQueryClient();
+  React.useEffect(() => {
+    if (!q.data || page * size >= (q.data.total ?? 0)) return;
+    const next = { ...apiParams, page: String(page + 1) };
+    qc.prefetchQuery({ queryKey: [p.endpoint, next], queryFn: () => api(p.endpoint, { params: next }), staleTime: 60_000 });
+  }, [q.data, page, size, apiParams, p.endpoint, qc]);
   React.useEffect(() => {
     if (q.data && p.onData) p.onData(q.data);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -117,6 +124,13 @@ export function DataTable<T extends Record<string, any>>(p: Props<T>) {
   const to = Math.min(total, page * size);
   const rk = p.rowKey || ((r: T) => String(r.aid ?? r.item_key ?? r.id ?? r.value ?? JSON.stringify(r)));
 
+  const fields = React.useMemo(() => fieldList(p.columns, rows), [p.columns, rows]);
+  const ffs = Object.entries(p.state).filter(([k, v]) => k.startsWith("ff_") && v);
+  const selectAllMatching = async () => {
+    const all = await api<{ rows: T[] }>(p.endpoint, { params: { ...apiParams, page: "1", __all: "1" } });
+    p.onSelectedChange?.(new Set(all.rows.map(rk)));
+  };
+
   const toggleSort = (s: string) => {
     if (p.state.sort === s) p.setState({ dir: p.state.dir === "asc" ? "desc" : "asc" });
     else p.setState({ sort: s, dir: "desc" });
@@ -125,13 +139,35 @@ export function DataTable<T extends Record<string, any>>(p: Props<T>) {
   return (
     <Card className="relative overflow-hidden">
       {p.filters && <div className="flex flex-wrap items-center gap-2 border-b border-border px-3.5 py-3">{p.filters}</div>}
+      {ffs.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 border-b border-border bg-accent-soft/30 px-3.5 py-2 text-[12px]">
+          <Filter className="size-3.5 text-accent-fg" />
+          {ffs.map(([k, v]) => {
+            const [op, val] = v.includes(":") ? [v.split(":")[0], v.slice(v.indexOf(":") + 1)] : ["has", v];
+            return (
+              <span key={k} className="inline-flex items-center gap-1 rounded-full border border-accent/40 bg-surface px-2 py-0.5">
+                <b>{fields.find((f) => f.key === k.slice(3))?.label || k.slice(3)}</b> <span className="text-muted">{OPS.find((o) => o[0] === op)?.[1] || op}</span> {val.split("|").join(" or ")}
+                <button className="text-muted hover:text-fg" onClick={() => p.setState({ [k]: undefined })}><X className="size-3" /></button>
+              </span>
+            );
+          })}
+          <button className="ml-1 text-accent-fg hover:underline" onClick={() => p.setState(Object.fromEntries(ffs.map(([k]) => [k, undefined])))}>Clear field filters</button>
+        </div>
+      )}
       <div className="flex flex-wrap items-center gap-2 border-b border-border px-3.5 py-2.5">
         {p.title && <span className="font-semibold">{p.title}</span>}
         <span className="text-fg-2">
           <b className="tabular text-fg">{q.data ? fmtN(total) : "–"}</b> {p.noun || "rows"}
         </span>
+        {p.onSelectedChange && rows.length > 0 && rows.every((r) => p.selected?.has(rk(r))) && total > rows.length && (p.selected?.size ?? 0) < total && (
+          <button className="text-[12px] text-accent-fg hover:underline" onClick={selectAllMatching}>Select all {fmtN(total)} matching</button>
+        )}
+        {p.onSelectedChange && (p.selected?.size ?? 0) > 0 && (
+          <span className="text-[12px] text-fg-2">{fmtN(p.selected!.size)} selected · <button className="text-accent-fg hover:underline" onClick={() => p.onSelectedChange?.(new Set())}>clear</button></span>
+        )}
         <div className="flex-1" />
         {p.toolbar}
+        <FieldFilter fields={fields} rows={rows} onAdd={(k, v) => p.setState({ ["ff_" + k]: v })} />
         {p.onReset && (
           <Button size="sm" variant="ghost" onClick={p.onReset}>
             <RotateCcw /> Reset
@@ -364,5 +400,91 @@ export function SimpleTable<T extends Record<string, any>>({ rows, columns, empt
         </tbody>
       </table>
     </div>
+  );
+}
+
+
+/* ---------------- filter on any field ---------------- */
+const OPS: [string, string][] = [["has", "contains"], ["is", "is"], ["not", "does not contain"], ["empty", "is empty"], ["set", "is not empty"]];
+const human = (k: string) => k.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
+
+function fieldList(columns: Column[], rows: any[]) {
+  const out: { key: string; label: string }[] = [];
+  const seen = new Set<string>();
+  const sample = rows[0] || {};
+  for (const c of columns) {
+    if (c.key in sample && !seen.has(c.key)) { out.push({ key: c.key, label: c.label || human(c.key) }); seen.add(c.key); }
+  }
+  for (const k of Object.keys(sample)) {
+    if (!seen.has(k) && !k.startsWith("_")) { out.push({ key: k, label: human(k) }); seen.add(k); }
+  }
+  return out;
+}
+
+/** "Filter" button: pick any field the table's API returns, an operator and values (several with |). */
+function FieldFilter({ fields, rows, onAdd }: { fields: { key: string; label: string }[]; rows: any[]; onAdd: (key: string, value: string) => void }) {
+  const [open, setOpen] = React.useState(false);
+  const [key, setKey] = React.useState("");
+  const [op, setOp] = React.useState("has");
+  const [val, setVal] = React.useState("");
+  const [fq, setFq] = React.useState("");
+  const suggestions = React.useMemo(() => {
+    if (!key) return [];
+    const c = new Map<string, number>();
+    for (const r of rows) {
+      const v = r[key];
+      const t = v == null ? "" : Array.isArray(v) ? v.join(", ") : typeof v === "object" ? "" : String(v);
+      if (t && t.length < 80) c.set(t, (c.get(t) || 0) + 1);
+    }
+    return [...c.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([t]) => t);
+  }, [key, rows]);
+  const add = () => {
+    if (!key || (!val.trim() && op !== "empty" && op !== "set")) return;
+    onAdd(key, `${op}:${val.trim()}`);
+    setOpen(false); setVal(""); setKey(""); setOp("has"); setFq("");
+  };
+  const shown = fields.filter((f) => !fq || f.label.toLowerCase().includes(fq.toLowerCase()) || f.key.includes(fq.toLowerCase()));
+  return (
+    <Popover.Root open={open} onOpenChange={setOpen}>
+      <Popover.Trigger asChild><Button size="sm" title="Filter on any field"><Filter /> Filter</Button></Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content align="end" sideOffset={6} collisionPadding={10} className="z-50 w-[360px] rounded-xl border border-border bg-surface p-3 shadow-xl">
+          <div className="mb-2 text-[12px] font-semibold">Filter on any field</div>
+          {!key ? (
+            <>
+              <Input autoFocus className="mb-2 w-full" placeholder="Search fields…" value={fq} onChange={(e) => setFq(e.target.value)} />
+              <div className="max-h-64 overflow-auto scroll-thin">
+                {shown.map((f) => (
+                  <button key={f.key} className="flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-[12.5px] hover:bg-surface-2" onClick={() => setKey(f.key)}>
+                    <span>{f.label}</span><span className="font-mono text-[10.5px] text-muted">{f.key}</span>
+                  </button>
+                ))}
+                {!shown.length && <div className="px-2 py-2 text-[12px] text-muted">{fields.length ? "No field matches" : "Load some rows first"}</div>}
+              </div>
+            </>
+          ) : (
+            <div className="space-y-2">
+              <div className="flex items-center gap-2 text-[12.5px]"><b>{fields.find((f) => f.key === key)?.label}</b>
+                <button className="text-[11.5px] text-accent-fg hover:underline" onClick={() => setKey("")}>change field</button></div>
+              <div className="flex flex-wrap gap-1">
+                {OPS.map(([o, l]) => (
+                  <button key={o} onClick={() => setOp(o)} className={cn("rounded-md border px-2 py-0.5 text-[12px]", op === o ? "border-accent bg-accent-soft text-accent-fg" : "border-border text-fg-2")}>{l}</button>
+                ))}
+              </div>
+              {op !== "empty" && op !== "set" && (
+                <>
+                  <Input autoFocus className="w-full" placeholder="value (several: a | b)" value={val} onChange={(e) => setVal(e.target.value)} onKeyDown={(e) => e.key === "Enter" && add()} />
+                  {suggestions.length > 0 && <div className="flex max-h-28 flex-wrap gap-1 overflow-auto">
+                    {suggestions.map((t) => <button key={t} className="max-w-full truncate rounded-md bg-surface-2 px-1.5 py-0.5 text-[11.5px] hover:bg-surface-3"
+                      onClick={() => setVal(val ? `${val} | ${t}` : t)}>{t}</button>)}
+                  </div>}
+                </>
+              )}
+              <div className="flex justify-end gap-2 pt-1"><Button size="sm" variant="ghost" onClick={() => setOpen(false)}>Cancel</Button><Button size="sm" variant="primary" onClick={add}>Apply</Button></div>
+            </div>
+          )}
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
   );
 }

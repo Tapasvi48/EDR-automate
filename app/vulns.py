@@ -265,15 +265,8 @@ def refresh_assets(c, lob_id=None):
 # ------------------------------------------------------------------ queries
 def _filters(p, alias_f="f", alias_a="a"):
     w, params = [], []
-    if p.get("lob"):
-        w.append(f"{alias_a}.lob_id=?")
-        params.append(int(p["lob"]))
-    if p.get("msp"):
-        if p["msp"] == "none":
-            w.append(f"{alias_a}.msp_id IS NULL")
-        else:
-            w.append(f"{alias_a}.msp_id=?")
-            params.append(int(p["msp"]))
+    db.add_filter(w, params, db.id_filter(p, "lob", f"{alias_a}.lob_id"))
+    db.add_filter(w, params, db.id_filter(p, "msp", f"{alias_a}.msp_id", f"{alias_a}.msp_id IS NULL"))
     if p.get("edr_status"):
         vals = p["edr_status"].split("|")
         w.append(f"{alias_a}.edr_status IN ({','.join('?' * len(vals))})")
@@ -293,10 +286,9 @@ FINDING_SORTS = {"severity": "f.sev_rank", "ip": "f.ip_num", "name": "f.name COL
 
 def findings_query(p):
     w, params = _filters(p)
-    status = p.get("status", "open")
-    if status in ("open", "fixed", "accepted"):
-        w.append("f.status=?")
-        params.append(status)
+    sts = [x for x in (db.multi(p, "status") or (["open"] if "status" not in p else [])) if x in ("open", "fixed", "accepted")]
+    if sts:
+        db.add_filter(w, params, db.in_clause("f.status", sts))
     if p.get("severity"):
         vals = p["severity"].split("|")
         w.append(f"f.severity IN ({','.join('?' * len(vals))})")
@@ -399,7 +391,7 @@ def summary(c, lob_id=None):
 
 # ------------------------------------------------------------------ routes
 def _page(p):
-    return max(1, int(p.get("page") or 1)), min(1000, max(1, int(p.get("size") or 50)))
+    return db.page_args(p)
 
 
 @router.post("/api/vulns/parse")

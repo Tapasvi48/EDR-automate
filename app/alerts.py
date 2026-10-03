@@ -114,7 +114,7 @@ def _filter(rows, p):
 @router.get("/api/alerts")
 def alerts(request: Request, date_from: str = Query("", alias="from"), date_to: str = Query("", alias="to")):
     p = dict(request.query_params)
-    page, size = max(1, int(p.get("page") or 1)), min(500, max(1, int(p.get("size") or 50)))
+    page, size = db.page_args(p, cap=500)
     d_from, d_to = _range(date_from, date_to)
     allr, sp_err = collect(d_from, d_to)
     rows = _filter(allr, p)

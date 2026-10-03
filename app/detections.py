@@ -2,6 +2,7 @@
 
 The `detections` table holds the alerts created in the last `detections_days` days (default 30): re-read in full once a
 day, and between those only the alerts created or updated since the previous sync are fetched. Needs the API scope "Alerts: Read"; without it the sync carries on and says so."""
+import json
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Query, Request
@@ -28,10 +29,10 @@ def _row(a, now):
             a.get("status") or "", a.get("created_timestamp") or a.get("timestamp") or "",
             (a.get("description") or "")[:2000], a.get("filename") or "", (a.get("cmdline") or "")[:2000],
             a.get("pattern_disposition_description") or "", a.get("product") or "", now,
-            a.get("assigned_to_name") or a.get("assigned_to_uid") or "", a.get("updated_timestamp") or "")
+            a.get("assigned_to_name") or a.get("assigned_to_uid") or "", a.get("updated_timestamp") or "", json.dumps(a, default=str)[:30000])
 
 
-COLS = "id, aid, hostname, severity, name, tactic, technique, status, created_at, description, filename, cmdline, disposition, product, fetched_at, assigned_to, updated_at"
+COLS = "id, aid, hostname, severity, name, tactic, technique, status, created_at, description, filename, cmdline, disposition, product, fetched_at, assigned_to, updated_at, raw"
 
 
 ISO = "%Y-%m-%dT%H:%M:%SZ"
@@ -77,7 +78,7 @@ def fetch(client, days=30):
     with db.get_conn() as c:
         if full:
             c.execute("DELETE FROM detections WHERE created_at > ?", (_iso(since),))
-        c.executemany(f"INSERT OR REPLACE INTO detections({COLS}) VALUES ({','.join('?' * 17)})", rows)
+        c.executemany(f"INSERT OR REPLACE INTO detections({COLS}) VALUES ({','.join('?' * 18)})", rows)
         c.execute("DELETE FROM detections WHERE created_at < ?", (_iso(now - timedelta(days=180)),))  # keep 180 days at most
         upd = {"detections_last_fetch": _iso(now), "detections_days_fetched": str(days)}
         if full:
@@ -145,9 +146,10 @@ def _where(p):
     if p.get("aid"):
         w.append("d.aid=?")
         params.append(p["aid"])
-    if p.get("lob"):
-        w.append("EXISTS (SELECT 1 FROM host_map hm WHERE hm.aid=d.aid AND hm.lob_id=?)")
-        params.append(int(p["lob"]))
+    if db.multi(p, "lob"):
+        lobs = [int(x) for x in db.multi(p, "lob")]
+        w.append(f"EXISTS (SELECT 1 FROM host_map hm WHERE hm.aid=d.aid AND hm.lob_id IN ({','.join('?' * len(lobs))}))")
+        params += lobs
     if p.get("exposed") == "1":
         w.append("EXISTS (SELECT 1 FROM asset_registry r WHERE r.aid=d.aid AND r.exposed=1)")
     if p.get("q"):
@@ -161,7 +163,7 @@ def _where(p):
 @router.get("/api/detections")
 def detections_list(request: Request):
     p = dict(request.query_params)
-    page, size = max(1, int(p.get("page") or 1)), min(1000, max(1, int(p.get("size") or 50)))
+    page, size = db.page_args(p)
     where, params = _where(p)
     with db.get_conn() as c:
         total = c.execute(f"SELECT COUNT(*) FROM {FROM} {where}", params).fetchone()[0]
@@ -211,3 +213,45 @@ def detections_export(request: Request):
     with db.get_conn() as c:
         rows = db.rows(c, f"SELECT {LIST_COLS} FROM {FROM} {where} ORDER BY d.created_at DESC LIMIT 200000", params)
     return xlsx_response([("CrowdStrike detections", EXPORT, rows)], "crowdstrike_detections")
+
+
+# ------------------------------------------------------------------ one detection, in full
+def _g(d, *path):
+    for k in path:
+        d = d.get(k) if isinstance(d, dict) else None
+    return d
+
+
+def _proc(p):
+    if not isinstance(p, dict) or not p:
+        return None
+    return {k: v for k, v in {"file": p.get("filename"), "path": p.get("filepath"), "command line": p.get("cmdline"), "sha256": p.get("sha256"),
+                              "md5": p.get("md5"), "user": p.get("user_name"), "process id": p.get("process_id") or p.get("local_process_id")}.items() if v}
+
+
+@router.get("/api/detections/item")
+def detection_item(id: str):
+    """Everything stored for one detection: what fired (MITRE, pattern, severity, confidence), the process tree, the host,
+    status and analyst, and the raw record from the Alerts API."""
+    with db.get_conn() as c:
+        d = db.one(c, f"""SELECT {LIST_COLS}, d.raw FROM {FROM} WHERE d.id=?""", (id,))
+        if not d:
+            from fastapi import HTTPException
+            raise HTTPException(404, "Detection not found")
+        same = db.rows(c, """SELECT id, name, severity, status, created_at FROM detections WHERE aid=? AND id<>? ORDER BY created_at DESC LIMIT 15""",
+                       (d["aid"], id))
+        host = db.one(c, """SELECT aid, hostname, connection_ip, local_ip, external_ip, platform_name, os_version, agent_version, online_state,
+                            last_seen, machine_domain, site_name, last_login_user, containment_status FROM hosts WHERE aid=?""", (d["aid"],))
+    raw = db.jloads(d.pop("raw", None), {}) or {}
+    what = {k: v for k, v in {
+        "Detection": d["name"], "Description": d["description"], "Severity": d["severity"], "Confidence": raw.get("confidence"),
+        "Tactic": " · ".join(x for x in (raw.get("tactic_id"), d["tactic"]) if x), "Technique": " · ".join(x for x in (raw.get("technique_id"), d["technique"]) if x),
+        "Objective": raw.get("objective"), "Scenario": raw.get("scenario"), "Pattern ID": raw.get("pattern_id"), "Type": raw.get("type"),
+        "Product": d["product"], "Action taken": d["disposition"], "IOC": " ".join(str(x) for x in (raw.get("ioc_type"), raw.get("ioc_value")) if x),
+    }.items() if v not in (None, "", [])}
+    process = _proc(raw) or {k: v for k, v in {"file": d["filename"], "command line": d["cmdline"]}.items() if v}
+    tree = [x for x in (("Grandparent", _proc(raw.get("grandparent_details"))), ("Parent", _proc(raw.get("parent_details"))), ("Process", process)) if x[1]]
+    state = {k: v for k, v in {"Status": d["status"], "Analyst": d["assigned_to"], "Created": d["created_at"], "Updated": d["updated_at"],
+                               "Falcon link": raw.get("falcon_host_link"), "Tags": ", ".join(raw.get("tags") or []) if isinstance(raw.get("tags"), list) else None,
+                               "Detection ID": d["id"]}.items() if v}
+    return {"detection": d, "what": what, "tree": tree, "state": state, "host": host, "same_host": same, "raw": raw}

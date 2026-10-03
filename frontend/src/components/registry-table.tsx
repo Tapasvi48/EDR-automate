@@ -46,7 +46,7 @@ const LINK_KEYS: Record<string, (v: string) => string> = {
   exposure_src: (v) => `Exposed via ${v}`, edr_applicable: () => "EDR applicable (incl. EDR-only assets)",
   os_source: (v) => (v === "none" ? "OS unknown" : `OS from ${({ edr: "CrowdStrike", inventory: "inventory", scan: "VA scan" } as any)[v] || v}`),
 };
-const MAIN_KEYS = ["q", "has", "missing", "lob", "msp", "node_type", "edr_status", "exposed", "vulns", "feasibility"];
+const MAIN_KEYS = ["q", "has", "missing", "lob", "msp", "node_type", "edr_status", "exposed", "vulns", "feasibility", "niam", "scanned", "os", "exposure_src", "whitelisted"];
 
 export function RegistryTable({ state, set, reset, fixed, storageKey = "registry", hideExposure, allowDelete }: {
   state: Record<string, string>; set: any; reset: () => void; fixed?: Record<string, string>; storageKey?: string; hideExposure?: boolean;
@@ -81,11 +81,12 @@ export function RegistryTable({ state, set, reset, fixed, storageKey = "registry
   const { data: meta } = useMeta();
   const { data: sum } = useQuery({ queryKey: ["registry-summary"], queryFn: () => api<any>("/api/registry/summary") });
   const count = (k: string) => (sum ? ` (${fmtN(sum[k] || 0)})` : "");
-  const msps = (meta?.msps || []).filter((m) => !state.lob || String(m.lob_id) === state.lob);
+  const lobSel = (state.lob || "").split("|").filter(Boolean);
+  const msps = (meta?.msps || []).filter((m) => !lobSel.length || lobSel.includes(String(m.lob_id)));
   const lobName = (id: number) => meta?.lobs.find((l) => l.id === id)?.name || "";
   const linkPills = Object.keys(LINK_KEYS).filter((k) => state[k]);
   const anyActive = linkPills.length + MAIN_KEYS.filter((k) => state[k]).length > 0;
-  const moreCount = ["missing", "msp", "node_type", "feasibility", "edr_status", "vulns"].filter((k) => state[k]).length;
+  const moreCount = ["missing", "niam", "scanned", "msp", "node_type", "os", "feasibility", "edr_status", "vulns", "exposure_src", "whitelisted"].filter((k) => state[k]).length;
   const cols: Column[] = [
     { key: "ip", label: "IP", render: (r) => r.ip ? <Link className="font-mono text-[12px] text-accent-fg hover:underline" href={`/ip-search/?q=${encodeURIComponent(r.ip)}`}>{r.ip}</Link> : <span className="text-muted">no IP</span> },
     { key: "name", label: "Name", render: (r) => <b>{r.name || <span className="font-normal text-muted">–</span>}</b> },
@@ -135,25 +136,44 @@ export function RegistryTable({ state, set, reset, fixed, storageKey = "registry
           <FilterSelect label="Found in" value={state.has} onChange={(v) => set({ has: v })} any="Any source"
             options={[["inventory", `LOB inventory${count("inventory")}`], ["edr", `CrowdStrike${count("edr")}`], ["scan", `VA scan${count("scan")}`], ["niam", `NIAM${count("niam")}`]]} />
           <FilterSelect label="LOB" value={state.lob} onChange={(v) => set({ lob: v, msp: undefined })} any="All" options={(meta?.lobs || []).map((l) => ({ value: l.id, label: l.name }))} />
-          {!hideExposure && <FilterSelect label="Internet" value={state.exposed} onChange={(v) => set({ exposed: v })} any="Any" options={[["1", `Exposed${count("exposed")}`], ["0", "Not exposed"]]} />}
+          {!hideExposure && <FilterSelect single label="Internet" value={state.exposed} onChange={(v) => set({ exposed: v })} any="Any" options={[["1", `Exposed${count("exposed")}`], ["0", "Not exposed"]]} />}
           <Popover.Root>
             <Popover.Trigger asChild>
               <Button size="sm" variant={moreCount ? "soft" : "default"}><SlidersHorizontal /> More filters{moreCount > 0 && <Badge tone="info" className="ml-0.5">{moreCount}</Badge>}</Button>
             </Popover.Trigger>
             <Popover.Portal>
-              <Popover.Content align="start" sideOffset={6} className="z-50 w-[520px] max-w-[95vw] rounded-xl border border-border bg-surface p-3 shadow-xl">
-                <div className="grid grid-cols-2 gap-2 [&_button]:w-full [&_button]:justify-between">
+              <Popover.Content align="start" sideOffset={6} collisionPadding={10} className="z-50 w-[600px] max-w-[95vw] rounded-xl border border-border bg-surface p-4 shadow-xl">
+                <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted">Where it is known</div>
+                <div className="mb-4 flex flex-wrap gap-2">
                   <FilterSelect label="Missing from" value={state.missing} onChange={(v) => set({ missing: v })} any="Nothing"
-                    options={[["inventory", `Inventory${count("not_in_inventory")}`], ["edr", "CrowdStrike"], ["scan", "VA scan"], ["niam", `NIAM${count("not_in_niam")}`], ["inventory|niam", "Inventory and NIAM"]]} />
+                    options={[["inventory", `Inventory${count("not_in_inventory")}`], ["edr", "CrowdStrike"], ["scan", "VA scan"], ["niam", `NIAM${count("not_in_niam")}`]]} />
+                  <FilterSelect single label="In NIAM" value={state.niam} onChange={(v) => set({ niam: v })} options={[["1", "Yes"], ["0", "No"]]} />
+                  <FilterSelect single label="VA scanned" value={state.scanned} onChange={(v) => set({ scanned: v })} options={[["1", "Yes"], ["0", "No (live nodes)"]]} />
+                </div>
+                <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted">Ownership & type</div>
+                <div className="mb-4 flex flex-wrap gap-2">
                   <FilterSelect label="MSP" value={state.msp} onChange={(v) => set({ msp: v })} any="All"
-                    options={msps.map((x) => ({ value: x.id, label: state.lob ? x.name : `${x.name} · ${lobName(x.lob_id)}` }))} />
+                    options={[...msps.map((x) => ({ value: x.id, label: `${x.name} · ${lobName(x.lob_id)}` })), { value: "none", label: "No MSP" }]} />
                   <FilterSelect label="Node type" value={state.node_type} onChange={(v) => set({ node_type: v })} any="All" options={meta?.node_types || []} />
+                  <FilterSelect label="OS" value={state.os} onChange={(v) => set({ os: v })} any="All" options={meta?.os || []} />
+                </div>
+                <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted">EDR & risk</div>
+                <div className="mb-4 flex flex-wrap gap-2">
+                  <FilterSelect label="CrowdStrike" value={state.edr_status} onChange={(v) => set({ edr_status: v })} any="Any" options={[["Online", "Online"], ["Offline", "Offline (incl. EDR history)"], ["Not Installed", "No agent"]]} />
                   <FilterSelect label="EDR feasible" value={state.feasibility} onChange={(v) => set({ feasibility: v })} any="Any"
                     options={[["Yes", "Feasible"], ["No", `Not feasible${count("not_feasible")}`], ["To be decided", `To be decided${count("to_be_decided")}`], ["Unidentified", `Unidentified${count("unidentified")}`]]} />
-                  <FilterSelect label="CrowdStrike" value={state.edr_status} onChange={(v) => set({ edr_status: v })} any="Any" options={[["Online", "Online"], ["Offline", "Offline (incl. EDR history)"], ["Not Installed", "No agent"]]} />
                   <FilterSelect label="Vulnerabilities" value={state.vulns} onChange={(v) => set({ vulns: v })} any="Any"
                     options={[["crit_high", "Critical / high open"], ["any", "Any open finding"], ["none", "Scanned, nothing open"]]} />
                 </div>
+                {!hideExposure && <>
+                  <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted">Internet exposure</div>
+                  <div className="flex flex-wrap gap-2">
+                    <FilterSelect label="Exposed by" value={state.exposure_src} onChange={(v) => set({ exposure_src: v })} any="Any source"
+                      options={[["inventory", "Inventory"], ["matrix", "Communication matrix"], ["scan", "VA scan"], ["ip", "Public IP"], ["edr", "CrowdStrike connection IP"], ["passive", "Passive scan"], ["manual", "Marked by hand"]]} />
+                    <FilterSelect single label="Whitelisted" value={state.whitelisted} onChange={(v) => set({ whitelisted: v })} options={[["1", "Yes"], ["0", "No"]]} />
+                  </div>
+                </>}
+                {moreCount > 0 && <Button size="sm" variant="ghost" className="mt-3" onClick={() => set(Object.fromEntries(["missing", "niam", "scanned", "msp", "node_type", "os", "edr_status", "feasibility", "vulns", "exposure_src", "whitelisted"].map((k) => [k, undefined])))}><X /> Clear these</Button>}
               </Popover.Content>
             </Popover.Portal>
           </Popover.Root>

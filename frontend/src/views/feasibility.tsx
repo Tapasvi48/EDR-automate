@@ -26,7 +26,8 @@ const STEPS = [
 export default function Feasibility() {
   const qc = useQueryClient();
   const [state, set, replaceAll] = useUrlState();
-  const [tab, setTab] = React.useState<string>("node_type");
+  const [tab, setTab] = React.useState<string>("pairs");
+  const [sel, setSel] = React.useState<Set<string>>(new Set());
   const [busy, setBusy] = React.useState(false);
   const [sheetOpen, setSheetOpen] = React.useState(false);
   const fileRef = React.useRef<HTMLInputElement>(null);
@@ -112,6 +113,7 @@ export default function Feasibility() {
   ];
 
   const tabs = [
+    { id: "pairs", label: "Decide by Node type + OS", count: s.to_be_decided || undefined },
     { id: "node_type", label: "Node types", count: d.node_type.length },
     { id: "os", label: "Operating systems", count: d.os.length },
     { id: "lob", label: "LOBs", count: d.lob.length },
@@ -159,6 +161,7 @@ export default function Feasibility() {
         </div>
         <div className="px-4 pt-3 pb-4">
           <Tabs value={tab} onChange={setTab} tabs={tabs} />
+          {tab === "pairs" && <PairTable onChanged={refreshAfterChange} onShow={(nt, os) => showNodes({ ...(nt ? { node_type: nt } : {}), ...(os ? { q: os } : {}) })} />}
           {tab === "node_type" && <DimTable dim="node_type" rows={d.node_type} busy={busy} onMark={mark} onShow={(v) => showNodes({ node_type: v })}
             hint="Feasible when CrowdStrike is installed (online or offline) on at least one node of that type, in any LOB. A type with no agent yet is to be decided until you mark it." />}
           {tab === "os" && <DimTable dim="os" rows={d.os} busy={busy} onMark={mark} onShow={(v) => showNodes({ q: v })}
@@ -171,8 +174,18 @@ export default function Feasibility() {
       </Card>
 
       <div ref={tableRef} />
+      {sel.size > 0 && (
+        <div className="mb-2 flex flex-wrap items-center gap-1.5 rounded-xl border border-accent/40 bg-accent-soft/40 px-3 py-2 text-[12.5px]">
+          <b>{fmtN(sel.size)} nodes selected</b><span className="text-muted">set to</span>
+          {([["Yes", "Feasible"], ["No", "Not feasible"], ["To be decided", "To be decided"]] as const).map(([v, l]) => (
+            <Button key={v} size="sm" onClick={() => { decide(v, { items: [...sel].map((k) => ({ lob_id: +k.split("|")[0], item_key: k.slice(k.indexOf("|") + 1) })) }); setSel(new Set()); }}>{l}</Button>
+          ))}
+          <Button size="sm" variant="ghost" onClick={() => { decide(null, { items: [...sel].map((k) => ({ lob_id: +k.split("|")[0], item_key: k.slice(k.indexOf("|") + 1) })) }); setSel(new Set()); }}><RotateCcw /> Back to automatic</Button>
+        </div>
+      )}
       <DataTable endpoint="/api/feasibility/nodes" exportPath="/api/feasibility/export" columns={cols} state={state} setState={set}
         storageKey="feasibility2" noun="nodes" rowKey={(r: any) => `${r.lob_id}|${r.item_key}`} onReset={() => replaceAll({})}
+        selected={sel} onSelectedChange={setSel}
         filters={
           <div className="flex w-full flex-wrap items-center gap-2">
             <SearchInput className="w-[260px] max-w-full" value={state.q || ""} onChange={(v) => set({ q: v })} placeholder="IP, name, OS, node type, domain…" />
@@ -319,3 +332,80 @@ function DimTable({ dim, rows, busy, onMark, onShow, hint }: {
   );
 }
 
+
+
+/** The quick way: every Node type + OS combination, the undecided ones first; decide a pair (or several) for all LOBs in one click. */
+function PairTable({ onChanged, onShow }: { onChanged: () => void; onShow: (nodeType: string, os: string) => void }) {
+  const qc = useQueryClient();
+  const [status, setStatus] = React.useState("To be decided");
+  const [q, setQ] = React.useState("");
+  const [picked, setPicked] = React.useState<Set<string>>(new Set());
+  const { data, error } = useQuery({ queryKey: ["feas-pairs", status, q], queryFn: () => api<any>("/api/feasibility/pairs", { params: { status, q } }) });
+  const rows: any[] = data?.rows || [];
+  const key = (r: any) => `${r.node_type}|${r.os_key}`;
+  const set = async (pairs: any[], feasible: "Yes" | "No" | null) => {
+    try {
+      const r = await api<any>("/api/feasibility/pair", { method: "PUT", body: { pairs: pairs.map((p) => ({ node_type: p.node_type, os: p.os, os_key: p.os_key })), feasible } });
+      toast.success(`${fmtN(r.updated)} pair${r.updated === 1 ? "" : "s"} ${feasible ? (feasible === "Yes" ? "set feasible" : "set not feasible") : "back to automatic"} for all LOBs`);
+      setPicked(new Set()); qc.invalidateQueries({ queryKey: ["feas-pairs"] }); onChanged();
+    } catch (e: any) { toast.error(e.message); }
+  };
+  const chosen = rows.filter((r) => picked.has(key(r)));
+  return (
+    <div>
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <p className="min-w-0 flex-1 text-[12.5px] text-fg-2">Each row is a Node type + OS combination across all LOBs. Undecided ones come first; tick several and decide them together. Decisions apply to every LOB (per-LOB: the feasibility sheet).</p>
+        <FilterSelect label="Show" value={status} onChange={setStatus} any="All pairs" options={[["To be decided", "With nodes to decide"], ["No", "With not-feasible nodes"], ["Yes", "With feasible nodes"], ["decided", "Decided by you"]]} />
+        <SearchInput className="w-[200px]" value={q} onChange={setQ} placeholder="Node type or OS…" />
+      </div>
+      {chosen.length > 0 && (
+        <div className="mb-2 flex flex-wrap items-center gap-1.5 text-[12.5px]">
+          <b>{chosen.length} pairs</b><span className="text-muted">→</span>
+          <Button size="sm" onClick={() => set(chosen, "Yes")}><ShieldCheck /> Feasible</Button>
+          <Button size="sm" onClick={() => set(chosen, "No")}><ShieldOff /> Not feasible</Button>
+          <Button size="sm" variant="ghost" onClick={() => set(chosen, null)}><RotateCcw /> Automatic</Button>
+        </div>
+      )}
+      {!data ? <Loading error={error} /> : (
+        <div className="max-h-[420px] overflow-y-auto rounded-lg border border-border scroll-thin">
+          <table className="w-full text-[13px]">
+            <thead className="sticky top-0 z-[1] bg-surface-2 text-left text-[11.5px] text-muted"><tr>
+              <th className="w-8 px-3 py-2"><input type="checkbox" className="accent-[var(--accent)]" checked={rows.length > 0 && rows.every((r) => picked.has(key(r)))}
+                onChange={(e) => setPicked(e.target.checked ? new Set(rows.map(key)) : new Set())} /></th>
+              <th className="px-3 py-2 font-medium">Node type</th><th className="px-3 py-2 font-medium">OS</th><th className="px-3 py-2 font-medium">Sensor support</th>
+              <th className="px-3 py-2 text-right font-medium">Nodes</th><th className="px-3 py-2 font-medium">With EDR</th>
+              <th className="px-3 py-2 font-medium">Now</th><th className="px-3 py-2 font-medium">Decide (all LOBs)</th></tr></thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={key(r)} className="border-t border-border">
+                  <td className="px-3 py-2"><input type="checkbox" className="accent-[var(--accent)]" checked={picked.has(key(r))}
+                    onChange={(e) => { const n = new Set(picked); e.target.checked ? n.add(key(r)) : n.delete(key(r)); setPicked(n); }} /></td>
+                  <td className="px-3 py-2"><button className="font-medium hover:text-accent-fg hover:underline" onClick={() => onShow(r.node_type, r.os)}>{r.node_type || "(blank)"}</button></td>
+                  <td className="px-3 py-2">{r.os || <span className="text-muted">(unknown)</span>}</td>
+                  <td className="px-3 py-2">{r.support ? <Badge tone={r.support === "Supported" ? "good" : r.support === "Legacy" ? "warn" : "crit"}>{r.support}</Badge> : <span className="text-[12px] text-muted">not in catalog</span>}</td>
+                  <td className="px-3 py-2 text-right tabular">{fmtN(r.nodes)}<span className="block text-[11px] text-muted">{r.lobs} LOB{r.lobs === 1 ? "" : "s"}</span></td>
+                  <td className="px-3 py-2"><span className={cn("tabular text-[12px]", r.installed ? "text-good-fg" : "text-muted")}>{fmtN(r.installed)}</span></td>
+                  <td className="whitespace-nowrap px-3 py-2 text-[12px] tabular">
+                    {r.feasible > 0 && <span className="text-good-fg">{fmtN(r.feasible)} yes </span>}
+                    {r.not_feasible > 0 && <span className="text-crit-fg">{fmtN(r.not_feasible)} no </span>}
+                    {r.to_be_decided > 0 && <span className="font-semibold text-warn-fg">{fmtN(r.to_be_decided)} to decide</span>}
+                  </td>
+                  <td className="whitespace-nowrap px-3 py-2">
+                    <div className="inline-flex rounded-lg border border-border-strong bg-surface p-0.5">
+                      {([["Yes", "Feasible"], ["No", "Not feasible"]] as const).map(([v, l]) => (
+                        <button key={v} onClick={() => set([r], r.decision === v ? null : v)} title={r.decision === v ? "Your decision — click to go back to automatic" : undefined}
+                          className={cn("h-6 rounded-md px-2 text-[11.5px] font-medium", r.decision === v ? (v === "No" ? "bg-crit-soft text-crit-fg" : "bg-good-soft text-good-fg") : "text-fg-2 hover:text-fg")}>{l}</button>
+                      ))}
+                    </div>
+                    {r.decision && <span className="ml-2 text-[11px] font-medium text-violet-fg">set by you</span>}
+                  </td>
+                </tr>
+              ))}
+              {!rows.length && <tr><td colSpan={8} className="px-3 py-6 text-center text-[12.5px] text-muted">{status === "To be decided" ? "Nothing left to decide" : "No pairs"}</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}

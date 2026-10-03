@@ -434,18 +434,25 @@ def query(p):
             w.append(f"r.in_{src}=0")
             if src == "inventory":  # a public IP that is the NAT address of an inventory node is not a gap
                 w.append("r.nat_of IS NULL")
-    if p.get("lob"):
-        w.append("r.lob_ids LIKE ?")
-        params.append(f"%,{int(p['lob'])},%")
-    if p.get("msp"):
-        if p["msp"] == "none":
-            w.append("r.in_inventory=1 AND r.msps IS NULL")
-        else:
-            w.append("r.msp_ids LIKE ?")
-            params.append(f"%,{int(p['msp'])},%")
-    if p.get("node_type"):
-        w.append("r.node_type=?")
-        params.append(p["node_type"])
+    if db.multi(p, "lob"):
+        s, v = db.or_like("r.lob_ids", [int(x) for x in db.multi(p, "lob")], "%,{},%")
+        w.append(s)
+        params += v
+    if db.multi(p, "msp"):
+        ms = db.multi(p, "msp")
+        conds, v = [], []
+        if "none" in ms:
+            conds.append("(r.in_inventory=1 AND r.msps IS NULL)")
+        ids = [int(x) for x in ms if x != "none"]
+        if ids:
+            s, v = db.or_like("r.msp_ids", ids, "%,{},%")
+            conds.append(s)
+        w.append("(" + " OR ".join(conds) + ")")
+        params += v
+    if db.multi(p, "node_type"):
+        s, v = db.in_clause("r.node_type", db.multi(p, "node_type"))
+        w.append(s)
+        params += v
     if p.get("edr_status"):
         vals = p["edr_status"].split("|")
         w.append(f"r.edr_status IN ({','.join('?' * len(vals))})")
@@ -457,16 +464,15 @@ def query(p):
     if p.get("exposed") in ("0", "1"):
         w.append("r.exposed=?")
         params.append(int(p["exposed"]))
-    if p.get("exposure_src"):
-        w.append("r.exposure_src LIKE ?")
-        params.append(f"%,{p['exposure_src']},%")
-    v = p.get("vulns")
-    if v == "crit_high":
-        w.append("(r.crit + r.high) > 0")
-    elif v == "any":
-        w.append("(r.crit + r.high + r.med + r.low) > 0")
-    elif v == "none":
-        w.append("r.in_scan=1 AND (r.crit + r.high + r.med + r.low) = 0")
+    if db.multi(p, "exposure_src"):
+        s, v = db.or_like("r.exposure_src", db.multi(p, "exposure_src"), "%,{},%")
+        w.append(s)
+        params += v
+    vc = {"crit_high": "(r.crit + r.high) > 0", "any": "(r.crit + r.high + r.med + r.low) > 0",
+          "none": "(r.in_scan=1 AND (r.crit + r.high + r.med + r.low) = 0)"}
+    vs = [vc[x] for x in db.multi(p, "vulns") if x in vc]
+    if vs:
+        w.append("(" + " OR ".join(vs) + ")")
     # links kept from the inventory-only list (Overview / LOB pages / coverage gaps)
     live = "COALESCE(r.live,'')<>'Non Live'"
     gap = p.get("gap")
@@ -489,18 +495,21 @@ def query(p):
         w.append("r.in_inventory=1 AND r.edr_applicable=1")
     if p.get("edr_applicable") == "1":  # inventory nodes that are applicable + assets in no inventory that have EDR
         w.append("r.edr_applicable=1")
-    if p.get("feasibility") in ("Yes", "No", "Legacy", "To be decided", "Unidentified"):
-        w.append("r.feasibility=?")
-        params.append(p["feasibility"])
+    fz = [x for x in db.multi(p, "feasibility") if x in ("Yes", "No", "Legacy", "To be decided", "Unidentified")]
+    if fz:
+        s, v = db.in_clause("r.feasibility", fz)
+        w.append(s)
+        params += v
     if p.get("os_source"):
         if p["os_source"] == "none":
             w.append("COALESCE(r.os,'')=''")
         else:
             w.append("r.os_source=?")
             params.append(p["os_source"])
-    if p.get("os"):
-        w.append("r.os LIKE ?")
-        params.append(f"%{p['os']}%")
+    if db.multi(p, "os"):
+        s, v = db.or_like("r.os", db.multi(p, "os"))
+        w.append(s)
+        params += v
     if p.get("installed") == "1":
         w.append("r.in_inventory=1 AND r.edr_applicable=1 AND r.edr_status IN ('Online','Offline')")
     if p.get("niam") in ("0", "1"):
@@ -543,7 +552,7 @@ def _rows(c, p, limit=None, offset=0):
 @router.get("/api/registry")
 def registry_list(request: Request):
     p = dict(request.query_params)
-    page, size = max(1, int(p.get("page") or 1)), min(1000, max(1, int(p.get("size") or 50)))
+    page, size = db.page_args(p)
     where, params, _ = query(p)
     with db.get_conn() as c:
         total = c.execute(f"SELECT COUNT(*) FROM asset_registry r {where}", params).fetchone()[0]

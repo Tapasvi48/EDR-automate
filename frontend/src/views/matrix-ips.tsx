@@ -15,7 +15,7 @@ const ROLE: Record<string, [string, string]> = {
 };
 const VIEWS: [string, string, string][] = [
   ["exposed", "Ours & internet exposed", "crit"], ["outbound", "Ours & talking to internet", "warn"], ["public", "Our public / NAT IPs", "violet"],
-  ["not_inventory", "Exposed but not in inventory", "serious"], ["unknown", "Host names not matched", "neutral"], ["external", "External / partner", "neutral"],
+  ["not_inventory", "Exposed but not in inventory", "serious"], ["unknown", "To check (names, unconfirmed public IPs)", "neutral"], ["external", "External / partner", "neutral"],
   ["all", "All addresses", "info"],
 ];
 
@@ -94,7 +94,7 @@ export function MatrixIpsPanel({ state, set, replaceAll, keep = {} }: { state: R
       <DataTable key={view} endpoint="/api/comm/ips" exportPath="/api/comm/ips/export" state={{ ...state, view }} setState={set} noun="addresses" storageKey="comm-ips"
         rowKey={(r: any) => `${r.kind}|${r.address}`} onReset={() => replaceAll({ ...keep, view })} sortable={false} columns={cols}
         filters={<>
-          <FilterSelect label="Show" value={view} onChange={(v) => replaceAll({ ...keep, view: v || "exposed" })} options={VIEWS.map(([id, l]) => [id, l]) as [string, string][]} />
+          <FilterSelect single label="Show" value={view} onChange={(v) => replaceAll({ ...keep, view: v || "exposed" })} options={VIEWS.map(([id, l]) => [id, l]) as [string, string][]} />
           <SearchInput className="w-72" value={state.q || ""} onChange={(v) => set({ q: v })} placeholder="IP, subnet, name, application, owner, sheet…" />
           <FilterSelect label="Kind" value={state.kind} onChange={(v) => set({ kind: v })} any="All" options={[["ip", "IPs"], ["subnet", "Subnets / ranges"], ["name", "Host names"]]} />
         </>} />

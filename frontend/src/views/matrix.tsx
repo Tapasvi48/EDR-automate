@@ -99,7 +99,7 @@ function RowsTab({ s, state, set, replaceAll }: { s: any; state: Record<string, 
       rowKey={(r: any) => String(r.id)} onReset={() => replaceAll({})} sortable={false}
       filters={<>
         <SearchInput className="w-72" value={state.q || ""} onChange={(v) => set({ q: v })} placeholder="IP, subnet, name, port, application, owner…" />
-        <FilterSelect label="Internet" value={state.inbound} onChange={(v) => set({ inbound: v })} any="Any" options={[["1", "Internet-facing"], ["0", "Internal"]]} />
+        <FilterSelect single label="Internet" value={state.inbound} onChange={(v) => set({ inbound: v })} any="Any" options={[["1", "Internet-facing"], ["0", "Internal"]]} />
         <FilterSelect label="Type" value={state.sheet_type} onChange={(v) => set({ sheet_type: v })} any="All" options={Object.entries(s.sheet_types || {}) as [string, string][]} />
         {sheets.length > 1 && <FilterSelect label="Sheet" value={state.sheet} onChange={(v) => set({ sheet: v })} any="All" options={sheets} />}
         {s.firewalls?.length > 0 && <FilterSelect label="Firewall" value={state.firewall} onChange={(v) => set({ firewall: v })} any="All" options={s.firewalls} />}

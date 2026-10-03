@@ -2,7 +2,8 @@
 import * as React from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as DM from "@radix-ui/react-dropdown-menu";
-import { Loader2, Search, X } from "lucide-react";
+import * as Pop from "@radix-ui/react-popover";
+import { Check, ChevronDown, Loader2, Search, X } from "lucide-react";
 import Link from "next/link";
 import { cn } from "@/lib/utils";
 import { fmtBytes, fmtN, fmtSecs } from "@/lib/format";
@@ -461,20 +462,68 @@ export function Menu({ trigger, items, align = "end", width = 240 }: { trigger: 
 /* ---------------- Labelled filter select ---------------- */
 type Opt = string | [string, string] | { value: string | number; label: string };
 const optPair = (o: Opt): [string, string] => (Array.isArray(o) ? o : typeof o === "object" ? [String(o.value), o.label] : [o, o]);
-/** A filter that always says what it filters: "Status: Any ▾". Highlighted while a value is set. */
-export function FilterSelect({ label, value, onChange, options, any = "Any", className }: {
-  label: string; value?: string; onChange: (v: string) => void; options: Opt[]; any?: string; className?: string;
+/** A filter that always says what it filters: "Status: Any ▾". Multi-select by default (values joined with "|", which
+ *  every list API reads as "any of"); `single` for sort / view pickers and yes-no switches. Searchable when long. */
+export function FilterSelect({ label, value, onChange, options, any = "Any", className, single }: {
+  label: string; value?: string; onChange: (v: string) => void; options: Opt[]; any?: string; className?: string; single?: boolean;
 }) {
-  const on = !!value;
+  const [open, setOpen] = React.useState(false);
+  const [q, setQ] = React.useState("");
+  const pairs = options.map(optPair);
+  const picked = (value ?? "").split("|").filter(Boolean);
+  const labelOf = (v: string) => pairs.find(([x]) => x === v)?.[1] ?? v;
+  const on = picked.length > 0;
+  const shown = pairs.filter(([, l]) => !q || l.toLowerCase().includes(q.toLowerCase()));
+  const toggle = (v: string) => {
+    if (single) { onChange(v); setOpen(false); return; }
+    const next = picked.includes(v) ? picked.filter((x) => x !== v) : [...picked, v];
+    onChange(next.join("|"));
+  };
+  const text = !on ? any : picked.length === 1 ? labelOf(picked[0]) : `${labelOf(picked[0])} +${picked.length - 1}`;
   return (
-    <label className={cn("inline-flex h-8.5 min-w-0 items-center rounded-lg border pl-2.5 text-[13px] shadow-card transition-colors",
-      on ? "border-accent bg-accent-soft" : "border-border-strong bg-surface hover:border-fg-2/40", className)}>
-      <span className="shrink-0 whitespace-nowrap text-muted">{label}:</span>
-      <select className={cn("h-full min-w-0 max-w-[190px] cursor-pointer truncate bg-transparent pl-1 pr-1.5 outline-none", on ? "font-semibold text-accent-fg" : "font-medium text-fg")}
-        value={value ?? ""} onChange={(e) => onChange(e.target.value)}>
-        <option value="">{any}</option>
-        {options.map((o) => { const [v, l] = optPair(o); return <option key={v} value={v}>{l}</option>; })}
-      </select>
-    </label>
+    <Pop.Root open={open} onOpenChange={(o) => { setOpen(o); if (!o) setQ(""); }}>
+      <Pop.Trigger asChild>
+        <button type="button" title={on ? picked.map(labelOf).join(", ") : undefined}
+          className={cn("inline-flex h-8.5 min-w-0 max-w-[280px] items-center gap-1 rounded-lg border pl-2.5 pr-2 text-[13px] shadow-card transition-colors",
+            on ? "border-accent bg-accent-soft" : "border-border-strong bg-surface hover:border-fg-2/40", className)}>
+          <span className="shrink-0 whitespace-nowrap text-muted">{label}:</span>
+          <span className={cn("min-w-0 truncate", on ? "font-semibold text-accent-fg" : "font-medium text-fg")}>{text}</span>
+          {on && !single ? <span role="button" aria-label={`Clear ${label}`} className="ml-0.5 rounded p-0.5 text-muted hover:bg-surface-3 hover:text-fg"
+            onClick={(e) => { e.stopPropagation(); onChange(""); }}><X className="size-3" /></span>
+            : <ChevronDown className="size-3.5 shrink-0 text-muted" />}
+        </button>
+      </Pop.Trigger>
+      <Pop.Portal>
+        <Pop.Content align="start" sideOffset={6} className="z-50 w-[min(340px,90vw)] rounded-xl border border-border bg-surface p-1.5 shadow-xl">
+          {pairs.length > 8 && (
+            <div className="mb-1 flex items-center gap-1.5 rounded-lg border border-border px-2">
+              <Search className="size-3.5 text-muted" />
+              <input autoFocus className="h-8 w-full bg-transparent text-[13px] outline-none" placeholder={`Search ${label.toLowerCase()}…`} value={q} onChange={(e) => setQ(e.target.value)} />
+            </div>
+          )}
+          <div className="max-h-72 overflow-auto">
+            <button type="button" onClick={() => { onChange(""); if (single) setOpen(false); }}
+              className={cn("flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] hover:bg-surface-2", !on && "font-semibold text-accent-fg")}>
+              <span className="w-4">{!on && <Check className="size-3.5" />}</span>{any}
+            </button>
+            {shown.map(([v, l]) => {
+              const sel = picked.includes(v);
+              return (
+                <button type="button" key={v} onClick={() => toggle(v)}
+                  className={cn("flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] hover:bg-surface-2", sel && "font-semibold text-accent-fg")}>
+                  {single ? <span className="w-4 shrink-0">{sel && <Check className="size-3.5" />}</span>
+                    : <span className={cn("flex size-4 shrink-0 items-center justify-center rounded border", sel ? "border-accent bg-accent text-white" : "border-border-strong")}>{sel && <Check className="size-3" />}</span>}
+                  <span className="min-w-0 break-words">{l}</span>
+                </button>
+              );
+            })}
+            {!shown.length && <div className="px-2.5 py-2 text-[12.5px] text-muted">No match</div>}
+          </div>
+          {!single && on && <div className="mt-1 flex items-center justify-between border-t border-border px-2 pt-1.5 text-[12px] text-muted">
+            <span>{picked.length} selected</span>
+            <button type="button" className="text-accent-fg hover:underline" onClick={() => setOpen(false)}>Done</button></div>}
+        </Pop.Content>
+      </Pop.Portal>
+    </Pop.Root>
   );
 }

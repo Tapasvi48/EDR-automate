@@ -265,9 +265,12 @@ def _group(rows, key):
 
 
 @router.get("/api/surface")
-def surface(view: str = "subnet"):
+def surface(view: str = "subnet", bits: int = 24):
+    bits = min(32, max(8, int(bits or 24)))
     with db.get_conn() as c:
         rows = _build(c)
+        for r in rows:  # group public IPs by the subnet size picked on the page (/24 by default)
+            r["group"] = str(ipaddress.ip_network(f"{r['ip']}/{bits}", strict=False))
         asns = _setting_list(c, ASNS_KEY)
         ranges = _setting_list(c, RANGES_KEY)
         adv = db.rows(c, "SELECT asn, prefix FROM asn_prefixes")
@@ -311,8 +314,26 @@ def surface(view: str = "subnet"):
                         "adv_prefixes": len(adv_rows), "adv_unknown": sum(1 for a in adv_rows if not a["known"]),
                         "whois": sum(1 for r in rows if r.get("whois_name")), "enterprise": sum(1 for r in rows if r.get("cls") == "enterprise"),
                         "non_enterprise": sum(1 for r in rows if r.get("cls") == "non-enterprise")},
-            "subnets": _group(rows, "subnet"), "prefixes": _group(rows, "prefix"), "asns": sorted(by_asn.values(), key=lambda a: -a["ips"]),
+            "subnets": _with_block(_group(rows, "group")), "bits": bits, "prefixes": _with_block(_group(rows, "prefix")), "asns": sorted(by_asn.values(), key=lambda a: -a["ips"]),
             "advertised": adv_rows[:2000], "ranges": ranges, "our_asns": asns, "job": JOB, "demo": config.DEMO}
+
+
+def _with_block(groups):
+    """WHOIS of the registered block that holds each subnet / prefix (its first address), next to the WHOIS of its known IPs."""
+    from .whois import net_for
+    c = db.connect()
+    try:
+        for g in groups:
+            try:
+                first = str(ipaddress.ip_network(g["key"], strict=False).network_address)
+            except ValueError:
+                continue
+            b = net_for(c, first)
+            g.update(block_name=b.get("name"), block_descr=b.get("descr"), block_org=b.get("org"), block_range=b.get("cidr"),
+                     block_country=b.get("country"))
+    finally:
+        c.close()
+    return groups
 
 
 def _filter(rows, p):
@@ -320,11 +341,15 @@ def _filter(rows, p):
     cls = {r["ip"]: r.get("cls") for r in rows}
     rows = [r for r in rows if matches(r, p, cls)]
     if p.get("subnet"):
-        rows = [r for r in rows if r["subnet"] == p["subnet"]]
+        try:
+            nets = [ipaddress.ip_network(x, strict=False) for x in db.multi(p, "subnet")]
+            rows = [r for r in rows if any(ipaddress.ip_address(r["ip"]) in n for n in nets)]
+        except ValueError:
+            rows = []
     if p.get("prefix"):
-        rows = [r for r in rows if r["prefix"] == p["prefix"]]
+        rows = [r for r in rows if r["prefix"] in db.multi(p, "prefix")]
     if p.get("asn"):
-        rows = [r for r in rows if r["asn"] == p["asn"]]
+        rows = [r for r in rows if r["asn"] in db.multi(p, "asn")]
     show = p.get("show")
     rows = [r for r in rows if not show or (show == "ports" and r["ports"]) or (show == "cves" and r["vulns"]) or (show == "unscanned" and not r["scanned"])
             or (show == "noisy" and r["gn_noise"]) or (show == "exposed" and r["exposed"])]
@@ -337,7 +362,7 @@ def _filter(rows, p):
 @router.get("/api/surface/ips")
 def surface_ips(request: Request):
     p = dict(request.query_params)
-    page, size = max(1, int(p.get("page") or 1)), min(1000, max(1, int(p.get("size") or 50)))
+    page, size = db.page_args(p)
     with db.get_conn() as c:
         rows = _filter(_build(c), p)
     return {"total": len(rows), "rows": rows[(page - 1) * size: page * size]}
@@ -395,7 +420,8 @@ def surface_enrich(data: dict = Body(default={})):
     def fn(prog):
         from .whois import lookup
         r = enrich(ips, what, prog)
-        asked, errs = lookup(ips, progress=prog)  # WHOIS too: cached per registered block, so mostly answered locally
+        nets24 = sorted({str(ipaddress.ip_network(f"{i}/24", strict=False).network_address) for i in ips})
+        asked, errs = lookup(ips + nets24, progress=prog)  # WHOIS too (and each /24's own block): cached per registered block
         return ("done" + (" · GreyNoise daily quota reached, the rest later" if r["greynoise_limited"] else "")
                 + f" · WHOIS {asked:,} registry look-ups" + (f", {errs:,} without an answer" if errs else ""))
     return _run("Looking up prefixes, GreyNoise and WHOIS", len(ips), fn)

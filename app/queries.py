@@ -83,7 +83,8 @@ HOST_LIST_COLS = """h.aid, h.hostname, h.local_ip, h.connection_ip, h.external_i
     h.product_type_desc, h.chassis_type_desc, h.machine_domain, h.site_name, h.ou, h.agent_version, h.containment_status, h.rfm,
     h.system_manufacturer, h.system_product_name, h.serial_number, h.last_login_user, h.tags, h.groups,
     h.first_seen, h.last_seen, h.online_state, h.console_state, h.removed_at, h.removal_type, h.gone_group, h.gone_source,
-    h.is_reinstall, h.reinstall_reason, COALESCE(d.dup_count, 0) dup_count, COALESCE(rc.dup_count, 0) rc_count,
+    h.is_reinstall, h.reinstall_reason, h.prevention_policy_id, h.prevention_applied,
+    (SELECT pp.name FROM prevention_policies pp WHERE pp.id=h.prevention_policy_id) prevention_policy, COALESCE(d.dup_count, 0) dup_count, COALESCE(rc.dup_count, 0) rc_count,
     hm.inv_lobs, hm.inv_msps, hm.tag_only, COALESCE(NULLIF(inv.inv_node_type, ''), h.product_type_desc) node_type,
     inv.inv_node_name, inv.inv_node_type, inv.inv_domain, inv.inv_live, inv.inv_os,
     inv.inv_edr_feasible, inv.inv_edr_installed, inv.inv_remarks, inv.inv_verification,
@@ -180,6 +181,14 @@ def build_host_query(p: dict, settings):
             params += vals
     if p.get("dedupe") == "1" and p.get("duplicate") != "1":
         w.append("(h.is_primary = 1 OR h.console_state='removed')" if offline_all else "h.is_primary = 1")
+    sts = db.multi(p, "status")
+    if len(sts) > 1:  # several statuses picked: any of them
+        sc = {"online": "h.online_state='online'", "offline": "h.online_state='offline'",
+              "unknown": "(h.online_state IS NULL OR h.online_state='unknown')"}
+        conds = [sc[x] for x in sts if x in sc]
+        if conds:
+            w.append("(" + " OR ".join(conds) + ")")
+        p = {**p, "status": None}
     status = p.get("status")
     if status == "stale":
         p = {**p, "online": "online", "stale_online": "1"}
@@ -209,6 +218,17 @@ def build_host_query(p: dict, settings):
         if hi:
             w.append("h.last_seen > ?")
             params.append(iso_ago(hours=hi))
+    pols = db.multi(p, "prevention_policy")
+    if pols:
+        conds = ["COALESCE(h.prevention_policy_id,'')=''"] if "none" in pols else []
+        real = [x for x in pols if x != "none"]
+        if real:
+            conds.append(f"h.prevention_policy_id IN ({','.join('?' * len(real))})")
+            params += real
+        w.append("(" + " OR ".join(conds) + ")")
+    if p.get("prevention_applied") in ("0", "1"):
+        w.append("h.prevention_applied=?")
+        params.append(int(p["prevention_applied"]))
     if p.get("reinstall") == "1":
         w.append("h.is_reinstall = 1")
     if p.get("reinstall_reason"):
@@ -229,25 +249,32 @@ def build_host_query(p: dict, settings):
         w.append("NOT EXISTS (SELECT 1 FROM host_map x WHERE x.aid=h.aid AND x.source='inventory')")
     elif p.get("inventory") == "any":
         w.append("EXISTS (SELECT 1 FROM host_map x WHERE x.aid=h.aid AND x.source='inventory')")
-    if p.get("lob"):
-        w.append("EXISTS (SELECT 1 FROM host_map x WHERE x.aid=h.aid AND x.lob_id=?)")
-        params.append(int(p["lob"]))
-    if p.get("msp"):
-        if p["msp"] == "none":
-            w.append("EXISTS (SELECT 1 FROM host_map x WHERE x.aid=h.aid AND x.msp_id IS NULL" + (" AND x.lob_id=?" if p.get("lob") else "") + ")")
-            params += [int(p["lob"])] if p.get("lob") else []
-        else:
-            w.append("EXISTS (SELECT 1 FROM host_map x WHERE x.aid=h.aid AND x.msp_id=?)")
-            params.append(int(p["msp"]))
+    lobs = [int(x) for x in db.multi(p, "lob")]
+    lob_in = f"x.lob_id IN ({','.join('?' * len(lobs))})" if lobs else ""
+    if lobs:
+        w.append(f"EXISTS (SELECT 1 FROM host_map x WHERE x.aid=h.aid AND {lob_in})")
+        params += lobs
+    msps = db.multi(p, "msp")
+    if msps:
+        conds = []
+        if "none" in msps:
+            conds.append("EXISTS (SELECT 1 FROM host_map x WHERE x.aid=h.aid AND x.msp_id IS NULL" + (f" AND {lob_in}" if lobs else "") + ")")
+            params += lobs
+        ids = [int(x) for x in msps if x != "none"]
+        if ids:
+            conds.append(f"EXISTS (SELECT 1 FROM host_map x WHERE x.aid=h.aid AND x.msp_id IN ({','.join('?' * len(ids))}))")
+            params += ids
+        w.append("(" + " OR ".join(conds) + ")")
     if p.get("unlisted") == "1":
         # tagged to a LOB/MSP but missing from that LOB's inventory
         cond = "t.aid=h.aid"
-        if p.get("lob"):
-            cond += " AND t.lob_id=?"
-            params.append(int(p["lob"]))
-        if p.get("msp") and p["msp"] != "none":
-            cond += " AND t.msp_id=?"
-            params.append(int(p["msp"]))
+        if lobs:
+            cond += f" AND t.lob_id IN ({','.join('?' * len(lobs))})"
+            params += lobs
+        mids = [int(x) for x in msps if x != "none"]
+        if mids:
+            cond += f" AND t.msp_id IN ({','.join('?' * len(mids))})"
+            params += mids
         w.append(f"""EXISTS (SELECT 1 FROM agent_tags t WHERE {cond} AND NOT EXISTS (
             SELECT 1 FROM inventory_current ic WHERE ic.lob_id=t.lob_id AND ic.matched_aid=h.aid AND ic.edr_state<>'Not Installed'))""")
     for key, col, op in (("first_from", "h.first_seen", ">="), ("first_to", "h.first_seen", "<"),
@@ -261,9 +288,10 @@ def build_host_query(p: dict, settings):
             params.append(v)
     if p.get("outdated") == "1":
         w.append(f"{SENSOR_LEVEL_SQL} = 'older'")
-    if p.get("sensor_level") in SENSOR_LEVELS:
-        w.append(f"{SENSOR_LEVEL_SQL} = ?")
-        params.append(p["sensor_level"])
+    lv = [x for x in db.multi(p, "sensor_level") if x in SENSOR_LEVELS]
+    if lv:
+        w.append(f"{SENSOR_LEVEL_SQL} IN ({','.join('?' * len(lv))})")
+        params += lv
     if p.get("ip_range"):
         lo, hi = cidr_range(p["ip_range"])
         if lo is not None:
@@ -639,7 +667,10 @@ def overview(c, settings):
     from .registry import registry_summary
     d["registry"] = registry_summary()
     d.update(sensors=sensors, os=os_rows, node_types=node_types, msps=msp_summaries(c, settings),
-             vulns={"severity": vs["severity"], "assets": vs["assets"], "by_lob": vs["by_lob"], "by_msp": vs["by_msp"]})
+             vulns={"severity": vs["severity"], "assets": vs["assets"], "by_lob": vs["by_lob"], "by_msp": vs["by_msp"]},
+             # CrowdStrike Spotlight, shown beside the VA numbers (never added to them)
+             spotlight=db.one(c, """SELECT COUNT(*) findings, SUM(UPPER(severity)='CRITICAL') crit, SUM(UPPER(severity)='HIGH') high,
+                                    COUNT(DISTINCT aid) hosts, SUM(COALESCE(kev,0)) kev FROM spotlight_vulns"""))
     return d
 
 

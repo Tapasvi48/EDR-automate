@@ -438,14 +438,16 @@ def _query(p):
     if p.get("inbound") in ("0", "1"):
         w.append("inbound_internet=?")
         params.append(int(p["inbound"]))
-    if p.get("sheet"):
-        w.append("sheet=?")
-        params.append(p["sheet"])
+    if db.multi(p, "sheet"):
+        s, v = db.in_clause("sheet", db.multi(p, "sheet"))
+        w.append(s)
+        params += v
     if p.get("manual") == "1":
         w.append("inbound_auto IS NOT NULL AND inbound_internet<>inbound_auto")
-    if p.get("firewall"):
-        w.append("firewall=?")
-        params.append(p["firewall"])
+    if db.multi(p, "firewall"):
+        s, v = db.in_clause("firewall", db.multi(p, "firewall"))
+        w.append(s)
+        params += v
     if p.get("direction"):
         w.append("direction LIKE ?")
         params.append(p["direction"] + "%")
@@ -455,19 +457,21 @@ def _query(p):
         w.append("""(rule_id LIKE ? OR src LIKE ? OR dst LIKE ? OR dst_nat LIKE ? OR src_nat LIKE ? OR firewall LIKE ? OR fw_rule LIKE ? OR service LIKE ?
                   OR ports LIKE ? OR cr LIKE ? OR name LIKE ? OR application LIKE ? OR app_owner LIKE ?)""")
         params += [like] * 13
-    if p.get("sheet_type"):
-        w.append("sheet_type=?")
-        params.append(p["sheet_type"])
-    if p.get("workbook"):
-        w.append("workbook=?")
-        params.append(p["workbook"])
+    if db.multi(p, "sheet_type"):
+        s, v = db.in_clause("sheet_type", db.multi(p, "sheet_type"))
+        w.append(s)
+        params += v
+    if db.multi(p, "workbook"):
+        s, v = db.in_clause("workbook", db.multi(p, "workbook"))
+        w.append(s)
+        params += v
     return ("WHERE " + " AND ".join(w)) if w else "", params
 
 
 @router.get("/api/comm/rules")
 def comm_rules(request: Request):
     p = dict(request.query_params)
-    page, size = max(1, int(p.get("page") or 1)), min(1000, max(1, int(p.get("size") or 50)))
+    page, size = db.page_args(p)
     where, params = _query(p)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     with db.get_conn() as c:
@@ -576,7 +580,7 @@ def _is_private(net):
 
 
 def matrix_ips(c):
-    key = (c.execute("SELECT COUNT(*), MAX(id) FROM comm_rules").fetchone()[:], c.execute("SELECT COUNT(*) FROM asset_registry").fetchone()[0])
+    key = (db.GEN[0],)  # any change (rules, inventory, ranges, enterprise marks) rebuilds the list
     if _IPS_CACHE.get("key") == key:
         return _IPS_CACHE["rows"]
     from .registry import is_public
@@ -591,10 +595,34 @@ def matrix_ips(c):
     v4 = sorted((int(ipaddress.ip_address(ip)), ip) for ip in reg if ":" not in ip)
     v4n = [n for n, _ in v4]
     rules = load_rules(c)
-    our_public = set()
+    # Our assets are private (10.x, 172.16-31.x, 192.168.x …). A public IP is ours when the matrix translates it to / from one of
+    # those private IPs in the same rule (destination ↔ translated destination, source ↔ translated source), when it is in your
+    # public ranges or your ASNs' advertised prefixes, when you marked it enterprise, or when inventory / VA / NIAM has it.
+    natted = set()
     for r in rules:
-        for col in ("dst_nat", "src_nat"):
-            our_public |= {str(n.network_address) for n in parse_addresses(r[col])[1] if n.num_addresses == 1}
+        for a, b in (("dst", "dst_nat"), ("src", "src_nat")):
+            na, nb = parse_addresses(r[a])[1], parse_addresses(r[b])[1]
+            if not na or not nb:
+                continue
+            if any(_is_private(n) for n in na):
+                natted |= {str(n.network_address) for n in nb if n.num_addresses == 1 and not _is_private(n)}
+            if any(_is_private(n) for n in nb):
+                natted |= {str(n.network_address) for n in na if n.num_addresses == 1 and not _is_private(n)}
+    our_public = natted
+    from .surface import ASNS_KEY, RANGES_KEY, _setting_list
+    from .registry import _nets
+    our_nets = [n for e in _setting_list(c, RANGES_KEY) for n in _nets(e.get("value"))]
+    asns = _setting_list(c, ASNS_KEY)
+    if asns:
+        for p in db.rows(c, f"SELECT prefix FROM asn_prefixes WHERE asn IN ({','.join('?' * len(asns))})", asns):
+            try:
+                our_nets.append(ipaddress.ip_network(p["prefix"]))
+            except ValueError:
+                pass
+    marks = {r[0]: r[1] for r in c.execute("SELECT ip, class FROM ip_class")}
+
+    def in_ours(n):
+        return any(n.version == o.version and n.subnet_of(o) for o in our_nets)
     ent = {}
 
     def add(addr_key, kind, role, r, net=None):
@@ -646,12 +674,19 @@ def matrix_ips(c):
                 m.update(lobs=rr["lobs"], name=rr["name"], in_inventory=rr["in_inventory"], in_edr=rr["in_edr"], edr_status=rr["edr_status"], assets=len(ips),
                          ip=ips[0])
         else:
+            mark = marks.get(e["address"])
             if _is_private(n):
-                ours, why = True, "private address"
-            elif e["address"] in our_public or "public" in e["roles"] or "public_src" in e["roles"]:
-                ours, why = True, "listed as a public / NAT / pool IP in the matrix"
-            elif "exposed" in e["roles"]:
-                ours, why = True, "destination of an inbound rule in our matrix"
+                ours, why = True, "private address (our network)"
+            elif mark == "non-enterprise":
+                ours, why = False, "marked non-enterprise"
+            elif mark == "enterprise":
+                ours, why = True, "marked enterprise"
+            elif e["address"] in natted:
+                ours, why = True, "NAT of one of our private IPs in the matrix"
+            elif in_ours(n):
+                ours, why = True, "inside your public ranges / your ASNs' prefixes"
+            elif "exposed" in e["roles"] or {"public", "public_src"} & e["roles"]:
+                why = "public IP in our rules, but not NATed to a private IP and not in your ranges: check it (mark enterprise if it is ours)"
             if n.num_addresses == 1:
                 rr = reg.get(e["address"])
                 if rr:
@@ -666,7 +701,7 @@ def matrix_ips(c):
                          lobs=", ".join(sorted({x for ip in inside for x in (reg[ip]["lobs"] or "").split(", ") if x}))[:120] or None)
         roles = e["roles"]
         cat = ("exposed" if ours and roles & {"exposed", "public", "snat", "public_src"} else "outbound" if ours and "outbound" in roles
-               else "external" if not ours and e["kind"] != "name" else "unknown" if not ours else "internal")
+               else "unknown" if not ours and (e["kind"] == "name" or why.startswith("public IP in our rules")) else "external" if not ours else "internal")
         out.append({"address": e["address"][5:] if e["kind"] == "name" else e["address"], "kind": e["kind"], "ours": ours, "why": why,
                     "category": cat, "roles": sorted(roles), "rules": len(e["rules"]), "rule_ids": ", ".join(sorted(e["rules"])[:6]),
                     "sheets": ", ".join(sorted(e["sheets"])), "applications": ", ".join(sorted(e["apps"]))[:200],
@@ -684,7 +719,7 @@ def _ips_filter(p, rows):
     elif v == "outbound":
         rows = [r for r in rows if r["category"] == "outbound" or ("outbound" in r["roles"] and r["ours"])]
     elif v == "public":
-        rows = [r for r in rows if {"public", "public_src"} & set(r["roles"])]
+        rows = [r for r in rows if r["ours"] and ({"public", "public_src"} & set(r["roles"]) or (r["kind"] == "ip" and r["why"].startswith(("NAT of", "inside your", "marked enterprise"))))]
     elif v == "not_inventory":
         rows = [r for r in rows if r["ours"] and r["category"] in ("exposed", "outbound") and not r["in_inventory"]]
     elif v == "external":
@@ -695,14 +730,14 @@ def _ips_filter(p, rows):
     if q:
         rows = [r for r in rows if q in f"{r['address']} {r['name'] or ''} {r['applications']} {r['owners']} {r['sheets']} {r['rule_ids']} {r['lobs'] or ''}".lower()]
     if p.get("kind"):
-        rows = [r for r in rows if r["kind"] == p["kind"]]
+        rows = [r for r in rows if r["kind"] in db.multi(p, "kind")]
     return rows
 
 
 @router.get("/api/comm/ips")
 def comm_ips(request: Request):
     p = dict(request.query_params)
-    page, size = max(1, int(p.get("page") or 1)), min(1000, max(1, int(p.get("size") or 50)))
+    page, size = db.page_args(p)
     with db.get_conn() as c:
         allr = matrix_ips(c)
     rows = _ips_filter(p, allr)

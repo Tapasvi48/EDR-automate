@@ -288,7 +288,7 @@ def _query(p):
 @router.get("/api/sod/exceptions")
 def sod_list(request: Request):
     p = dict(request.query_params)
-    page, size = max(1, int(p.get("page") or 1)), min(1000, max(1, int(p.get("size") or 50)))
+    page, size = db.page_args(p)
     where, params = _query(p)
     now = today()
     soon = (datetime.now(timezone.utc) + timedelta(days=30)).strftime("%Y-%m-%d")

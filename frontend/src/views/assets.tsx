@@ -31,7 +31,7 @@ export default function Assets() {
           <Kpi label="Total hosts" value={k.active + gone} tone="info" foot={`${fmtN(k.active)} in console · ${fmtN(gone)} in EDR history`} active={none} onClick={() => only({})} />
           <Kpi label="Online" value={k.online} foot={`${pct(k.online, k.active + gone)}% of hosts`} tone="good" active={state.status === "online"} onClick={() => only({ status: "online" })} />
           <Kpi label="Offline" value={k.offline + gone} foot={`${fmtN(k.offline)} in console · ${fmtN(gone)} left the console`} tone="warn" active={state.status === "offline"} onClick={() => only({ status: "offline" })} />
-          <Kpi label="EDR history" value={gone} foot={`${fmtN(rd.from_console)} removed · ${fmtN(rd.import_only)} old EDR import`} tone="serious" href="/edr-history/" />
+          <Kpi label="EDR history" value={gone} foot={`${fmtN(rd.from_console)} removed · ${fmtN(rd.import_only)} old EDR import`} tone="serious" href="/health/?view=removed" />
           <Kpi label="Not in inventory" value={k.unmapped} foot="no LOB inventory row matches the agent" tone="violet" active={state.unmapped === "1"} onClick={() => only({ unmapped: "1" })} />
           <Kpi label="RFM" value={k.rfm} foot="reduced functionality" tone="warn" active={state.rfm === "1"} onClick={() => only({ rfm: "1" })} />
           <Kpi label="Outdated sensor" value={k.outdated_sensor} foot="older than N-2" tone="warn" active={state.outdated === "1"} onClick={() => only({ outdated: "1" })} />

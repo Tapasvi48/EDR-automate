@@ -146,14 +146,14 @@ export default function PassiveScan() {
           </div>
         </Card>
       </div>
-      <ClassifyBar path="/api/passive/classify" filter={state} selected={sel} total={total} onDone={() => setSel(new Set())} />
+      <ClassifyBar universe="passive" selected={sel} onDone={() => setSel(new Set())} />
       <DataTable endpoint="/api/passive/results" exportPath="/api/passive/results/export" state={state} setState={set} noun="public IPs" storageKey="passive"
         rowKey={(r: any) => r.ip} onReset={() => replaceAll({})} sortable={false} columns={cols} selected={sel} onSelectedChange={setSel}
         onData={(d: any) => setTotal(d.total)}
         toolbar={sel.size > 0 && <Button size="sm" variant="danger" onClick={delSelected}><Trash2 /> Delete {fmtN(sel.size)}</Button>}
         filters={<>
           <SearchInput className="w-72" value={state.q || ""} onChange={(v) => set({ q: v })} placeholder="IP, asset, CVE, hostname…" />
-          <FilterSelect label="Show" value={state.show} onChange={(v) => set({ show: v })} any="All" options={[["ports", "Open ports"], ["vulns", "Known CVEs"], ["none", "No data"], ["error", "Errors"]]} />
+          <FilterSelect single label="Show" value={state.show} onChange={(v) => set({ show: v })} any="All" options={[["ports", "Open ports"], ["vulns", "Known CVEs"], ["none", "No data"], ["error", "Errors"]]} />
           <Input className="w-28" placeholder="Port e.g. 3389" value={state.port || ""} onChange={(e) => set({ port: e.target.value.replace(/\D/g, "") })} />
           <WhoisFilters facetsPath="/api/passive/whois-facets" state={state} set={set} />
           {state.job && <Badge tone="info">scan #{state.job}<button className="ml-1" onClick={() => set({ job: undefined })}>×</button></Badge>}

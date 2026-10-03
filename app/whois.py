@@ -43,6 +43,49 @@ def _org(d):
     return ""
 
 
+def _vcard(entity, field):
+    out = []
+    for item in ((entity.get("vcardArray") or [None, []])[1] or []):
+        if isinstance(item, list) and len(item) >= 4 and item[0] == field:
+            v = item[3]
+            if field == "adr":
+                lab = (item[1] or {}).get("label") if isinstance(item[1], dict) else None
+                v = lab or ", ".join(str(x) for x in (v if isinstance(v, list) else [v]) if x)
+            out.append(str(v).replace("mailto:", "").replace("tel:", "").strip())
+    return [x for x in out if x]
+
+
+def _details(d):
+    """Contacts and the rest of the registration record: emails, abuse contact, addresses, phones, every contact with its
+    roles, all remarks, status, type, registration / last-changed dates, parent block."""
+    ents = []
+
+    def walk(es):
+        for e in es or []:
+            ents.append(e)
+            walk(e.get("entities"))
+    walk(d.get("entities"))
+    emails, abuse, addrs, phones, contacts = [], [], [], [], []
+    for e in ents:
+        roles = e.get("roles") or []
+        em = _vcard(e, "email")
+        emails += em
+        if "abuse" in roles:
+            abuse += em
+        addrs += _vcard(e, "adr")
+        phones += _vcard(e, "tel")
+        name = _vcard_fn(e) or e.get("handle") or ""
+        if name:
+            contacts.append(f"{name} ({', '.join(roles)})" if roles else name)
+    events = {ev.get("eventAction"): (ev.get("eventDate") or "")[:10] for ev in d.get("events") or []}
+    remarks = " | ".join(" ".join(r.get("description") or []) for r in d.get("remarks") or [])
+    uniq = lambda xs: ", ".join(dict.fromkeys(x for x in xs if x))  # noqa: E731
+    return {"emails": uniq(emails), "abuse": uniq(abuse), "address": " | ".join(dict.fromkeys(addrs))[:500], "phones": uniq(phones),
+            "contacts": uniq(contacts)[:800], "remarks": remarks[:1500], "status": ", ".join(d.get("status") or []),
+            "net_type": d.get("type") or "", "registered": events.get("registration", ""), "changed": events.get("last changed", ""),
+            "parent": d.get("parentHandle") or ""}
+
+
 def _descr(d):
     rem = d.get("remarks") or []
     pick = [r for r in rem if str(r.get("title") or "").lower() in ("description", "descr")] or rem[:1]
@@ -82,7 +125,7 @@ def rdap(ip):
                     if k in host), host)
         return {"handle": d.get("handle") or f"{start}-{end}", "start_num": int(ipaddress.ip_address(start)),
                 "end_num": int(ipaddress.ip_address(end)), "cidr": _cidr(d, start, end), "name": d.get("name") or "",
-                "descr": _descr(d), "org": _org(d), "country": d.get("country") or "", "rir": rir}
+                "descr": _descr(d), "org": _org(d), "country": d.get("country") or "", "rir": rir, **_details(d)}
     raise LookupError("rate limited by the WHOIS (RDAP) service, try again later")
 
 
@@ -102,8 +145,13 @@ def _demo(ip):
         name, descr, org = [("EXAMPLE-ISP-POOL", "Broadband customer pool", "Example ISP Pvt Ltd"),
                             ("EXAMPLE-MOBILE", "Mobile data subscribers (CGNAT)", "Example Mobile Ltd"),
                             ("EXAMPLE-HOSTING", "Shared hosting customers", "Example Hosting LLC")][h]
+    dom = org.lower().split()[0] + ".example"
     return {"handle": f"SAMPLE-{net}", "start_num": int(net.network_address), "end_num": int(net.broadcast_address), "cidr": str(net),
-            "name": name, "descr": descr, "org": org, "country": "IN", "rir": "APNIC (sample)"}
+            "name": name, "descr": descr, "org": org, "country": "IN", "rir": "APNIC (sample)",
+            "emails": f"noc@{dom}, abuse@{dom}", "abuse": f"abuse@{dom}", "address": f"{org}, Example Tower, Mumbai, India",
+            "phones": "+91-22-0000-0000", "contacts": f"{org} (registrant), NOC Team (technical), Abuse desk (abuse)",
+            "remarks": descr, "status": "active", "net_type": "ASSIGNED PA", "registered": "2015-04-01", "changed": "2024-11-12",
+            "parent": f"SAMPLE-{ipaddress.ip_network(f'{ip}/16', strict=False)}"}
 
 
 def lookup(ips, refresh=False, progress=None):
@@ -112,8 +160,10 @@ def lookup(ips, refresh=False, progress=None):
     ips = [ip for ip in dict.fromkeys(ips) if ip and ":" not in ip and exposed_by_itself(ip)]
     now, asked, errors = db.now_iso(), 0, 0
     with db.get_conn() as c:
-        done = set() if refresh else {r[0] for r in c.execute("SELECT ip FROM ip_whois WHERE handle IS NOT NULL")}
-        nets = [] if refresh else [tuple(r) for r in c.execute("SELECT start_num, end_num, handle FROM whois_nets")]
+        # blocks cached before contacts / emails were kept (contacts IS NULL) are asked again once
+        done = set() if refresh else {r[0] for r in c.execute("""SELECT w.ip FROM ip_whois w JOIN whois_nets n ON n.handle=w.handle
+                                                                  WHERE n.contacts IS NOT NULL""")}
+        nets = [] if refresh else [tuple(r) for r in c.execute("SELECT start_num, end_num, handle FROM whois_nets WHERE contacts IS NOT NULL")]
     for i, ip in enumerate(ips):
         if ip in done:
             if progress:
@@ -128,9 +178,9 @@ def lookup(ips, refresh=False, progress=None):
                 asked += 1
                 handle = w["handle"]
                 with db.get_conn() as c:
-                    c.execute("""INSERT OR REPLACE INTO whois_nets(handle, start_num, end_num, cidr, name, descr, org, country, rir, fetched_at)
-                                 VALUES (?,?,?,?,?,?,?,?,?,?)""", (handle, w["start_num"], w["end_num"], w["cidr"], w["name"], w["descr"],
-                                                                  w["org"], w["country"], w["rir"], now))
+                    cols = ["handle", "start_num", "end_num", "cidr", "name", "descr", "org", "country", "rir", *EXTRA]
+                    c.execute(f"INSERT OR REPLACE INTO whois_nets({', '.join(cols)}, fetched_at) VALUES ({','.join('?' * (len(cols) + 1))})",
+                              [w.get(k, "") for k in cols] + [now])
                 nets.append((w["start_num"], w["end_num"], handle))
                 if not config.DEMO:
                     time.sleep(0.3)  # be gentle with the registries
@@ -144,13 +194,16 @@ def lookup(ips, refresh=False, progress=None):
     return asked, errors
 
 
+EXTRA = ["emails", "abuse", "address", "phones", "contacts", "remarks", "status", "net_type", "registered", "changed", "parent"]
+
+
 def whois_map(c, ips=None):
     """{ip: {whois_name, whois_descr, whois_org, whois_country, whois_range, whois_rir, whois_error}} for looked-up IPs."""
-    rows = db.rows(c, """SELECT w.ip, w.error, n.name, n.descr, n.org, n.country, n.cidr, n.rir FROM ip_whois w
-                         LEFT JOIN whois_nets n ON n.handle=w.handle""")
+    rows = db.rows(c, f"""SELECT w.ip, w.error, n.name, n.descr, n.org, n.country, n.cidr, n.rir, {', '.join('n.' + k for k in EXTRA)}
+                          FROM ip_whois w LEFT JOIN whois_nets n ON n.handle=w.handle""")
     want = set(ips) if ips is not None else None
     return {r["ip"]: {"whois_name": r["name"], "whois_descr": r["descr"], "whois_org": r["org"], "whois_country": r["country"],
-                      "whois_range": r["cidr"], "whois_rir": r["rir"], "whois_error": r["error"]}
+                      "whois_range": r["cidr"], "whois_rir": r["rir"], "whois_error": r["error"], **{"whois_" + k: r[k] for k in EXTRA}}
             for r in rows if want is None or r["ip"] in want}
 
 
@@ -160,7 +213,7 @@ def net_for(c, ip):
         n = int(ipaddress.ip_address(ip))
     except ValueError:
         return {}
-    return db.one(c, """SELECT name, descr, org, country, cidr FROM whois_nets WHERE start_num<=? AND end_num>=?
+    return db.one(c, """SELECT * FROM whois_nets WHERE start_num<=? AND end_num>=?
                         ORDER BY end_num - start_num LIMIT 1""", (n, n)) or {}
 
 
@@ -169,13 +222,14 @@ def class_map(c):
 
 
 def whois_text(r):
-    return " ".join(str(r.get(k) or "") for k in ("whois_name", "whois_descr", "whois_org", "whois_country", "whois_range")).lower()
+    return " ".join(str(r.get(k) or "") for k in ("whois_name", "whois_descr", "whois_org", "whois_country", "whois_range",
+                                                  *("whois_" + x for x in EXTRA))).lower()
 
 
 def matches(r, p, cls):
     """Filters shared by Attack surface and Internet DB scan: whois (netname), cls (enterprise / non-enterprise / none),
     wq (text in the WHOIS name / description / organisation)."""
-    if p.get("whois") and (r.get("whois_name") or "(not looked up)") != p["whois"]:
+    if p.get("whois") and (r.get("whois_name") or "(not looked up)") not in db.multi(p, "whois"):
         return False
     if p.get("cls"):
         have = cls.get(r["ip"]) or "none"
@@ -236,6 +290,18 @@ def whois_ip(ip: str):
 def whois_class(data: dict = Body(...)):
     """Mark IPs: {"ips": [...], "class": "enterprise" | "non-enterprise" | null}."""
     ips = [db.canon_ip(i) for i in data.get("ips") or [] if i]
+    if data.get("others") in ("surface", "passive"):  # every other IP of that page that has no mark yet
+        with db.get_conn() as c:
+            if data["others"] == "surface":
+                from .surface import _build
+                universe = [r["ip"] for r in _build(c)]
+            else:
+                universe = [r[0] for r in c.execute("SELECT ip FROM passive_results")]
+            marked = set(class_map(c))
+        chosen = set(ips)
+        ips = [i for i in universe if i not in chosen and i not in marked]
+        if not ips:
+            raise HTTPException(400, "Every other IP already has a mark")
     if not ips:
         raise HTTPException(400, "Nothing selected")
     return {"marked": set_class(ips, data.get("class"), data.get("note") or "")}

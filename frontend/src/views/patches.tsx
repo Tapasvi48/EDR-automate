@@ -56,7 +56,7 @@ export default function Patches() {
           rowKey={(r: any) => String(r.host_id)} onReset={() => replaceAll({ tab })}
           filters={<>
             <SearchInput className="w-[260px]" value={state.q || ""} onChange={(v) => set({ q: v })} placeholder="Host, IP or OS" />
-            <FilterSelect label="Show" value={state.state} onChange={(v) => set({ state: v })} any="All hosts"
+            <FilterSelect single label="Show" value={state.state} onChange={(v) => set({ state: v })} any="All hosts"
               options={[["fix_now", "Fix available now"], ["upgradable", "Upgradable packages"], ["noncompliant", "Failed MBSS rules"], ["no_report", "No OpenSCAP report"]]} />
           </>} />
       ) : (

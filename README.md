@@ -82,6 +82,31 @@ fewer than half of the previously active hosts, so an API or scope problem can't
 in between fetch records only for agents that are new, came back, or changed / checked in since the last sync
 (`modified_timestamp` or `last_seen` after it). The online state of every agent is still refreshed on each sync.
 
+## Filters, detail panels and CrowdStrike pages
+- **Filters:**
+  - Every dropdown filter is a searchable multi-select (values are sent as `a|b`, read as "any of"). Sort, view and yes/no
+    pickers stay single-choice.
+  - **Filter** (on every table) filters on any field the table returns, with contains / is / does not contain / empty /
+    not empty, and several values per field. It works with the Excel export too.
+  - The next page of every table is fetched in the background, so paging is instant.
+- **Detail panels:**
+  - Click a detection (Detections, Analyst workload) for everything CrowdStrike sent: what fired (MITRE tactic / technique,
+    pattern, confidence), the process tree with command lines and hashes, status and analyst, the host, other detections on
+    it, and the raw record.
+  - Click a Spotlight finding for the vulnerability's name and description, CVSS vector, ExPRT, exploit status, CISA KEV,
+    the affected software, the fix, what the VA scan says about the same CVE, and the raw record.
+- **CrowdStrike pages:**
+  - **Prevention policies:** each policy's settings and the agents on it, including where the policy is not applied yet.
+  - **Sensor versions & OS:** the N / N-1 / N-2 builds, agents per version, supported OS and Linux kernels.
+  - **Offline:** now also holds EDR history (removed from console / old EDR import).
+- **EDR feasibility → Decide by Node type + OS:** undecided combinations come first; decide one or several for all LOBs in
+  one click. Nodes can be selected and set directly too.
+- **Communication matrix ownership:**
+  - Private IPs (10.x, 172.16-31.x, 192.168.x …) are ours.
+  - A public IP is ours when a rule translates it to / from one of our private IPs, when it is in your public ranges or
+    your ASNs' prefixes, when it is marked enterprise, or when inventory / VA / NIAM has it.
+  - Any other public IP in our rules is listed under **To check**.
+
 ## WHOIS, enterprise marks and deleting scans
 - **WHOIS** for every public IP on the Attack surface and in Internet DB scan results comes from RDAP via rdap.org (free, no
   key). rdap.org sends each IP to its registry (APNIC, RIPE NCC, ARIN, LACNIC, AFRINIC). For each IP you get the netname,

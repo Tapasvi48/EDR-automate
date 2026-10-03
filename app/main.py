@@ -94,6 +94,96 @@ async def api_cache(request: Request, call_next):
             _INFLIGHT.pop(key, None)
 
 
+# ------------------------------------------------------------------ filter any table on any field
+# A table can filter on every field its API returns: ff_<field>=<op>:<value>[|<value>…] with op has (contains, the default),
+# is (equals), not (does not contain), empty, set. The list is asked for in full (__all=1, cached like any other answer),
+# filtered here and paged, so every list endpoint supports it without its own code.
+_FF_OPS = ("has", "is", "not", "empty", "set")
+
+
+def _ff_parse(items):
+    out = []
+    for k, v in items:
+        if not k.startswith("ff_") or not re.fullmatch(r"ff_[A-Za-z0-9_]+", k):
+            continue
+        op, _, val = v.partition(":") if v.split(":", 1)[0] in _FF_OPS else ("has", "", v)
+        out.append((k[3:], op, [x.strip().lower() for x in val.split("|") if x.strip()]))
+    return out
+
+
+def _ff_text(v):
+    if v is None:
+        return ""
+    if isinstance(v, (list, tuple)):
+        return ", ".join(_ff_text(x) for x in v)
+    if isinstance(v, dict):
+        return json.dumps(v, default=str)
+    if isinstance(v, bool):
+        return "yes" if v else "no"
+    return str(v)
+
+
+def _ff_match(row, filters):
+    for key, op, vals in filters:
+        t = _ff_text(row.get(key)).lower()
+        if op == "empty" and t not in ("", "0", "no", "[]"):
+            return False
+        if op == "set" and t in ("", "0", "no", "[]"):
+            return False
+        if op == "has" and vals and not any(v in t for v in vals):
+            return False
+        if op == "is" and vals and t not in vals:
+            return False
+        if op == "not" and vals and any(v in t for v in vals):
+            return False
+    return True
+
+
+@app.middleware("http")
+async def field_filter(request: Request, call_next):
+    path = request.url.path
+    if request.method != "GET" or not path.startswith("/api/"):
+        return await call_next(request)
+    items = list(request.query_params.multi_items())
+    filters = _ff_parse(items)
+    if not filters:
+        return await call_next(request)
+    export = path.endswith("/export")  # an export with field filters: the list endpoint's rows, filtered, as Excel
+    rest = [(k, v) for k, v in items if not k.startswith("ff_") and k not in ("page", "size")] + [("__all", "1")]
+    from urllib.parse import urlencode
+    query = urlencode(rest)
+    hdrs = [(k, v) for k, v in request.scope["headers"] if k not in (b"accept-encoding",)]
+    list_path = path[: -len("/export")] if export else path
+    scope = {**request.scope, "path": list_path, "raw_path": list_path.encode(), "query_string": query.encode(), "headers": hdrs}
+    body, status = [], [200]
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(msg):
+        if msg["type"] == "http.response.start":
+            status[0] = msg["status"]
+        elif msg["type"] == "http.response.body":
+            body.append(msg.get("body", b""))
+    await app(scope, receive, send)
+    if status[0] != 200:
+        return Response(b"".join(body), status_code=status[0], media_type="application/json")
+    data = json.loads(b"".join(body) or b"{}")
+    if not isinstance(data, dict) or not isinstance(data.get("rows"), list):
+        return JSONResponse(data)
+    rows = [r for r in data["rows"] if isinstance(r, dict) and _ff_match(r, filters)]
+    if export:
+        keys = list(dict.fromkeys(k for r in rows[:200] for k in r if not k.startswith("_")))
+        for r in rows:
+            for k in keys:
+                if isinstance(r.get(k), (list, dict)):
+                    r[k] = _ff_text(r[k])
+        name = request.query_params.get("name") or list_path.strip("/").replace("api/", "").replace("/", "_")
+        return xlsx_response([("Filtered", [(k, k.replace("_", " ").capitalize()) for k in keys], rows)], name)
+    page, size = _page(dict(request.query_params))
+    return JSONResponse({**data, "total": len(rows), "rows": rows[(page - 1) * size: page * size], "filtered_by_field": True})
+
+
 def _warm_loop():
     """After the data changes (sync, upload, re-match), recompute the pages people looked at in the last two hours, so
     their next click is instant. Waits until the data has been quiet for a few seconds and no re-match / sync is running."""
@@ -169,9 +259,7 @@ async def value_error(_, exc):
 
 
 def _page(p):
-    page = max(1, int(p.get("page") or 1))
-    size = min(1000, max(1, int(p.get("size") or 50)))
-    return page, size
+    return db.page_args(p)
 
 
 def _params(request: Request):
@@ -833,9 +921,7 @@ def tags_list(lob_id: int, request: Request):
     p = _params(request)
     page, size = _page(p)
     w, params = ["t.lob_id=?"], [lob_id]
-    if p.get("msp"):
-        w.append("t.msp_id IS NULL" if p["msp"] == "none" else "t.msp_id=?")
-        params += [] if p["msp"] == "none" else [int(p["msp"])]
+    db.add_filter(w, params, db.id_filter(p, "msp", "t.msp_id", "t.msp_id IS NULL"))
     if p.get("q"):
         w.append("(h.hostname LIKE ? OR h.connection_ip LIKE ? OR t.aid=?)")
         params += [f"%{p['q']}%", p["q"] + "%", p["q"].lower()]
@@ -929,18 +1015,9 @@ def _inventory_query(p, lob_id):
         if p.get("os_resolved"):
             w.append("ic.os_resolved=?")
             params.append(p["os_resolved"])
-        if p.get("type"):
-            if p["type"] == "main":
-                w.append("ic.type_id IS NULL")
-            else:
-                w.append("ic.type_id=?")
-                params.append(int(p["type"]))
-        if p.get("msp"):
-            if p["msp"] == "none":
-                w.append("ic.msp_id IS NULL")
-            else:
-                w.append("ic.msp_id=?")
-                params.append(int(p["msp"]))
+        db.add_filter(w, params, db.id_filter({"type": "|".join("none" if x == "main" else x for x in db.multi(p, "type"))},
+                                              "type", "ic.type_id", "ic.type_id IS NULL"))
+        db.add_filter(w, params, db.id_filter(p, "msp", "ic.msp_id", "ic.msp_id IS NULL"))
         niam_x = queries.NIAM_EFF  # inventory column first, NIAM dump when it is blank
         scan_x = "EXISTS (SELECT 1 FROM vuln_scan_hosts s WHERE s.lob_id=ic.lob_id AND s.ip=ic.ip)"
         if p.get("niam") in ("0", "1"):
@@ -991,9 +1068,8 @@ def _inventory_query(p, lob_id):
                     conds.append(f"ic.{f}=?")
                     params.append(x)
             w.append("(" + " OR ".join(conds) + ")")
-    if p.get("lob") and not lob_id:
-        w.append("l.id=?")
-        params.append(int(p["lob"]))
+    if not lob_id:
+        db.add_filter(w, params, db.id_filter(p, "lob", "l.id"))
     if p.get("dup") == "file":
         w.append("ic.file_dups>0")
     if p.get("applicable") in ("0", "1") or p.get("in_scope") == "1":
@@ -1495,9 +1571,7 @@ MC_COLS = """m.lob_id, l.name lob, m.item_key, m.ip, m.node_name, m.aid, m.cs_ho
 
 def _mc_query(p):
     w, params = [], []
-    if p.get("lob"):
-        w.append("m.lob_id=?")
-        params.append(int(p["lob"]))
+    db.add_filter(w, params, db.id_filter(p, "lob", "m.lob_id"))
     q = (p.get("q") or "").strip()
     if q:
         like = f"%{q}%"

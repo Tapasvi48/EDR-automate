@@ -14,6 +14,15 @@ import { EdrBadge, Mono } from "@/components/badges";
 import { CveChips, PortChips } from "./passive-scan";
 import { ClassBadge, ClassifyBar, WhoisCell, WhoisFilters } from "@/components/whois";
 
+const SOURCE_HELP: Record<string, string> = {
+  inventory: "an LOB inventory row has this public IP (its own IP, or the Public / NAT IP column)",
+  matrix: "the communication matrix has it: destination / source NAT, a NAT pool, the IP register, or a public destination of our rules",
+  crowdstrike: "a CrowdStrike agent's connection IP is this public IP",
+  "va scan": "a VA scan covered this public IP",
+  passive: "an Internet DB (passive) scan looked it up — delete the scan on the Internet DB scan page to remove it",
+  "your ranges": "inside a public range you listed under Your ranges & ASNs",
+};
+
 const LINK = (ip: string) => `https://www.shodan.io/search?query=${encodeURIComponent(ip)}`;
 
 /** Internet attack surface: every public IP we know, grouped by /24 and by the BGP prefix that advertises it. */
@@ -25,7 +34,8 @@ export default function Surface() {
   const [how, setHow] = React.useState(false);
   const [sel, setSel] = React.useState<Set<string>>(new Set());
   const [total, setTotal] = React.useState(0);
-  const { data, error, refetch } = useQuery({ queryKey: ["surface"], queryFn: () => api<any>("/api/surface"),
+  const bits = state.bits || "24";
+  const { data, error, refetch } = useQuery({ queryKey: ["surface", bits], queryFn: () => api<any>("/api/surface", { params: { bits } }),
     refetchInterval: (q) => ((q.state.data as any)?.job?.running ? 1500 : false) });
   const pst = useQuery({ queryKey: ["passive-status"], queryFn: () => api<any>("/api/passive/status"),
     refetchInterval: (q) => ((q.state.data as any)?.job?.running ? 1200 : false) });
@@ -46,7 +56,7 @@ export default function Surface() {
       <a className="text-[10.5px] text-muted hover:text-accent-fg" href={LINK(r.ip)} target="_blank" rel="noopener noreferrer" title="Open in Shodan">Shodan↗</a></span> },
     { key: "name", label: "Asset", render: (r) => <span>{r.name || <span className="text-muted">unknown</span>}{r.asset_ip && <span className="block font-mono text-[11px] text-muted">behind NAT: {r.asset_ip}</span>}</span> },
     { key: "lobs", label: "LOB", render: (r) => r.lobs || <span className="text-muted">–</span> },
-    { key: "sources", label: "Known from", render: (r) => <span className="flex flex-wrap gap-1">{r.sources.map((x: string) => <Badge key={x} tone="neutral">{x}</Badge>)}</span> },
+    { key: "sources", label: "Known from", render: (r) => <span className="flex flex-wrap gap-1">{r.sources.map((x: string) => <Badge key={x} tone="neutral" title={SOURCE_HELP[x]}>{x}</Badge>)}</span> },
     { key: "prefix", label: "Advertised prefix", render: (r) => r.prefix ? <span><Mono>{r.prefix}</Mono>{r.asn && <span className="block text-[11px] text-muted">AS{r.asn} {r.holder}</span>}</span> : <span className="text-muted">–</span> },
     { key: "ports", label: "Open ports", wrap: true, render: (r) => r.scanned ? <PortChips ports={r.ports} /> : <span className="text-muted">not scanned</span> },
     { key: "vulns", label: "CVEs", wrap: true, render: (r) => r.scanned ? <CveChips vulns={r.vulns} /> : <span className="text-muted">–</span> },
@@ -58,7 +68,10 @@ export default function Surface() {
   const groupCols = (label: string, onPick: (k: string) => void, withScan?: boolean): Column[] => [
     { key: "key", label, render: (g) => <button className="font-mono text-[12.5px] text-accent-fg hover:underline" onClick={() => onPick(g.key)}>{g.key}</button> },
     { key: "holder", label: "Holder", render: (g) => g.asn ? <span className="text-[12px]">AS{g.asn} {g.holder}</span> : <span className="text-muted">–</span> },
-    { key: "whois_name", label: "WHOIS", wrap: true, render: (g) => g.whois_name ? <span className="flex max-w-[260px] flex-col"><b className="truncate text-[12px]">{g.whois_name}</b>
+    { key: "block", label: "Registered block", wrap: true, render: (g) => g.block_name ? <span className="flex max-w-[240px] flex-col" title={[g.block_org, g.block_country, g.block_range].filter(Boolean).join(" · ")}>
+      <b className="truncate text-[12px]">{g.block_name}</b><span className="line-clamp-2 text-[11.5px] text-fg-2">{g.block_descr || g.block_org}</span>
+      {g.block_range && <span className="font-mono text-[10.5px] text-muted">{g.block_range}</span>}</span> : <span className="text-[11.5px] text-muted">not looked up</span> },
+    { key: "whois_name", label: "WHOIS of its IPs", wrap: true, render: (g) => g.whois_name ? <span className="flex max-w-[260px] flex-col"><b className="truncate text-[12px]">{g.whois_name}</b>
       {(g.whois_descr || g.whois_org) && <span className="line-clamp-2 text-[11.5px] text-fg-2">{g.whois_descr || g.whois_org}</span>}</span> : <span className="text-[11.5px] text-muted">not looked up</span> },
     { key: "ips", label: "Known public IPs", num: true }, { key: "assets", label: "Assets", num: true },
     { key: "cls", label: "Enterprise", render: (g) => (g.enterprise || g.non_enterprise) ? <span className="text-[12px]"><b className="text-good-fg">{g.enterprise}</b> / <span className="text-muted">{g.non_enterprise} non</span></span> : <span className="text-[11.5px] text-muted">unmarked</span> },
@@ -109,18 +122,18 @@ export default function Surface() {
         )}
       </Card>
       <Tabs value={tab} onChange={(v) => replaceAll({ tab: v })} tabs={[
-        { id: "ips", label: "Public IPs", count: s.ips }, { id: "subnets", label: "By /24 subnet", count: s.subnets },
+        { id: "ips", label: "Public IPs", count: s.ips }, { id: "subnets", label: `By /${data.bits} subnet`, count: data.subnets.length },
         { id: "prefixes", label: "By advertised prefix", count: s.prefixes }, { id: "asns", label: "ASNs", count: s.asns },
         { id: "advertised", label: job.running && job.kind.includes("advertised") ? "Advertised by your ASNs · fetching…" : "Advertised by your ASNs", count: s.adv_prefixes }]} />
       {tab === "ips" && (
         <>
-        <ClassifyBar path="/api/surface/classify" filter={state} selected={sel} total={total} onDone={() => setSel(new Set())} />
+        <ClassifyBar universe="surface" selected={sel} onDone={() => setSel(new Set())} />
         <DataTable endpoint="/api/surface/ips" exportPath="/api/surface/ips/export" state={state} setState={set} omit={["tab"]} noun="public IPs" storageKey="surface"
           rowKey={(r: any) => r.ip} onReset={() => replaceAll({ tab })} sortable={false} columns={ipCols} selected={sel} onSelectedChange={setSel}
           onData={(d: any) => setTotal(d.total)}
           filters={<>
             <SearchInput className="w-72" value={state.q || ""} onChange={(v) => set({ q: v })} placeholder="IP, asset, LOB, holder, CVE…" />
-            <FilterSelect label="Show" value={state.show} onChange={(v) => set({ show: v })} any="All"
+            <FilterSelect single label="Show" value={state.show} onChange={(v) => set({ show: v })} any="All"
               options={[["unscanned", "Not scanned"], ["ports", "Open ports"], ["cves", "Known CVEs"], ["noisy", "Seen scanning"], ["exposed", "Marked exposed"]]} />
             <WhoisFilters facetsPath="/api/surface/whois-facets" state={state} set={set} />
             {(state.subnet || state.prefix || state.asn) && <Badge tone="info">{state.subnet || state.prefix || `AS${state.asn}`}
@@ -128,7 +141,13 @@ export default function Surface() {
           </>} />
         </>
       )}
-      {tab === "subnets" && <Card><SimpleTable rows={data.subnets} maxHeight="65vh" columns={groupCols("/24 subnet", (k) => replaceAll({ tab: "ips", subnet: k }), true)} /></Card>}
+      {tab === "subnets" && <Card>
+        <div className="flex flex-wrap items-center gap-2 border-b border-border px-3.5 py-2.5 text-[12.5px]">
+          <FilterSelect single label="Group public IPs by" value={bits} onChange={(v) => set({ bits: !v || v === "24" ? undefined : v })}
+            options={["16", "20", "22", "23", "24", "25", "26", "27", "28", "29", "30"].map((b) => [b, `/${b}`])} />
+          <span className="text-muted">Registered block = the WHOIS record that holds the subnet (looked up with “Look up prefixes & WHOIS”); WHOIS of its IPs = what its known IPs are registered as.</span>
+        </div>
+        <SimpleTable rows={data.subnets} maxHeight="65vh" columns={groupCols(`/${data.bits} subnet`, (k) => replaceAll({ tab: "ips", subnet: k }), true)} /></Card>}
       {tab === "prefixes" && <Card>{!s.looked_up ? <div className="p-6 text-[13px] text-muted">Prefixes are not looked up yet: use <b>Look up prefixes</b>.</div>
         : <SimpleTable rows={data.prefixes} maxHeight="65vh" columns={groupCols("Advertised prefix", (k) => replaceAll({ tab: "ips", prefix: k }), true)} />}</Card>}
       {tab === "asns" && <Card><SimpleTable rows={data.asns} empty="Look up prefixes first" columns={[

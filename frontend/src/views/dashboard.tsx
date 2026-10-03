@@ -348,9 +348,9 @@ export default function Overview() {
             ] },
             { label: "Offline", n: k.offline + rd.devices, href: "/assets/?status=offline", color: "var(--warn)", parts: [
               { label: "Offline in the console", n: k.offline, href: "/assets/?status=offline&history=0" },
-              { label: "EDR history · removed from console (tracked by sync)", n: rd.from_console, href: "/edr-history/?view=console",
+              { label: "EDR history · removed from console (tracked by sync)", n: rd.from_console, href: "/health/?view=removed",
                 hint: "Agents that left the console (auto-removed after the inactivity window, or deleted), one per device" },
-              { label: "EDR history · old EDR sheet only", n: rd.import_only, href: "/edr-history/?view=import",
+              { label: "EDR history · old EDR sheet only", n: rd.import_only, href: "/health/?view=import",
                 hint: "Devices known only from the uploaded old EDR inventory, one per device" },
             ] },
             { label: "Feasibility to be decided", n: (lobT.to_be_decided || 0) + (reg.unidentified || 0), href: "/feasibility/?feasible=To+be+decided", color: "var(--violet)", parts: [
@@ -377,6 +377,14 @@ export default function Overview() {
               { label: "Medium", n: v.severity.med, color: "var(--warn)", href: "/vulnerabilities/?vtab=findings&severity=Medium" }]} />
             <Line2 items={[["Crit / high hosts with no active EDR", v.assets.crit_high_no_edr, "/vulnerabilities/?vtab=hosts&min_sev=3&no_edr=1"], ["Scanned, not in inventory", v.assets.not_in_inventory, "/vulnerabilities/?vtab=hosts&in_inventory=0"]]} />
           </> : <Link href="/upload/" className="text-[13px] text-accent-fg hover:underline">Upload a Nessus scan →</Link>}
+          {d.spotlight?.findings > 0 && (
+            <Link href="/spotlight/" className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-0.5 rounded-lg border border-border px-2.5 py-1.5 text-[12.5px] hover:bg-surface-2">
+              <span className="font-medium">CrowdStrike (Spotlight)</span>
+              <span><b className="text-crit-fg">{fmtN(d.spotlight.crit)}</b> critical</span>
+              <span><b className="text-serious-fg">{fmtN(d.spotlight.high)}</b> high</span>
+              <span className="text-muted">on {fmtN(d.spotlight.hosts)} hosts{d.spotlight.kev ? ` · ${fmtN(d.spotlight.kev)} CISA KEV` : ""} · separate from VA</span>
+            </Link>
+          )}
         </Hero>
       </div>
 

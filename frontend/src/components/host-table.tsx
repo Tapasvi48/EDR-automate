@@ -4,7 +4,8 @@ import * as Popover from "@radix-ui/react-popover";
 import { SlidersHorizontal, X } from "lucide-react";
 import { useMeta } from "@/lib/hooks";
 import { fmtDt } from "@/lib/format";
-import { Badge, Button, Field, FilterSelect, Input, SearchInput, Select } from "./ui";
+import { Badge, Button, Field, FilterSelect, Input, SearchInput } from "./ui";
+import { cn } from "@/lib/utils";
 import { DataTable, type Column } from "./data-table";
 import { HostFlags, HostStatus, Live, Mono, VerifBadge, When, YN, removalLabel } from "./badges";
 import { DateRange } from "./date-range";
@@ -26,6 +27,7 @@ export function hostColumns(): Column[] {
     { key: "first_seen", label: "First seen", render: (r) => <span title={r.first_seen}>{fmtDt(r.first_seen)}</span> },
     { key: "last_seen", label: "Last seen", render: (r) => <When ts={r.last_seen} /> },
     { key: "platform_name", label: "Platform", hidden: true },
+    { key: "prevention_policy", label: "Prevention policy", hidden: true, sort: false, render: (r) => r.prevention_policy_id ? <span>{r.prevention_policy || r.prevention_policy_id}{r.prevention_applied === 0 && <Badge tone="warn" className="ml-1">not applied</Badge>}</span> : <span className="text-muted">none</span> },
     { key: "product_type_desc", label: "Falcon host type", hidden: true },
     { key: "machine_domain", label: "Domain", hidden: true },
     { key: "site_name", label: "Site", hidden: true },
@@ -69,9 +71,9 @@ export function HostFilters({ state, set, extra, removalFilter }: { state: Recor
   const { data: m } = useMeta();
   const moreCount = MORE_KEYS.filter((k) => state[k]).length;
   const anyActive = moreCount + MAIN_KEYS.filter((k) => state[k]).length > 0;
-  const msps = (m?.msps || []).filter((x) => !state.lob || String(x.lob_id) === state.lob);
+  const lobSel = (state.lob || "").split("|").filter(Boolean);
+  const msps = (m?.msps || []).filter((x) => !lobSel.length || lobSel.includes(String(x.lob_id)));
   const lobName = (id: number) => m?.lobs.find((l) => l.id === id)?.name || "";
-  const flag = FLAGS.find(([k]) => state[k] === "1")?.[0] || "";
   return (
     <div className="flex w-full flex-col gap-2">
       <div className="flex flex-wrap items-center gap-2">
@@ -79,7 +81,7 @@ export function HostFilters({ state, set, extra, removalFilter }: { state: Recor
         <FilterSelect label="Status" value={state.status === "stale" ? "" : state.status} onChange={(v) => set({ status: v })} options={[["online", "Online"], ["offline", "Offline"], ["unknown", "Unknown"]]} />
         <FilterSelect label="LOB" value={state.lob} onChange={(v) => set({ lob: v, msp: undefined })} any="All" options={[...(m?.lobs || []).map((l) => ({ value: l.id, label: l.name }))]} />
         <FilterSelect label="MSP" value={state.msp} onChange={(v) => set({ msp: v })} any="All"
-          options={[...msps.map((x) => ({ value: x.id, label: state.lob ? x.name : `${x.name} · ${lobName(x.lob_id)}` })), ...(state.lob ? [{ value: "none", label: "Unassigned MSP" }] : [])]} />
+          options={[...msps.map((x) => ({ value: x.id, label: lobSel.length === 1 ? x.name : `${x.name} · ${lobName(x.lob_id)}` })), { value: "none", label: "Unassigned MSP" }]} />
         <FilterSelect label="OS" value={state.os} onChange={(v) => set({ os: v })} any="All" options={m?.os || []} />
         <FilterSelect label="Node type" value={state.node_type} onChange={(v) => set({ node_type: v })} any="All" options={m?.node_types || []} />
       </div>
@@ -94,24 +96,29 @@ export function HostFilters({ state, set, extra, removalFilter }: { state: Recor
             <Button size="sm" variant={moreCount ? "soft" : "default"}><SlidersHorizontal /> More filters{moreCount ? ` · ${moreCount}` : ""}</Button>
           </Popover.Trigger>
           <Popover.Portal>
-            <Popover.Content align="start" sideOffset={6} className="z-50 w-[520px] max-w-[95vw] rounded-xl border border-border bg-surface p-4 shadow-xl">
-              <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted">Show only</div>
-              <div className="mb-4 grid grid-cols-2 gap-3">
-                <Field label="Special cases"><Select className="max-w-none" value={flag} placeholder="All hosts"
-                  onChange={(v) => set({ ...Object.fromEntries(FLAG_KEYS.map((k) => [k, undefined])), ...(v ? { [v]: "1" } : {}) })} options={FLAGS} /></Field>
-                <Field label="In NIAM dump"><Select className="max-w-none" value={state.niam} onChange={(v) => set({ niam: v })} placeholder="Any" options={[["1", "Yes — IP is in NIAM"], ["0", "No"]]} /></Field>
-                <Field label="Internet exposed"><Select className="max-w-none" value={state.exposed} onChange={(v) => set({ exposed: v })} placeholder="Any" options={[["1", "Yes"], ["0", "No"]]} /></Field>
+            <Popover.Content align="start" sideOffset={6} className="z-50 w-[560px] max-w-[95vw] rounded-xl border border-border bg-surface p-4 shadow-xl">
+              <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted">Show only</div>
+              <div className="mb-4 flex flex-wrap gap-1.5">
+                {FLAGS.map(([k, l]) => (
+                  <button key={k} type="button" onClick={() => set({ [k]: state[k] === "1" ? undefined : "1" })}
+                    className={cn("rounded-full border px-2.5 py-1 text-[12px] transition-colors", state[k] === "1" ? "border-accent bg-accent-soft font-semibold text-accent-fg" : "border-border text-fg-2 hover:border-fg-2/40")}>{l}</button>
+                ))}
               </div>
-              <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted">Sensor & host details</div>
-              <div className="grid grid-cols-2 gap-3">
-                <Field label="Sensor version"><Select className="max-w-none" value={state.agent_version} onChange={(v) => set({ agent_version: v })} placeholder="All" options={m?.agent_versions || []} /></Field>
-                <Field label="Sensor release level"><Select className="max-w-none" value={state.sensor_level} onChange={(v) => set({ sensor_level: v })} placeholder="All" options={[["N", "N · latest"], ["N-1", "N-1"], ["N-2", "N-2"], ["older", "Older than N-2"]]} /></Field>
-                <Field label="Platform"><Select className="max-w-none" value={state.platform} onChange={(v) => set({ platform: v })} placeholder="All" options={m?.platforms || []} /></Field>
-                <Field label="Domain"><Select className="max-w-none" value={state.domain} onChange={(v) => set({ domain: v })} placeholder="All" options={m?.domains || []} /></Field>
-                <Field label="Site"><Select className="max-w-none" value={state.site} onChange={(v) => set({ site: v })} placeholder="All" options={m?.sites || []} /></Field>
-                <Field label="Chassis"><Select className="max-w-none" value={state.chassis} onChange={(v) => set({ chassis: v })} placeholder="All" options={m?.chassis || []} /></Field>
-                <Field label="IP range (IPv4 / IPv6 CIDR)" className="col-span-2"><Input defaultValue={state.ip_range || ""} placeholder="10.10.0.0/16 or 2001:db8::/48" onBlur={(e) => set({ ip_range: e.target.value })} onKeyDown={(e) => e.key === "Enter" && set({ ip_range: (e.target as HTMLInputElement).value })} /></Field>
+              <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted">Coverage</div>
+              <div className="mb-4 flex flex-wrap gap-2">
+                <FilterSelect single label="In NIAM dump" value={state.niam} onChange={(v) => set({ niam: v })} options={[["1", "Yes"], ["0", "No"]]} />
+                <FilterSelect single label="Internet exposed" value={state.exposed} onChange={(v) => set({ exposed: v })} options={[["1", "Yes"], ["0", "No"]]} />
               </div>
+              <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted">Sensor & host details</div>
+              <div className="flex flex-wrap gap-2">
+                <FilterSelect label="Sensor version" value={state.agent_version} onChange={(v) => set({ agent_version: v })} any="All" options={m?.agent_versions || []} />
+                <FilterSelect label="Release level" value={state.sensor_level} onChange={(v) => set({ sensor_level: v })} any="All" options={[["N", "N · latest"], ["N-1", "N-1"], ["N-2", "N-2"], ["older", "Older than N-2"]]} />
+                <FilterSelect label="Platform" value={state.platform} onChange={(v) => set({ platform: v })} any="All" options={m?.platforms || []} />
+                <FilterSelect label="Domain" value={state.domain} onChange={(v) => set({ domain: v })} any="All" options={m?.domains || []} />
+                <FilterSelect label="Site" value={state.site} onChange={(v) => set({ site: v })} any="All" options={m?.sites || []} />
+                <FilterSelect label="Chassis" value={state.chassis} onChange={(v) => set({ chassis: v })} any="All" options={m?.chassis || []} />
+              </div>
+              <Field label="IP range (IPv4 / IPv6 CIDR)" className="mt-3"><Input defaultValue={state.ip_range || ""} placeholder="10.10.0.0/16 or 2001:db8::/48" onBlur={(e) => set({ ip_range: e.target.value })} onKeyDown={(e) => e.key === "Enter" && set({ ip_range: (e.target as HTMLInputElement).value })} /></Field>
               {moreCount > 0 && <Button size="sm" variant="ghost" className="mt-3" onClick={() => set(Object.fromEntries(MORE_KEYS.map((k) => [k, undefined])))}><X /> Clear these</Button>}
             </Popover.Content>
           </Popover.Portal>

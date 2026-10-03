@@ -459,9 +459,10 @@ def _blank(name):
 def _cs_workload(c, d_from, d_to, severity=""):
     out = {}
     w, params = "substr(created_at,1,10) BETWEEN ? AND ?", [d_from, d_to]
-    if severity:
-        w += " AND severity=?"
-        params.append(severity)
+    sevs = [s for s in (severity or "").split("|") if s]
+    if sevs:
+        w += f" AND severity IN ({','.join('?' * len(sevs))})"
+        params += sevs
     for r in c.execute(f"SELECT assigned_to, status, severity, created_at, updated_at FROM detections WHERE {w}", params):
         name = (r["assigned_to"] or "").strip() or "Unassigned"
         d = out.setdefault(name.lower(), _blank(name))
@@ -502,7 +503,8 @@ def _splunk_workload(d_from, d_to, severity=""):
         return out, None
     if not cfg["url"]:
         return None, "Splunk is not connected"
-    sev = f' urgency="{severity.lower()}"' if severity else ""
+    sevs = [x for x in (severity or "").split("|") if x]
+    sev = (" (" + " OR ".join(f'urgency="{x.lower()}"' for x in sevs) + ")") if sevs else ""
     spl = ('search `notable`' + sev + ' | eval owner=if(isnull(owner) OR owner="" OR owner="unassigned","Unassigned",owner) '
            '| eval u=lower(urgency), closed_t=if(in(status_label,"Closed","Resolved"), review_time, null()) '
            '| stats count AS total count(eval(status_label="New")) AS new count(eval(status_label="In Progress")) AS in_progress '
@@ -574,7 +576,8 @@ def analyst_alerts(analyst: str, source: str = "crowdstrike", date_from: str = Q
         if not cfg["url"]:
             return {"rows": [], "note": "Splunk is not connected"}
         own = 'owner="unassigned" OR NOT owner=*' if analyst == "Unassigned" else f"owner={splunk._quote(analyst)}"
-        sev = f' urgency="{severity.lower()}"' if severity else ""
+        sevs = [s for s in severity.split("|") if s]
+        sev = (" (" + " OR ".join(f'urgency="{s.lower()}"' for s in sevs) + ")") if sevs else ""
         spl = (f'search `notable` ({own}){sev} | eval t=strftime(_time, "%Y-%m-%dT%H:%M:%SZ") '
                "| table t rule_name urgency status_label src dest owner | head 1000")
         try:
@@ -583,23 +586,27 @@ def analyst_alerts(analyst: str, source: str = "crowdstrike", date_from: str = Q
             return {"rows": [], "note": str(e)}
         rows = [{"created_at": r.get("t"), "name": r.get("rule_name"), "severity": str(r.get("urgency") or "").title(),
                  "status": r.get("status_label"), "hostname": r.get("dest") or r.get("src"), "src": "Splunk"} for r in res]
-        return {"rows": [r for r in rows if not status or (r["status"] or "").lower().replace(" ", "_") == status]}
-    w = ["substr(created_at,1,10) BETWEEN ? AND ?"]
+        sts = [s for s in status.split("|") if s]
+        return {"rows": [r for r in rows if not sts or (r["status"] or "").lower().replace(" ", "_") in sts]}
+    w = ["substr(d.created_at,1,10) BETWEEN ? AND ?"]
     params = [d_from, d_to]
     if analyst == "Unassigned":
-        w.append("COALESCE(TRIM(assigned_to),'')=''")
+        w.append("COALESCE(TRIM(d.assigned_to),'')=''")
     else:
-        w.append("LOWER(assigned_to)=LOWER(?)")
+        w.append("LOWER(d.assigned_to)=LOWER(?)")
         params.append(analyst)
-    if severity:
-        w.append("severity=?")
-        params.append(severity)
-    if status:
-        w.append("LOWER(status)=?")
-        params.append(status)
+    sevs = [s for s in severity.split("|") if s]
+    if sevs:
+        w.append(f"d.severity IN ({','.join('?' * len(sevs))})")
+        params += sevs
+    sts = [s for s in status.split("|") if s]
+    if sts:
+        w.append(f"LOWER(COALESCE(NULLIF(d.status,''),'new')) IN ({','.join('?' * len(sts))})")
+        params += sts
     with db.get_conn() as c:
-        rows = db.rows(c, f"""SELECT id, aid, hostname, severity, name, tactic, technique, status, created_at, updated_at, assigned_to
-                              FROM detections WHERE {' AND '.join(w)} ORDER BY created_at DESC LIMIT 1000""", params)
+        rows = db.rows(c, f"""SELECT d.id, d.aid, d.hostname, d.severity, d.name, d.tactic, d.technique, d.status, d.created_at, d.updated_at,
+                              d.assigned_to, d.filename, h.connection_ip ip FROM detections d LEFT JOIN hosts h ON h.aid=d.aid
+                              WHERE {' AND '.join(w)} ORDER BY d.created_at DESC LIMIT 2000""", params)
     return {"rows": rows}
 
 

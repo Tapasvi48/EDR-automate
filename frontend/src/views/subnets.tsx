@@ -52,7 +52,7 @@ export default function Subnets() {
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <Segmented value={group as any} onChange={(v: string) => replaceAll({ ...(v !== "subnet" ? { group: v } : {}), ...(state.prefix ? { prefix: state.prefix } : {}) })}
           options={[["subnet", "By subnet"], ["gateway", "By gateway (VLAN)"], ["vlan", "By inventory VLAN"]] as any} />
-        {group === "subnet" && <FilterSelect label="Size" value={prefix} onChange={(v) => set({ prefix: !v || v === "24" ? undefined : v })} options={PREFIXES.map((p) => [p, `/${p}`])} />}
+        {group === "subnet" && <FilterSelect single label="Size" value={prefix} onChange={(v) => set({ prefix: !v || v === "24" ? undefined : v })} options={PREFIXES.map((p) => [p, `/${p}`])} />}
       </div>
       {info && group === "gateway" && !info.has_gateway && <Callout tone="info" className="mb-3">No CrowdStrike agent reports a default gateway yet (it comes with the next sync).</Callout>}
       {info && group === "vlan" && info.total <= 1 && <Callout tone="info" className="mb-3">No VLAN column found in the LOB inventories. Add a column named “VLAN” (or “VLAN ID”) to an inventory upload and it shows up here; until then, group by gateway.</Callout>}
@@ -72,7 +72,7 @@ export default function Subnets() {
         filters={<>
           <SearchInput className="w-72" value={state.q || ""} onChange={(v) => set({ q: v })} placeholder="IP, subnet, gateway, VLAN, LOB, MSP…" />
           <FilterSelect label="LOB" value={state.lob} onChange={(v) => set({ lob: v })} any="All" options={(meta?.lobs || []).map((l: any) => l.name)} />
-          <FilterSelect label="Sort" value={state.sort || "gap"} onChange={(v) => set({ sort: v })} options={[["gap", "Most EDR gaps"], ["exposed", "Most exposed"], ["risk", "Most critical vulns"],
+          <FilterSelect single label="Sort" value={state.sort || "gap"} onChange={(v) => set({ sort: v })} options={[["gap", "Most EDR gaps"], ["exposed", "Most exposed"], ["risk", "Most critical vulns"],
             ["assets", "Most assets"], ["coverage", "Lowest coverage"], ["lobs", "Most LOBs"], ["label", "Name"]]} />
           <Checkbox checked={state.gap === "1"} onChange={(v) => set({ gap: v ? "1" : undefined })} label="EDR gaps only" />
         </>} />

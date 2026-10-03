@@ -37,7 +37,7 @@ export default function Exceptions() {
           rowKey={(r: any) => String(r.id)} onReset={() => replaceAll({})} sortable={false}
           filters={<>
             <SearchInput className="w-72" value={state.q || ""} onChange={(v) => set({ q: v })} placeholder="Exception, IP, plugin, CVE, approver…" />
-            <FilterSelect label="Status" value={state.status} onChange={(v) => set({ status: v })} options={["Active", "Expiring", "Expired"]} />
+            <FilterSelect single label="Status" value={state.status} onChange={(v) => set({ status: v })} options={["Active", "Expiring", "Expired"]} />
           </>}
           columns={[
             { key: "exception_id", label: "Exception", render: (r: any) => <b>{r.exception_id}</b> },
