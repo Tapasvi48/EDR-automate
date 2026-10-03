@@ -865,9 +865,25 @@ function RelatedView({ s, r }: { s: any; r: any }) {
   const groups: Record<string, any[]> = {};
   for (const x of data.related || []) (groups[x.kind] ||= []).push(x);
   const order = Object.keys(REL_INFO).filter((k) => groups[k]).concat(Object.keys(groups).filter((k) => !REL_INFO[k]));
-  if (!order.length) return <Card className="p-6 text-[13px] text-muted">No related assets found.</Card>;
+  const sn = data.subnet;
+  const subnetCard = sn && (
+    <Card className="p-4">
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-[12.5px]">
+        <span><span className="text-muted">Subnet </span><Mono>{sn.subnet}</Mono></span>
+        <span><b>{sn.assets}</b> <span className="text-muted">known assets</span></span>
+        <span><b>{sn.edr}</b> <span className="text-muted">with EDR</span></span>
+        {sn.gap > 0 && <span className="text-crit-fg"><b>{sn.gap}</b> feasible without EDR</span>}
+        {sn.exposed > 0 && <span className="text-serious-fg"><b>{sn.exposed}</b> internet exposed</span>}
+        {sn.gateways?.length > 0 && <span><span className="text-muted">Gateway </span><Mono>{sn.gateways.join(", ")}</Mono></span>}
+        {sn.lobs?.length > 0 && <span><span className="text-muted">LOB </span>{sn.lobs.join(", ")}</span>}
+        <Link className="ml-auto text-accent-fg hover:underline" href={`/subnets/?q=${encodeURIComponent(sn.subnet.split("/")[0])}`}>Open in Subnets &amp; VLANs →</Link>
+      </div>
+    </Card>
+  );
+  if (!order.length) return <div className="space-y-4">{subnetCard}<Card className="p-6 text-[13px] text-muted">No related assets found.</Card></div>;
   return (
     <div className="space-y-4">
+      {subnetCard}
       {order.map((k) => (
         <Card key={k}>
           <CardHeader title={<span className="flex items-center gap-2">{REL_INFO[k]?.[0] || k}<Badge tone="neutral">{groups[k].length}</Badge></span>} hint={REL_INFO[k]?.[1]} />

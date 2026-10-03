@@ -17,6 +17,7 @@ DETAILS_BATCH = 5000        # PostDeviceDetailsV2 max
 ONLINE_BATCH = 100          # GetOnlineState_V1 (GET query string - keep it short)
 NIC_BATCH = 100
 WORKERS = 6
+ONLINE_WORKERS = 12   # online state is 100 IDs per call (1,000 calls at 1 lakh hosts); well inside 6,000 calls / minute
 
 CLOUDS = {
     "us-1": "https://api.crowdstrike.com",
@@ -176,10 +177,10 @@ class FalconClient:
             return r.get("body", {})
         raise FalconError(f"{what}: gave up after {retries} retries")
 
-    def _parallel(self, fn, batches, what, progress=None):
+    def _parallel(self, fn, batches, what, progress=None, workers=None):
         batches = list(batches)
         done, lock, out = [0], threading.Lock(), []
-        with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+        with ThreadPoolExecutor(max_workers=workers or WORKERS) as ex:
             futs = [ex.submit(fn, b) for b in batches]
             for f in as_completed(futs):
                 res, n = f.result()
@@ -191,10 +192,12 @@ class FalconClient:
         return out
 
     # -- queries ---------------------------------------------------------
-    def list_all_aids(self, progress=None):
+    def list_all_aids(self, progress=None, filter=None):
         aids, offset = [], None
         while True:
             kw = {"limit": 5000}
+            if filter:
+                kw["filter"] = filter
             if offset:
                 kw["offset"] = offset
             body = self._call(self.hosts.query_devices_by_filter_scroll, "List hosts", **kw)
@@ -232,7 +235,7 @@ class FalconClient:
         def fetch(batch):
             return self._call(self.hosts.get_online_state, "Online state", ids=batch).get("resources") or [], len(batch)
         states = {}
-        for res in self._parallel(fetch, _chunks(aids, ONLINE_BATCH), "online", progress):
+        for res in self._parallel(fetch, _chunks(aids, ONLINE_BATCH), "online", progress, workers=ONLINE_WORKERS):
             for r in res:
                 states[r.get("id")] = r.get("state", "unknown")
         return states

@@ -906,14 +906,38 @@ def commit_tags(c, lob_id, rows, source, replace_scope=None):
 
 
 # ------------------------------------------------------------------ background re-matching (large uploads)
-REFRESH = {"running": False, "again": False, "label": "", "started_at": None, "finished_at": None, "seconds": None, "error": None}
+REFRESH = {"running": False, "again": False, "full": False, "label": "", "started_at": None, "finished_at": None, "seconds": None, "error": None}
 _refresh_lock = threading.Lock()
 DEFER_ROWS = 5000  # uploads bigger than this return as soon as the version is saved; matching runs in the background
 
 
-def refresh_async(label="Re-matching inventory with CrowdStrike"):
-    """Run refresh_matches in a background thread (one at a time; a request made while one runs triggers one more pass)."""
+SYNC_LIMIT = 20000  # below this many hosts + inventory rows a change is re-matched before the request returns
+
+
+def _big(c):
+    n = c.execute("SELECT (SELECT COUNT(*) FROM hosts) + (SELECT COUNT(*) FROM inventory_current)").fetchone()[0]
+    return n > SYNC_LIMIT
+
+
+def refresh_soon(c, lob_id=None, label="Re-matching inventory with CrowdStrike", registry_only=False):
+    """After a change: small data -> re-match now (the response already shows the result); large data -> re-match in the
+    background once this request's transaction is committed, so the click returns at once. Returns True when done now."""
+    from . import registry
+    if not _big(c):
+        if registry_only:
+            registry.refresh(c)
+        else:
+            refresh_matches(c, lob_id)
+        return True
+    db.after_commit(lambda: refresh_async(label, registry_only=registry_only))
+    return False
+
+
+def refresh_async(label="Re-matching inventory with CrowdStrike", registry_only=False):
+    """Run refresh_matches in a background thread (one at a time; a request made while one runs triggers one more pass).
+    registry_only: only internet exposure changed (whitelists, matrix overrides) - rebuild the asset registry, not the matches."""
     with _refresh_lock:
+        REFRESH["full"] = REFRESH.get("full") or not registry_only
         if REFRESH["running"]:
             REFRESH["again"] = True
             return
@@ -923,11 +947,17 @@ def refresh_async(label="Re-matching inventory with CrowdStrike"):
 
 def _refresh_worker():
     import time
+    from . import registry
     while True:
         t = time.time()
+        with _refresh_lock:
+            full, REFRESH["full"] = REFRESH.get("full"), False
         try:
             with db.get_conn() as c:
-                refresh_matches(c)
+                if full:
+                    refresh_matches(c)
+                else:
+                    registry.refresh(c)
             REFRESH["error"] = None
         except Exception as e:  # noqa: BLE001
             REFRESH["error"] = str(e)

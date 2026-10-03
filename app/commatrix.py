@@ -189,24 +189,59 @@ def load_rules(c, only_active=True):
     return [r for r in rows if not only_active or active(r, now)]
 
 
+class RuleIndex:
+    """Every matrix rule's source / destination networks, indexed by (IP version, prefix length, network), so finding the
+    rules of an IP costs a few dictionary look-ups instead of parsing and scanning every rule (Asset 360, shadow exposure
+    over thousands of public IPs)."""
+
+    def __init__(self, rules):
+        self.rules = rules
+        self.nets = {"src": {}, "dst": {}}
+        self.nat = {}
+        for i, r in enumerate(rules):
+            for side, text in (("src", r["src"]), ("dst", r["dst"])):
+                for n in endpoints(text)[1]:
+                    self.nets[side].setdefault((n.version, n.prefixlen), {}).setdefault(int(n.network_address), set()).add(i)
+            for ip in db.all_ips(r["dst_nat"]):
+                self.nat.setdefault(ip, set()).add(i)
+
+    def _hits(self, side, addrs):
+        out = set()
+        for (v, plen), m in self.nets[side].items():
+            bits = 32 if v == 4 else 128
+            for a in addrs:
+                if a.version == v:
+                    out |= m.get((int(a) >> (bits - plen)) << (bits - plen), set())
+        return out
+
+    def match(self, ips):
+        addrs = []
+        for ip in ips:
+            try:
+                addrs.append(ipaddress.ip_address(ip))
+            except ValueError:
+                pass
+        dst = self._hits("dst", addrs)
+        for ip in ips:
+            dst |= self.nat.get(ip, set())
+        src = self._hits("src", addrs)
+        return [{**self.rules[i], "role": "Destination" if i in dst else "Source"} for i in sorted(dst | src)]
+
+
+_RIDX = {"gen": None, "idx": None}
+
+
+def rule_index(c):
+    """The RuleIndex of the current matrix, rebuilt only after the data changed."""
+    g = db.GEN[0]
+    if _RIDX["gen"] != g:
+        _RIDX["idx"], _RIDX["gen"] = RuleIndex(load_rules(c, only_active=False)), g
+    return _RIDX["idx"]
+
+
 def flows_for(c, ips):
     """Rules where any of the IPs is a source or destination (Asset 360)."""
-    addrs = []
-    for ip in ips:
-        try:
-            addrs.append(ipaddress.ip_address(ip))
-        except ValueError:
-            pass
-    out = []
-    for r in load_rules(c, only_active=False):
-        s_any, s_nets = endpoints(r["src"])
-        _, d_nets = endpoints(r["dst"])
-        d_nat = set(db.all_ips(r["dst_nat"]))
-        as_dst = any(a in n for a in addrs for n in d_nets if a.version == n.version) or bool(d_nat & set(ips))
-        as_src = any(a in n for a in addrs for n in s_nets if a.version == n.version)
-        if as_dst or as_src:
-            out.append({**r, "role": "Destination" if as_dst else "Source"})
-    return out[:500]
+    return rule_index(c).match(list(ips))[:500]
 
 
 def rule_allows(rule, port, proto):
@@ -364,9 +399,12 @@ def _store(rows, fname, data, warnings, per, replace_all):
         c.executemany(f"INSERT INTO comm_rules({', '.join(ROW_COLS)}, upload_id) VALUES ({','.join('?' * (len(ROW_COLS) + 1))})",
                       [(*[r.get(k) if k != "inbound_auto" else r["inbound_internet"] for k in ROW_COLS], uid) for r in rows])
         apply_overrides(c)
-        inventory.refresh_matches(c)  # re-join: exposure from the matrix
-        exposed = c.execute("SELECT COUNT(*) FROM asset_registry WHERE exposure_src LIKE '%,matrix,%'").fetchone()[0]
-    return {"message": f"{len(rows):,} rows from {len(per) or 1} sheet(s) loaded · {exposed:,} assets internet-exposed through the matrix",
+        if inventory.refresh_soon(c, label="Recalculating internet exposure from the matrix"):  # re-join: exposure from the matrix
+            exposed = c.execute("SELECT COUNT(*) FROM asset_registry WHERE exposure_src LIKE '%,matrix,%'").fetchone()[0]
+            done = f"{exposed:,} assets internet-exposed through the matrix"
+        else:
+            done = "internet exposure is being recalculated in the background"
+    return {"message": f"{len(rows):,} rows from {len(per) or 1} sheet(s) loaded · {done}",
             "rows": len(rows), "per_sheet": per}
 
 
@@ -506,7 +544,7 @@ def comm_summary():
 def comm_clear():
     with db.get_conn() as c:
         c.execute("DELETE FROM comm_rules")
-        inventory.refresh_matches(c)
+        inventory.refresh_soon(c)
     return {"ok": True}
 
 
@@ -716,7 +754,7 @@ def comm_delete_sheet(workbook: str = "", sheet: str = ""):
             n = c.execute("DELETE FROM comm_rules WHERE COALESCE(workbook,'')=? AND COALESCE(sheet,'')=?", (workbook, sheet)).rowcount
         else:
             n = c.execute("DELETE FROM comm_rules WHERE COALESCE(workbook,'')=?", (workbook,)).rowcount
-        inventory.refresh_matches(c)
+        inventory.refresh_soon(c)
     _IPS_CACHE.clear()
     return {"ok": True, "deleted": n, "message": f"{n:,} rows deleted" + (f" (sheet {sheet})" if sheet else f" (workbook {workbook or 'without name'})")}
 
@@ -735,8 +773,7 @@ def comm_mark(rule_pk: int, data: dict = Body(...)):
         else:
             c.execute("INSERT OR REPLACE INTO comm_overrides VALUES (?,?,?,?,?,?)", (*key, 1 if int(v) else 0, data.get("note") or "", db.now_iso()))
         apply_overrides(c)
-        from . import registry
-        registry.refresh(c)
+        inventory.refresh_soon(c, label="Recalculating internet exposure", registry_only=True)
         r = db.one(c, "SELECT inbound_internet, inbound_auto FROM comm_rules WHERE id=?", (rule_pk,))
     _IPS_CACHE.clear()
     return {"ok": True, "inbound_internet": r["inbound_internet"], "manual": r["inbound_internet"] != r["inbound_auto"]}

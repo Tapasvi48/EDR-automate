@@ -45,7 +45,7 @@ class Progress:
 
     def start(self, key, detail=""):
         st = self._step(key)
-        st.update(status="running", detail=detail, done=0, total=0)
+        st.update(status="running", detail=detail, done=0, total=0, t0=time.time())
         STATUS["stage"] = st["label"]
         self.log("info", key, f"{st['label']} started" + (f": {detail}" if detail else ""))
 
@@ -56,8 +56,16 @@ class Progress:
             st["total"] = total
         STATUS["stage"] = f"{st['label']} ({done:,}/{st['total']:,})" if st["total"] else st["label"]
 
+    def _took(self, st, detail):
+        """Append how long the step took, so a slow sync shows which step to look at."""
+        if st.get("t0"):
+            st["seconds"] = round(time.time() - st.pop("t0"), 1)
+            return f"{detail} · {st['seconds']}s" if detail else f"{st['seconds']}s"
+        return detail
+
     def done(self, key, detail=""):
         st = self._step(key)
+        detail = self._took(st, detail)
         st.update(status="done", detail=detail)
         self.log("info", key, f"{st['label']}: {detail}" if detail else f"{st['label']} done")
 
@@ -66,7 +74,9 @@ class Progress:
         self.log("info", key, f"{self._step(key)['label']} skipped: {detail}")
 
     def warn(self, key, detail):
-        self._step(key).update(status="warning", detail=detail)
+        st = self._step(key)
+        detail = self._took(st, detail)
+        st.update(status="warning", detail=detail)
         self.log("warn", key, detail)
 
     def fail(self, key, detail):
@@ -81,7 +91,7 @@ HOST_COLS = [
     "default_gateway_ip", "mac_address", "platform_name", "os_version", "os_product_name", "os_build",
     "kernel_version", "product_type_desc", "chassis_type_desc", "machine_domain", "site_name", "ou",
     "agent_version", "containment_status", "rfm", "system_manufacturer", "system_product_name",
-    "serial_number", "last_login_user", "tags", "groups", "first_seen", "last_seen", "modified_timestamp", "raw",
+    "serial_number", "last_login_user", "tags", "groups", "first_seen", "last_seen", "modified_timestamp",
 ]
 
 
@@ -246,11 +256,30 @@ def _do_sync(started, prog):
             "Aborting to avoid mass-marking hosts as removed (check API scope / CID).")
 
     hidden_unknown = [a for a in hidden_set if a not in existing or existing[a]["console_state"] != "hidden"]
-    fetch_ids = active_aids + [a for a in hidden_unknown if a not in active_set]
+    # Full device records once a day; in between only for agents that are new, came back, or changed / checked in since the
+    # last sync (FQL: modified OR last seen after it). Agents that are offline and unchanged keep their stored record, and
+    # their online state is still refreshed below. At 1 lakh agents this is most of a sync's download.
+    full_at = settings.get("sync_details_full_at") or ""
+    last_ok = _last_ok_sync()
+    day_ago = (datetime.now(timezone.utc) - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    incremental = bool(existing) and full_at > day_ago and last_ok
     prog.start("details")
+    if incremental:
+        since = (datetime.strptime(last_ok, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        try:
+            changed = set(client.list_all_aids(filter=f"modified_timestamp:>'{since}',last_seen:>'{since}'"))
+        except Exception as e:  # noqa: BLE001 - fall back to a full read
+            prog.log("warn", "details", f"Changed-host query failed, reading every host: {e}")
+            changed, incremental = None, False
+    if incremental:
+        active_ids = [a for a in active_aids if a in changed or a not in existing or existing[a]["console_state"] != "active"]
+    else:
+        active_ids = active_aids
+    fetch_ids = active_ids + [a for a in hidden_unknown if a not in active_set]
     prog.progress("details", 0, len(fetch_ids))
     details = client.get_details(fetch_ids, progress=lambda d: prog.progress("details", d))
-    prog.done("details", f"{len(details):,} host records")
+    prog.done("details", f"{len(details):,} host records" + (f" (changed since the last sync; {len(active_aids) - len(active_ids):,} unchanged kept)"
+                                                             if incremental else " (full read)"))
 
     prog.start("online")
     prog.progress("online", 0, len(active_aids))
@@ -300,6 +329,8 @@ def _do_sync(started, prog):
             if ip:
                 iph.append((aid, ip, db.ip_to_num(ip), h["mac_address"] if kind == "local" else "", kind, "sync", first, seen))
 
+    fetched = {h["aid"] for h in upserts}
+    kept = [(online.get(a, "unknown"), now, now, a) for a in active_aids if a not in fetched and a in existing]
     cols = HOST_COLS + ["console_state", "online_state"]
     upd = ", ".join(f"{col}=excluded.{col}" for col in cols if col != "aid")
     sql = (f"INSERT INTO hosts ({', '.join(cols)}, online_checked_at, db_first_synced, db_last_synced) "
@@ -310,6 +341,10 @@ def _do_sync(started, prog):
            "source='falcon'")
     with db.get_conn() as c:
         c.executemany(sql, [[h[col] for col in cols] + [now, now, now] for h in upserts])
+        c.executemany("INSERT OR REPLACE INTO host_raw(aid, raw) VALUES (?,?)", [(h["aid"], h["raw"]) for h in upserts])
+        c.executemany("UPDATE hosts SET online_state=?, online_checked_at=?, db_last_synced=? WHERE aid=?", kept)
+        if not incremental:
+            c.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('sync_details_full_at', ?)", (now,))
         c.executemany(
             """INSERT INTO ip_history(aid, ip, ip_num, mac, kind, source, first_seen, last_seen) VALUES (?,?,?,?,?,?,?,?)
                ON CONFLICT(aid, ip, kind) DO UPDATE SET
@@ -358,12 +393,18 @@ def _do_sync(started, prog):
             prog.warn("nic", f"NIC history skipped: {e}")
             counts["message"] = "NIC history skipped"
 
-    prog.start("sensors")
-    try:
-        from .sensor_support import refresh_from_falcon
-        prog.done("sensors", refresh_from_falcon(client))
-    except Exception as e:  # noqa: BLE001 - optional scope (Sensor update policies: Read)
-        prog.warn("sensors", f"Sensor builds skipped: {e}")
+    fetched = db.jloads(settings.get("sensor_support_fetched"), {}) or {}
+    if (fetched.get("at") or "") > (datetime.now(timezone.utc) - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ") \
+            and not fetched.get("kernel_error"):
+        # sensor builds and the supported-kernel list (up to 120 calls) change a few times a month: once a day is plenty
+        prog.skip("sensors", f"fetched {fetched.get('at')}; refreshed once a day")
+    else:
+        prog.start("sensors")
+        try:
+            from .sensor_support import refresh_from_falcon
+            prog.done("sensors", refresh_from_falcon(client))
+        except Exception as e:  # noqa: BLE001 - optional scope (Sensor update policies: Read)
+            prog.warn("sensors", f"Sensor builds skipped: {e}")
 
     prog.start("detections")
     try:
@@ -396,6 +437,12 @@ def _do_sync(started, prog):
         n = c.execute("SELECT COUNT(*) FROM inventory_current").fetchone()[0]
     prog.done("inventory", f"{n:,} inventory nodes checked")
     return counts
+
+
+def _last_ok_sync():
+    with db.get_conn() as c:
+        r = c.execute("SELECT started_at FROM sync_runs WHERE status='ok' ORDER BY id DESC LIMIT 1").fetchone()
+    return r[0] if r else None
 
 
 def store_nic_history(hist, checked_aids):

@@ -1,16 +1,20 @@
 import base64
 import json
 import logging
+import re
+import time
 import secrets
 import threading
 from contextlib import asynccontextmanager
+
+import anyio
 
 from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import asset360, commatrix, config, cs_posture, db, detections, satellite, seceon, splunk, falcon, feasibility, sensor_support, filetemplates, sod, inventory, legacy, niam, posture, queries, registry, sync, threats, passive, surface, alerts, intel, spotlight, vulns
+from . import asset360, commatrix, config, cs_posture, db, detections, satellite, seceon, splunk, falcon, feasibility, sensor_support, filetemplates, sod, inventory, legacy, niam, posture, queries, registry, sync, threats, passive, surface, alerts, intel, spotlight, subnets, vulns
 from .exporter import xlsx_response
 from .extra import router as extra_router
 
@@ -40,6 +44,104 @@ async def lifespan(app):
 
 
 app = FastAPI(title="EDR Asset Dashboard", lifespan=lifespan)
+
+
+# ------------------------------------------------------------------ API response cache
+# Overview, dashboards, coverage and the big lists aggregate every host and inventory row; at 1 lakh rows that is seconds of
+# SQL per page. Answers are kept until the data changes (db.GEN moves on every write), so a click on a page whose data has
+# not changed is served at once. Hot pages are recomputed in the background after each change (see _warm_loop).
+# Live answers (status, sync, Splunk / alert feeds, internet look-ups) and file downloads are never cached.
+_NO_CACHE = re.compile(r"status|/sync|/export|download|/template|/connection|/falcon/|/settings|/alerts|/analysts|/splunk|/seceon"
+                       r"|/intel|/job|/refresh|/asset/passive")
+_CACHE, _HOT, _INFLIGHT = {}, {}, {}
+_CACHE_TTL, _CACHE_MAX, _CACHE_BODY_MAX = 900, 400, 8 << 20
+
+
+@app.middleware("http")
+async def api_cache(request: Request, call_next):
+    path = request.url.path
+    if request.method != "GET" or not path.startswith("/api/") or _NO_CACHE.search(path):
+        return await call_next(request)
+    # pages that show a running scan job read it from memory: a job starting or ending is a different answer
+    live = f"|{int(surface.JOB['running'])}{int(passive.JOB['running'])}"
+    key = path + "?" + "&".join(sorted(request.url.query.split("&"))) + live
+    gen, now = db.GEN[0], time.time()
+    warm = request.headers.get("x-cache-warm") == "1"
+    if not warm:
+        _HOT[key] = (now, _HOT.get(key, (0, 0))[1] + 1)
+    ev = _INFLIGHT.get(key)
+    if ev and ev[0] == gen and not warm:  # the same answer is being computed (e.g. by the warmer): wait for it
+        await anyio.to_thread.run_sync(lambda: ev[1].wait(120))
+    hit = _CACHE.get(key)
+    if hit and hit[0] == db.GEN[0] and now - hit[1] < _CACHE_TTL and not warm:
+        return Response(hit[2], media_type="application/json", headers={"x-cache": "hit"})
+    done = threading.Event()
+    _INFLIGHT[key] = (gen, done)
+    try:
+        resp = await call_next(request)
+        if resp.status_code != 200 or "json" not in (resp.headers.get("content-type") or ""):
+            return resp
+        body = b"".join([chunk async for chunk in resp.body_iterator])
+        if len(body) <= _CACHE_BODY_MAX and gen == db.GEN[0]:  # data did not change while computing
+            if len(_CACHE) >= _CACHE_MAX:
+                for k in sorted(_CACHE, key=lambda k: _CACHE[k][1])[:_CACHE_MAX // 4]:
+                    _CACHE.pop(k, None)
+            _CACHE[key] = (gen, now, body)
+        return Response(body, media_type="application/json", headers={"x-cache": "miss"})
+    finally:
+        done.set()
+        if _INFLIGHT.get(key, (None, None))[1] is done:
+            _INFLIGHT.pop(key, None)
+
+
+def _warm_loop():
+    """After the data changes (sync, upload, re-match), recompute the pages people looked at in the last two hours, so
+    their next click is instant. Waits until the data has been quiet for a few seconds and no re-match / sync is running."""
+    import asyncio
+    warmed, seen, quiet_since = -1, db.GEN[0], time.time()  # -1: warm once after startup too
+    hdrs = [(b"host", b"localhost"), (b"x-cache-warm", b"1")]
+    if config.APP_USERNAME and config.APP_PASSWORD:
+        hdrs.append((b"authorization", b"Basic " + base64.b64encode(f"{config.APP_USERNAME}:{config.APP_PASSWORD}".encode())))
+
+    async def get(key):
+        path, _, query = key.rpartition("|")[0].partition("?")
+        scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "GET", "scheme": "http",
+                 "path": path, "raw_path": path.encode(), "query_string": query.encode(), "headers": hdrs,
+                 "client": ("127.0.0.1", 0), "server": ("127.0.0.1", 80), "root_path": ""}
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(_):
+            pass
+        await app(scope, receive, send)
+
+    while True:
+        time.sleep(2)
+        g = db.GEN[0]
+        if g != seen:
+            seen, quiet_since = g, time.time()
+            continue
+        if g == warmed or time.time() - quiet_since < 3 or inventory.REFRESH["running"] or sync.STATUS["running"]:
+            continue
+        cutoff = time.time() - 7200
+        for k in [k for k, (t, _) in list(_HOT.items()) if t <= cutoff]:
+            _HOT.pop(k, None)
+        keys = sorted(_HOT, key=lambda k: -_HOT[k][1])[:40]  # most visited first (Overview, the shared /api/meta, ...)
+        for k in keys:
+            if db.GEN[0] != g:
+                break
+            try:
+                asyncio.run(get(k))
+            except Exception:  # noqa: BLE001 - warming is best effort
+                logging.getLogger("cache").debug("warm %s failed", k, exc_info=True)
+        if db.GEN[0] == g:
+            warmed = g
+
+
+for _k in ("/api/meta?", "/api/overview?"):  # every session opens these: warm right after a restart
+    _HOT[_k + "|00"] = (time.time(), 1)
+threading.Thread(target=_warm_loop, daemon=True, name="cache-warm").start()
 # compress JSON and the UI bundle (the larger JS chunks shrink ~4x); small responses are sent as they are
 from starlette.middleware.gzip import GZipMiddleware  # noqa: E402
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
@@ -119,7 +221,7 @@ def put_settings(values: dict = Body(...)):
         settings = db.get_settings(c)
         sync.detect_reinstalls(c, settings)
         sync.compute_devices(c, settings)
-        inventory.refresh_matches(c)
+        inventory.refresh_soon(c, label="Applying the new settings")
     return db.public_settings()
 
 
@@ -279,7 +381,7 @@ def clear_falcon_data():
     with db.get_conn() as c:
         for t in ("hosts", "ip_history", "host_events", "sync_runs", "sync_log", "daily_stats", "host_map", "agent_tags"):
             c.execute(f"DELETE FROM {t}")
-        inventory.refresh_matches(c)
+        inventory.refresh_soon(c)
     return {"ok": True}
 
 
@@ -310,10 +412,25 @@ def hosts(request: Request):
     page, size = _page(p)
     with db.get_conn() as c:
         frm, where, params, order = _host_query(c, p)
-        total = c.execute(f"SELECT COUNT(*) FROM {frm} {where}", params).fetchone()[0]
-        rows = db.rows(c, f"SELECT {queries.HOST_LIST_COLS} FROM {frm} {where} {order} LIMIT ? OFFSET ?",
-                       params + [size, (page - 1) * size])
+        if _JOINED.search(where + " " + order):  # filter / sort on duplicate or inventory columns: the full join decides
+            total = c.execute(f"SELECT COUNT(*) FROM {frm} {where}", params).fetchone()[0]
+            rows = db.rows(c, f"SELECT {queries.HOST_LIST_COLS} FROM {frm} {where} {order} LIMIT ? OFFSET ?",
+                           params + [size, (page - 1) * size])
+        else:
+            # count and page on hosts alone (indexes), then join duplicates / inventory / LOB for the rows on this page only;
+            # building those joins for 1 lakh agents to show 50 of them took seconds per click
+            settings = db.get_settings(c)
+            wp = params[queries.from_param_count(settings):]
+            total = c.execute(f"SELECT COUNT(*) FROM hosts h {where}", wp).fetchone()[0]
+            aids = [r[0] for r in c.execute(f"SELECT h.aid FROM hosts h {where} {order} LIMIT ? OFFSET ?", wp + [size, (page - 1) * size])]
+            rows = []
+            if aids:
+                pfrm, pp = queries.page_from(c, aids, settings)
+                rows = db.rows(c, f"SELECT {queries.HOST_LIST_COLS} FROM {pfrm} {order}", pp)
     return {"total": total, "page": page, "size": size, "rows": rows}
+
+
+_JOINED = re.compile(r"\b(d|rc|inv|hm)\.|dup_count|inv_lobs|inv_msps|node_type")
 
 
 @app.get("/api/hosts/export")
@@ -335,7 +452,7 @@ def host_detail(aid: str):
         if not h:
             raise HTTPException(404, "Host not found")
         settings = db.get_settings(c)
-        h["raw"] = db.jloads(h["raw"], {})
+        h["raw"] = db.get_raw(c, aid) or db.jloads(h["raw"], {})
         h["reinstall_of"] = db.jloads(h["reinstall_of"], [])
         ips = db.rows(c, "SELECT ip, kind, source, mac, first_seen, last_seen FROM ip_history WHERE aid=? ORDER BY last_seen DESC", (aid,))
         events = db.rows(c, "SELECT ts, event, details FROM host_events WHERE aid=? ORDER BY id DESC LIMIT 200", (aid,))
@@ -540,7 +657,7 @@ def delete_lob(lob_id: int):
                   "vuln_findings", "vuln_scans", "vuln_scan_hosts", "vuln_assets", "asset_risk", "msp_daily"):
             c.execute(f"DELETE FROM {t} WHERE lob_id=?", (lob_id,))
         c.execute("DELETE FROM lobs WHERE id=?", (lob_id,))
-        inventory.refresh_matches(c)  # full re-join after LOB / MSP / tag changes
+        inventory.refresh_soon(c)  # full re-join after LOB / MSP / tag changes
     return {"ok": True}
 
 
@@ -631,7 +748,7 @@ def delete_lob_type(type_id: int):
         c.execute("DELETE FROM inventory_current WHERE type_id=?", (type_id,))
         c.execute("DELETE FROM lob_types WHERE id=?", (type_id,))
         inventory.tag_duplicates(c, t["lob_id"])
-        inventory.refresh_matches(c)  # full re-join after LOB / MSP / tag changes
+        inventory.refresh_soon(c)  # full re-join after LOB / MSP / tag changes
     return {"ok": True}
 
 
@@ -677,7 +794,7 @@ def delete_msp(msp_id: int):
             raise ValueError(f"{n} inventory nodes still belong to this MSP. Upload an inventory without them first.")
         c.execute("DELETE FROM agent_tags WHERE msp_id=?", (msp_id,))
         c.execute("DELETE FROM msps WHERE id=?", (msp_id,))
-        inventory.refresh_matches(c)  # full re-join after LOB / MSP / tag changes
+        inventory.refresh_soon(c)  # full re-join after LOB / MSP / tag changes
     return {"ok": True}
 
 
@@ -707,7 +824,7 @@ def tags_commit(lob_id: int, data: dict = Body(...)):
         scope = data.get("replace")  # None | 'lob' | 'msp'
         replace_scope = "lob" if scope == "lob" else (data.get("msp_id") if scope == "msp" and data.get("msp_id") else None)
         n = inventory.commit_tags(c, lob_id, rows, parsed["filename"], replace_scope)
-        inventory.refresh_matches(c)  # tags change LOB / MSP attribution everywhere
+        inventory.refresh_soon(c)  # tags change LOB / MSP attribution everywhere
     return {**summary, "tagged": n}
 
 
@@ -742,7 +859,7 @@ def tags_remove(lob_id: int, data: dict = Body(...)):
                 c.execute("DELETE FROM agent_tags WHERE lob_id=?", (lob_id,))
         else:
             c.executemany("DELETE FROM agent_tags WHERE lob_id=? AND aid=?", [(lob_id, a) for a in data.get("aids", [])])
-        inventory.refresh_matches(c)  # full re-join after LOB / MSP / tag changes
+        inventory.refresh_soon(c)  # full re-join after LOB / MSP / tag changes
     return {"ok": True}
 
 
@@ -1002,7 +1119,7 @@ def _apply_edits(c, edits):
         changed += 1
         lobs.add(lob_id)
     for lob_id in lobs:  # claims feed the claim check; Live / feasibility feed nothing heavier
-        inventory.refresh_matches(c, lob_id)
+        inventory.refresh_soon(c, lob_id)
     return changed
 
 
@@ -1425,6 +1542,7 @@ app.include_router(surface.router)
 app.include_router(alerts.router)
 app.include_router(intel.router)
 app.include_router(spotlight.router)
+app.include_router(subnets.router)
 
 FRONTEND = config.BASE_DIR / "frontend" / "out"
 

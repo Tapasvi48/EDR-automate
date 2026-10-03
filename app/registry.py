@@ -698,7 +698,8 @@ def _save_list(kind, data):
         raise HTTPException(400, "Not an IP or subnet: " + ", ".join(bad))
     with db.get_conn() as c:
         c.execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", (LIST_KEYS[kind], json.dumps(out)))
-        refresh(c)
+        from .inventory import refresh_soon
+        refresh_soon(c, label="Recalculating internet exposure", registry_only=True)
     return {"ok": True, "entries": out}
 
 

@@ -154,6 +154,7 @@ def edr_commit(data: dict = Body(...)):
                 VALUES (?,{','.join('?' * len(cols))},?,?,'removed','imported',?,'import',?,1,?,?,?)""",
             [(h["aid"], *[h[k] for k in cols], db.norm_hostname(h["hostname"]), db.ip_to_num(h["local_ip"]),
               h["last_seen"] or now, iid, json.dumps(h["_raw"], default=str), now, now) for h in r["new"]])
+        db.move_raw(c)
         # an old EDR export has one IP per device: it is the device's connection IP (how CrowdStrike assets are identified)
         c.execute("""UPDATE hosts SET connection_ip=local_ip, connection_ip_num=local_ip_num
                      WHERE import_id=? AND COALESCE(connection_ip,'')='' AND COALESCE(local_ip,'')<>''""", (iid,))
@@ -165,7 +166,7 @@ def edr_commit(data: dict = Body(...)):
                       [(h["aid"], now, "imported", json.dumps({"file": parsed["filename"], "last_seen": h["last_seen"]})) for h in r["new"]])
         settings = db.get_settings(c)
         sync.detect_reinstalls(c, settings)
-        inventory.refresh_matches(c)
+        inventory.refresh_soon(c)
     return {"import_id": iid, "rows": len(rows), "added": len(r["new"]), "live_now": len(r["live_now"]), "known": len(r["known"]),
             "reinstalled": r["reinstalled"]}
 

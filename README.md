@@ -63,9 +63,39 @@ npm run build                                   # rebuild the static UI served b
 | Full host details | `get_device_details` (PostDeviceDetailsV2, 5,000 per call, parallel) |
 | Real online state | `get_online_state` (100 per call, parallel) |
 | NIC / IP history | `query_network_address_history` (new + IP-changed hosts) |
+| Detections (Alerts: Read) | `query_alerts_v2` / `get_alerts_v2`: the full window (`detections_days`) once a day, otherwise only alerts created or updated since the last sync. Windows with more than 10,000 alerts are split by time, since the API refuses offset + limit > 10,000 |
+| Spotlight (Vulnerabilities: Read) | `query_vulnerabilities_combined`: every open finding once a week, otherwise only findings updated since the last sync (closed ones are removed) |
+| Sensor builds, supported Linux kernels | once a day (skipped by the syncs in between) |
+
+**Large data (1 lakh hosts / inventory rows).**
+- Page answers are cached until the data changes, and the most visited pages are recomputed in the background after every
+  sync, upload or re-match. Clicks on unchanged data return at once.
+- Re-matching (inventory ↔ CrowdStrike, exposure, risk) runs in the background once there are more than 20,000 hosts plus
+  inventory rows. Saving a LOB, tag, matrix, whitelist, scan or NIAM change returns immediately, and pages refresh when
+  matching finishes (shown in the top bar).
+- The full CrowdStrike device record is kept in its own table (`host_raw`), so counts over hosts do not read it.
 
 Rate limits (429) are retried using Falcon's `X-RateLimit-RetryAfter` header. As a safety guard, a sync aborts if Falcon suddenly returns
 fewer than half of the previously active hosts, so an API or scope problem can't mark the whole fleet as removed.
+
+**Sync timing.** Every step in the sync progress shows how long it took. Full device records are read once a day; the syncs
+in between fetch records only for agents that are new, came back, or changed / checked in since the last sync
+(`modified_timestamp` or `last_seen` after it). The online state of every agent is still refreshed on each sync.
+
+## CrowdStrike detections and Subnets & VLANs
+- **CrowdStrike → Detections** (`/detections/`) lists the stored detections. You can filter by date range, severity, status,
+  tactic, LOB, open, unassigned and exposed assets. It also shows a per-day chart, the most affected hosts and the command
+  line / description of each detection. **Fetch detections now** pulls them without a full sync. When the last sync skipped
+  detections (for example a missing *Alerts: Read* scope), the reason is shown on the page.
+- **Attack surface → Subnets & VLANs** (`/subnets/`) groups every known asset in one of three ways:
+  - by subnet, from /16 to /28;
+  - by the default gateway CrowdStrike reports (agents behind one gateway share a layer-2 segment, i.e. a VLAN; assets
+    without an agent take the gateway most agents in their /24 use);
+  - by a VLAN column in an inventory (any column whose name contains "VLAN").
+
+  For each segment it shows assets, EDR coverage, feasible assets without EDR, internet-exposed assets, critical / high vulns,
+  LOBs (and segments shared by several LOBs), node types and gateways. Expand a row to see its assets. Asset 360 → Related
+  shows the asset's own subnet with a link here.
 
 ## Detection logic
 - **Removed hosts are never deleted locally.** If an AID disappears from the console, it is kept and classified:

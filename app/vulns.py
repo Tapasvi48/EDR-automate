@@ -169,8 +169,8 @@ def commit(c, lob_id, findings, warnings, *, filename, note, uploaded_by, mappin
         last_by_ip[f["ip"]] = max(last_by_ip.get(f["ip"], ""), d)
     c.executemany("INSERT OR REPLACE INTO vuln_scan_hosts(lob_id, ip, scan_id, scanned_at) VALUES (?,?,?,?)",
                   [(lob_id, ip, sid, d) for ip, d in last_by_ip.items()])
-    from .inventory import refresh_matches  # full re-join: vuln assets, NIAM, risk, asset registry
-    refresh_matches(c)
+    from .inventory import refresh_soon  # full re-join: vuln assets, NIAM, risk, asset registry
+    refresh_soon(c, label="Matching the scan with inventory and CrowdStrike")
     return {"scan_id": sid, "rows": len(findings), "hosts": len(scanned), "new": len(new), "reopened": len(reopened),
             "still_open": len(still), "fixed": len(fixed), "scan_date": scan_date, "warnings": warnings}
 
@@ -532,6 +532,6 @@ def vuln_clear(lob_id: int):
     with db.get_conn() as c:
         for t in ("vuln_findings", "vuln_scans", "vuln_scan_hosts", "vuln_assets"):
             c.execute(f"DELETE FROM {t} WHERE lob_id=?", (lob_id,))
-        from .inventory import refresh_matches
-        refresh_matches(c)
+        from .inventory import refresh_soon
+        refresh_soon(c)
     return {"ok": True}

@@ -157,8 +157,8 @@ def commit(c, nodes, filename="", note="", uploaded_by="", mapping=None, warning
                   [(n["ne_id"], _key(n)[1], n["host"], n["ip"], n["ip_num"], n["hostname_norm"], json.dumps(n["extra"]), uid, uid, now, now)
                    for n in nodes])
     c.executemany("UPDATE niam_nodes SET present=0, removed_at=? WHERE rowid=?", [(now, r["rowid"]) for r in removed])
-    from .inventory import refresh_matches  # full re-join (includes niam.refresh, risk and the asset registry)
-    refresh_matches(c)
+    from .inventory import refresh_soon  # full re-join (includes niam.refresh, risk and the asset registry)
+    refresh_soon(c)
     return {"upload_id": uid, "rows": len(nodes), "added": len(added), "removed": len(removed), "changed": len(changed)}
 
 
@@ -314,6 +314,6 @@ def niam_clear():
     with db.get_conn() as c:
         c.execute("DELETE FROM niam_nodes")
         c.execute("DELETE FROM niam_uploads")
-        from .inventory import refresh_matches
-        refresh_matches(c)
+        from .inventory import refresh_soon
+        refresh_soon(c)
     return {"ok": True}

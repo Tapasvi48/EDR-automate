@@ -239,7 +239,7 @@ def sod_commit(data: dict = Body(...)):
         c.execute("DELETE FROM vuln_exceptions")
         c.executemany(f"INSERT INTO vuln_exceptions({', '.join(KEYS)}, upload_id, created_at) VALUES ({','.join('?' * (len(KEYS) + 2))})",
                       [(*[r[k] for k in KEYS], uid, db.now_iso()) for r in rows])
-        inventory.refresh_matches(c)  # re-join: accepted findings leave open counts, risk and exposure
+        inventory.refresh_soon(c)  # re-join: accepted findings leave open counts, risk and exposure
         accepted = c.execute("SELECT COUNT(*) FROM vuln_findings WHERE status='accepted'").fetchone()[0]
     return {"message": f"{len(rows)} exceptions loaded · {accepted} findings now accepted", "rows": len(rows)}
 
@@ -318,7 +318,7 @@ def sod_export(request: Request):
 def sod_clear():
     with db.get_conn() as c:
         c.execute("DELETE FROM vuln_exceptions")
-        inventory.refresh_matches(c)
+        inventory.refresh_soon(c)
     return {"ok": True}
 
 

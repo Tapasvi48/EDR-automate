@@ -26,6 +26,7 @@ const NAV: { section?: string; items: { href: string; label: string; icon: React
   { section: "Attack surface", items: [
     { href: "/surface/", label: "Attack surface", icon: Earth },
     { href: "/passive-scan/", label: "Internet DB scan", icon: ScanSearch },
+    { href: "/subnets/", label: "Subnets & VLANs", icon: Network },
   ] },
   { section: "Leadership & SOC", items: [
     { href: "/alerts/", label: "Alerts", icon: BellRing },
@@ -35,6 +36,7 @@ const NAV: { section?: string; items: { href: string; label: string; icon: React
   ] },
   { section: "CrowdStrike", items: [
     { href: "/assets/", label: "CrowdStrike assets", icon: Monitor },
+    { href: "/detections/", label: "Detections", icon: Siren },
     { href: "/health/", label: "Offline & stale", icon: WifiOff },
     { href: "/edr-history/", label: "EDR history", icon: History },
     { href: "/duplicates/", label: "Duplicates", icon: Copy },

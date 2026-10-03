@@ -3,6 +3,7 @@ import json
 import re
 from functools import lru_cache
 import sqlite3
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
@@ -764,6 +765,7 @@ def connect():
             pass
     conn.row_factory = sqlite3.Row
     conn.create_function("ip_in", 2, ip_in, deterministic=True)
+    conn.set_authorizer(_write_watch(conn))
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -772,20 +774,84 @@ def connect():
     return conn
 
 
+# ------------------------------------------------------------------ data generation (drives the API response cache)
+# GEN[0] changes whenever a statement that writes a real table is prepared and again when that connection finishes, so a
+# cached answer computed under one generation is never served after the data it was built from changed.
+GEN = [0]
+_GEN_LOCK = threading.Lock()
+_GEN_IGNORE = {"sync_log"}  # progress lines written during a sync do not change what any page shows
+_WRITE_ACTIONS = {sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE, sqlite3.SQLITE_DROP_TABLE,
+                  sqlite3.SQLITE_CREATE_TABLE, sqlite3.SQLITE_ALTER_TABLE}
+_dirty = set()  # ids of connections that wrote
+_tl = threading.local()
+
+
+def bump_gen():
+    with _GEN_LOCK:
+        GEN[0] += 1
+
+
+def _write_watch(conn):
+    cid = id(conn)
+
+    def auth(action, arg1, arg2, dbname, source):
+        if action in _WRITE_ACTIONS and dbname in ("main", None) and arg1 not in _GEN_IGNORE and not str(arg1 or "").startswith("sqlite_"):
+            _dirty.add(cid)
+            bump_gen()
+        return sqlite3.SQLITE_OK
+    return auth
+
+
+def after_commit(fn):
+    """Run fn once the innermost get_conn() of this thread has committed (right away outside one)."""
+    stack = getattr(_tl, "stack", None)
+    if stack:
+        stack[-1].append(fn)
+    else:
+        fn()
+
+
 @contextmanager
 def get_conn():
     conn = connect()
+    stack = _tl.__dict__.setdefault("stack", [])
+    stack.append([])
+    ok = False
     try:
         yield conn
         conn.commit()
+        ok = True
     except Exception:
         conn.rollback()
         raise
     finally:
         conn.close()
+        if id(conn) in _dirty:
+            _dirty.discard(id(conn))
+            bump_gen()
+        callbacks = stack.pop()
+        if ok:
+            for fn in callbacks:
+                fn()
 
 
 def init_db():
+    _init_db()
+    with get_conn() as c:
+        done = c.execute("SELECT value FROM settings WHERE key='host_raw_v1'").fetchone()
+        if not done:
+            c.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('host_raw_v1', '1')")
+    if not done:
+        import logging
+        logging.getLogger("db").info("Compacting the database once after moving device records out of hosts (may take a minute)")
+        conn = connect()
+        try:
+            conn.execute("VACUUM")
+        finally:
+            conn.close()
+
+
+def _init_db():
     with get_conn() as c:
         for table, col, typ in MIGRATIONS:
             exists = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
@@ -828,10 +894,26 @@ def init_db():
         todo = c.execute("SELECT aid, connection_ip FROM hosts WHERE connection_ip_num IS NULL AND COALESCE(connection_ip,'')<>''").fetchall()
         if todo:
             c.executemany("UPDATE hosts SET connection_ip_num=? WHERE aid=?", [(ip_to_num(r[1]), r[0]) for r in todo])
+        c.execute("CREATE TABLE IF NOT EXISTS host_raw (aid TEXT PRIMARY KEY, raw TEXT)")
+        moved = move_raw(c)
         # built-in template: keep its columns in step with the standard fields (new fields added later)
         c.execute("UPDATE templates SET mapping=?, description=? WHERE name=?",
                   (json.dumps(dict(config.INVENTORY_FIELDS)), "Default inventory layout: IP, Node Name, MSP, Node Type, Domain, Live/Non Live, "
                    "OS, EDR Feasible, EDR Installed, Remarks, NIAM Integrated, NE ID", config.STANDARD_TEMPLATE))
+
+
+def move_raw(c):
+    """The full CrowdStrike device record of each agent lives in host_raw, not in hosts: at several KB per agent it made
+    every count over hosts (Overview, coverage, exposure) read the whole record. Moves any record still in hosts."""
+    n = c.execute("INSERT OR REPLACE INTO host_raw(aid, raw) SELECT aid, raw FROM hosts WHERE raw IS NOT NULL").rowcount
+    if n:
+        c.execute("UPDATE hosts SET raw=NULL WHERE raw IS NOT NULL")
+    return n
+
+
+def get_raw(c, aid):
+    r = c.execute("SELECT raw FROM host_raw WHERE aid=?", (aid,)).fetchone()
+    return jloads(r[0], {}) if r and r[0] else {}
 
 
 # (table, ip column, ip number column or None)

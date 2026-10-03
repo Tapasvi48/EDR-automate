@@ -174,7 +174,9 @@ def asset_context(ips: str = "", names: str = "", aids: str = ""):
     hn = [db.norm_hostname(h) for h in names.split(",") if h]
     aid_l = [a for a in aids.split(",") if a]
     with db.get_conn() as c:
-        return {"exceptions": asset_exceptions(c, ipl), "related": related_assets(c, ipl, hn),
+        from .subnets import neighbours
+        subnet = next((n for n in (neighbours(c, ip) for ip in ipl) if n), None)
+        return {"exceptions": asset_exceptions(c, ipl), "related": related_assets(c, ipl, hn), "subnet": subnet,
                 "last_good": last_known_good(c, ipl, hn, aid_l)}
 
 

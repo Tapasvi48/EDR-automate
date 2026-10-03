@@ -65,12 +65,28 @@ PLUGINS = [
 ]
 
 
+def _gateway(ip):
+    """Sample default gateway: .1 of the /24, or .129 for the upper half of a /24 split into two /25 VLANs (10.20.x)."""
+    if not ip or ":" in ip:
+        return ""
+    a, b, c3, d = ip.split(".")
+    return f"{a}.{b}.{c3}.129" if b == "20" and int(d) >= 128 else f"{a}.{b}.{c3}.1"
+
+
+def _vlan(ip):
+    try:
+        a, b, c3, d = (int(x) for x in ip.split("."))
+    except (ValueError, AttributeError):
+        return ""
+    return str(100 + c3 * 2 + (1 if b == 20 and d >= 128 else 0) + (b // 10) * 100)
+
+
 def _host(rng, aid, hostname, ip, conn_ip, os_, first_seen, last_seen, domain, site, sensor=None, connection_ip=None):
     """conn_ip is the public NAT (external) address; the connection IP is the agent's own interface IP, as in Falcon."""
     platform, ver, product = os_
     return {
         "device_id": aid, "cid": "demo0000000000000000000000000000", "hostname": hostname, "local_ip": ip, "external_ip": conn_ip,
-        "connection_ip": connection_ip or ip, "default_gateway_ip": "", "mac_address": "00-50-56-%02x-%02x-%02x" % (rng.randrange(256), rng.randrange(256), rng.randrange(256)),
+        "connection_ip": connection_ip or ip, "default_gateway_ip": _gateway(ip), "mac_address": "00-50-56-%02x-%02x-%02x" % (rng.randrange(256), rng.randrange(256), rng.randrange(256)),
         "platform_name": platform, "os_version": ver, "os_product_name": product, "os_build": "", "kernel_version": "",
         "product_type_desc": "Server", "chassis_type_desc": "Virtual", "machine_domain": domain, "site_name": site, "ou": [],
         "agent_version": sensor or rng.choice(SENSORS), "containment_status": "normal", "reduced_functionality_mode": "no",
@@ -233,6 +249,7 @@ def seed(c):
     now = db.now_iso()
     c.executemany(f"INSERT INTO hosts ({', '.join(cols)}, online_checked_at, db_first_synced, db_last_synced) VALUES "
                   f"({', '.join('?' * len(cols))}, ?, ?, ?)", [[h[k] for k in cols] + [now, now, now] for h in mapped])
+    c.executemany("INSERT OR REPLACE INTO host_raw(aid, raw) VALUES (?,?)", [(h["aid"], h["raw"]) for h in mapped])
     c.executemany("UPDATE hosts SET removal_type=?, removed_at=? WHERE aid=?", [(t, at, a) for a, (t, at) in removed_meta.items()])
     c.executemany("UPDATE hosts SET removal_type='hidden', removed_at=? WHERE aid=?", [(ts(rng.uniform(2, 40)), a) for a, s in states.items() if s[0] == "hidden"])
     c.executemany("""INSERT OR IGNORE INTO ip_history(aid, ip, ip_num, mac, kind, source, first_seen, last_seen) VALUES (?,?,?,?,'local','sync',?,?)""",
@@ -261,7 +278,8 @@ def seed(c):
     # ---- LOBs, MSPs and inventories (through the normal upload path)
     std = db.standard_template_id(c)
     base = [(k, lbl) for k, lbl in inventory.config.INVENTORY_FIELDS if k not in ("niam_integrated", "ne_id")]  # NIAM comes from the dump
-    headers = [lbl for _, lbl in base] + ["Application ID", "Internet Facing", "Public IP"]
+    headers = [lbl for _, lbl in base] + ["Application ID", "Internet Facing", "Public IP", "VLAN"]
+    ip_i = [k for k, _ in base].index("ip")
     mapping = {k: lbl for k, lbl in base}
     lob_ids = {}
     for lob, desc, owner, msps, *_ in LOBS:
@@ -270,6 +288,8 @@ def seed(c):
         for m in msps:
             c.execute("INSERT INTO msps(lob_id, name, contact, created_at) VALUES (?,?,?,?)", (lid, m, f"{m.lower().replace(' ', '')}-noc@partner.example", now))
         rows = inv_rows[lob]
+        for r in rows:  # VLAN column in two of the inventories (Subnets & VLANs → By inventory VLAN)
+            r.append(_vlan(r[ip_i]) if lob in (LOBS[0][0], LOBS[1][0]) else "")
         # v1 (older) then v2: a few nodes added / removed / changed, so History has something to show
         v1 = [r[:] for r in rows[: int(len(rows) * 0.93)]]
         for r in v1[::17]:
@@ -531,11 +551,12 @@ def seed_detections_and_satellite(c, rng):
     pols = [("pp-std-srv", "Servers - Standard", "Windows", 1), ("pp-strict-dmz", "DMZ - Aggressive", "Windows", 1),
             ("pp-linux", "Linux Servers", "Linux", 1), ("pp-detect-only", "Detect only (exception)", "Windows", 1)]
     c.executemany("INSERT OR REPLACE INTO prevention_policies VALUES (?,?,?,?,?,?)", [(i, n, pl, e, "", now) for i, n, pl, e in pols])
-    for h in db.rows(c, "SELECT aid, platform_name, raw FROM hosts WHERE console_state='active'"):
+    db.move_raw(c)
+    for h in db.rows(c, "SELECT h.aid, h.platform_name, r.raw FROM hosts h LEFT JOIN host_raw r ON r.aid=h.aid WHERE h.console_state='active'"):
         d = json.loads(h["raw"] or "{}")
         pid = ("pp-linux" if h["platform_name"] == "Linux" else rng.choice(["pp-std-srv", "pp-std-srv", "pp-strict-dmz", "pp-detect-only"]))
         d["device_policies"] = {"prevention": {"policy_id": pid, "applied": rng.random() > 0.08, "applied_date": ts(rng.uniform(1, 40))}}
-        c.execute("UPDATE hosts SET raw=? WHERE aid=?", (json.dumps(d), h["aid"]))
+        c.execute("INSERT OR REPLACE INTO host_raw(aid, raw) VALUES (?,?)", (h["aid"], json.dumps(d)))
     # Spotlight: most scanner CVEs also found by the agent, plus some only the agent sees
     spot = []
     for f in db.rows(c, """SELECT DISTINCT f.cve, f.severity, h.aid, h.hostname, h.local_ip FROM vuln_findings f JOIN hosts h ON h.local_ip=f.ip

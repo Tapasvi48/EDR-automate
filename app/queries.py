@@ -23,22 +23,44 @@ def excl_sql(col, settings):
     return " AND ".join(parts), params
 
 
-def _pair_groups(settings, having):
+def _pair_groups(settings, having, extra=""):
     ex1, p1 = excl_sql("connection_ip", settings)
     ex2, p2 = excl_sql("local_ip", settings)
     return (f"""SELECT connection_ip cip, local_ip lip, COUNT(*) dup_count FROM hosts
-                WHERE console_state='active' AND COALESCE(connection_ip,'')<>'' AND COALESCE(local_ip,'')<>'' AND {ex1} AND {ex2}
+                WHERE console_state='active' AND COALESCE(connection_ip,'')<>'' AND COALESCE(local_ip,'')<>'' AND {ex1} AND {ex2} {extra}
                 GROUP BY connection_ip, local_ip HAVING COUNT(*) > 1 AND {having}"""), p1 + p2
 
 
-def dup_ip_subquery(settings):
+def dup_ip_subquery(settings, extra=""):
     """Duplicate agents: active agents with the same connection IP AND local IP, at most one of them online."""
-    return _pair_groups(settings, "SUM(online_state='online') <= 1")
+    return _pair_groups(settings, "SUM(online_state='online') <= 1", extra)
 
 
-def routing_conflict_subquery(settings):
+def routing_conflict_subquery(settings, extra=""):
     """Routing conflict: two or more ONLINE agents with the same connection IP AND local IP."""
-    return _pair_groups(settings, "SUM(online_state='online') >= 2")
+    return _pair_groups(settings, "SUM(online_state='online') >= 2", extra)
+
+
+def from_param_count(settings):
+    """How many of build_host_query()'s params belong to its FROM clause (they come first)."""
+    return len(dup_ip_subquery(settings)[1]) + len(routing_conflict_subquery(settings)[1])
+
+
+def page_from(c, aids, settings):
+    """(FROM clause, params) like build_host_query()'s, for the given agents only (one page of the hosts list): duplicate
+    groups, inventory and LOB columns are worked out for those agents instead of for every agent in the database."""
+    c.execute("CREATE TEMP TABLE IF NOT EXISTS _page_aids (aid TEXT PRIMARY KEY)")
+    c.execute("DELETE FROM _page_aids")
+    c.executemany("INSERT OR IGNORE INTO _page_aids VALUES (?)", [(a,) for a in aids])
+    pairs = "AND connection_ip || '|' || local_ip IN (SELECT p.connection_ip || '|' || p.local_ip FROM hosts p WHERE p.aid IN (SELECT aid FROM _page_aids))"
+    dsql, dp = dup_ip_subquery(settings, pairs)
+    rsql, rp = routing_conflict_subquery(settings, pairs)
+    inv = INV_JOIN.replace("WHERE ic.matched_aid IS NOT NULL", "WHERE ic.matched_aid IN (SELECT aid FROM _page_aids)") \
+                  .replace("GROUP BY hm.aid", "WHERE hm.aid IN (SELECT aid FROM _page_aids) GROUP BY hm.aid")
+    frm = (f"hosts h LEFT JOIN ({dsql}) d ON d.cip = h.connection_ip AND d.lip = h.local_ip AND h.console_state='active' "
+           f"LEFT JOIN ({rsql}) rc ON rc.cip = h.connection_ip AND rc.lip = h.local_ip AND h.console_state='active' {inv} "
+           "WHERE h.aid IN (SELECT aid FROM _page_aids)")
+    return frm, list(dp) + list(rp)
 
 
 INV_JOIN = """LEFT JOIN (

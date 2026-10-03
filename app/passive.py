@@ -180,7 +180,7 @@ def _worker(jid, targets, source):
                       (db.now_iso(), JOB["done"], JOB["found"], JOB["errors"], jid))
         JOB["message"] = f"{JOB['done']:,} looked up · {JOB['found']:,} with open ports" + (f" · {JOB['errors']} errors" if JOB["errors"] else "")
         from . import inventory
-        inventory.refresh_async("Updating exposure from the passive scan")  # open ports count as exposure evidence
+        inventory.refresh_async("Updating exposure from the passive scan", registry_only=True)  # open ports count as exposure evidence
     except Exception as e:  # noqa: BLE001
         JOB["message"] = f"Stopped: {e}"
     finally:
@@ -215,7 +215,7 @@ def passive_scan_one(data: dict = Body(...)):
         rows = [_row(r) for r in db.rows(c, f"SELECT * FROM passive_results WHERE ip IN ({','.join('?' * len(targets[:8]))})",
                                          [t[0] for t in targets[:8]])]
     from . import inventory
-    inventory.refresh_async("Updating exposure from the passive scan")  # answer now; exposure catches up in the background
+    inventory.refresh_async("Updating exposure from the passive scan", registry_only=True)  # answer now; exposure catches up in the background
     return {"rows": rows}
 
 
