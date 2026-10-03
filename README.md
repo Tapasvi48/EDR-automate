@@ -82,6 +82,20 @@ fewer than half of the previously active hosts, so an API or scope problem can't
 in between fetch records only for agents that are new, came back, or changed / checked in since the last sync
 (`modified_timestamp` or `last_seen` after it). The online state of every agent is still refreshed on each sync.
 
+## WHOIS, enterprise marks and deleting scans
+- **WHOIS** for every public IP on the Attack surface and in Internet DB scan results comes from RDAP via rdap.org (free, no
+  key). rdap.org sends each IP to its registry (APNIC, RIPE NCC, ARIN, LACNIC, AFRINIC). For each IP you get the netname,
+  description, registrant organisation, country and registered range.
+  - One answer covers the whole registered block, so a scanned /24 usually costs one look-up.
+  - It runs with **Look up prefixes & WHOIS**, and automatically after every Internet DB scan.
+  - /24 subnets, advertised prefixes and your ASNs' announced prefixes show their WHOIS too.
+- **Enterprise / non-enterprise:** filter by WHOIS name, WHOIS description / organisation text, search or class. Then mark
+  the selected rows, or everything the filter matches, as enterprise or non-enterprise. **All others → non-enterprise**
+  marks every IP outside the filter that has no mark yet. Marks are kept per IP and show in exports.
+- **Deleting scans:** Internet DB scan → Scan jobs lists every scan (selections, uploads, prefix / range scans). Each one can
+  be opened (Results) or deleted with the results it found. Selected result rows can be deleted too. IPs that only a deleted
+  scan knew leave the Attack surface, and exposure is recalculated.
+
 ## CrowdStrike detections and Subnets & VLANs
 - **CrowdStrike → Detections** (`/detections/`) lists the stored detections. You can filter by date range, severity, status,
   tactic, LOB, open, unassigned and exposed assets. It also shows a per-day chart, the most affected hosts and the command

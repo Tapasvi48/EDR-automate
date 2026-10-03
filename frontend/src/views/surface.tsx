@@ -12,6 +12,7 @@ import { Badge, Button, Callout, Card, CardHeader, FilterSelect, Input, Kpi, Kpi
 import { DataTable, SimpleTable, type Column } from "@/components/data-table";
 import { EdrBadge, Mono } from "@/components/badges";
 import { CveChips, PortChips } from "./passive-scan";
+import { ClassBadge, ClassifyBar, WhoisCell, WhoisFilters } from "@/components/whois";
 
 const LINK = (ip: string) => `https://www.shodan.io/search?query=${encodeURIComponent(ip)}`;
 
@@ -22,6 +23,8 @@ export default function Surface() {
   const tab = state.tab || "ips";
   const [cfg, setCfg] = React.useState(false);
   const [how, setHow] = React.useState(false);
+  const [sel, setSel] = React.useState<Set<string>>(new Set());
+  const [total, setTotal] = React.useState(0);
   const { data, error, refetch } = useQuery({ queryKey: ["surface"], queryFn: () => api<any>("/api/surface"),
     refetchInterval: (q) => ((q.state.data as any)?.job?.running ? 1500 : false) });
   const pst = useQuery({ queryKey: ["passive-status"], queryFn: () => api<any>("/api/passive/status"),
@@ -47,13 +50,18 @@ export default function Surface() {
     { key: "prefix", label: "Advertised prefix", render: (r) => r.prefix ? <span><Mono>{r.prefix}</Mono>{r.asn && <span className="block text-[11px] text-muted">AS{r.asn} {r.holder}</span>}</span> : <span className="text-muted">–</span> },
     { key: "ports", label: "Open ports", wrap: true, render: (r) => r.scanned ? <PortChips ports={r.ports} /> : <span className="text-muted">not scanned</span> },
     { key: "vulns", label: "CVEs", wrap: true, render: (r) => r.scanned ? <CveChips vulns={r.vulns} /> : <span className="text-muted">–</span> },
+    { key: "whois", label: "WHOIS", wrap: true, render: (r) => <WhoisCell r={r} /> },
+    { key: "cls", label: "Class", render: (r) => <ClassBadge c={r.cls} /> },
     { key: "gn", label: "GreyNoise", render: (r) => r.gn_noise ? <Badge tone="crit">seen scanning</Badge> : r.gn_riot ? <Badge tone="info">benign service</Badge> : <span className="text-muted">–</span> },
     { key: "edr_status", label: "EDR", hidden: true, render: (r) => <EdrBadge s={r.edr_status} /> },
   ];
   const groupCols = (label: string, onPick: (k: string) => void, withScan?: boolean): Column[] => [
     { key: "key", label, render: (g) => <button className="font-mono text-[12.5px] text-accent-fg hover:underline" onClick={() => onPick(g.key)}>{g.key}</button> },
     { key: "holder", label: "Holder", render: (g) => g.asn ? <span className="text-[12px]">AS{g.asn} {g.holder}</span> : <span className="text-muted">–</span> },
+    { key: "whois_name", label: "WHOIS", wrap: true, render: (g) => g.whois_name ? <span className="flex max-w-[260px] flex-col"><b className="truncate text-[12px]">{g.whois_name}</b>
+      {(g.whois_descr || g.whois_org) && <span className="line-clamp-2 text-[11.5px] text-fg-2">{g.whois_descr || g.whois_org}</span>}</span> : <span className="text-[11.5px] text-muted">not looked up</span> },
     { key: "ips", label: "Known public IPs", num: true }, { key: "assets", label: "Assets", num: true },
+    { key: "cls", label: "Enterprise", render: (g) => (g.enterprise || g.non_enterprise) ? <span className="text-[12px]"><b className="text-good-fg">{g.enterprise}</b> / <span className="text-muted">{g.non_enterprise} non</span></span> : <span className="text-[11.5px] text-muted">unmarked</span> },
     { key: "lobs", label: "LOB", wrap: true, render: (g) => <span className="text-[12px]">{g.lobs || "–"}</span> },
     { key: "scanned", label: "Scanned", num: true, render: (g) => <span className={g.scanned < g.ips ? "text-warn-fg" : ""}>{g.scanned} / {g.ips}</span> },
     { key: "with_ports", label: "Open ports", num: true, render: (g) => g.with_ports ? <b className="text-crit-fg">{g.with_ports}</b> : "0" },
@@ -66,7 +74,7 @@ export default function Surface() {
         sub="Every public IP the console knows (inventory, communication matrix, CrowdStrike, VA scans, passive scans and your own ranges), grouped by /24 and by the BGP prefix that advertises it, with what the internet sees on each."
         actions={<>
           <Button onClick={() => setCfg(true)}><Settings2 /> Your ranges & ASNs</Button>
-          <Button onClick={() => run("/api/surface/enrich", { only_new: true }, "Looking up prefixes and GreyNoise")} disabled={job.running}><Globe2 /> Look up prefixes</Button>
+          <Button onClick={() => run("/api/surface/enrich", { only_new: true }, "Looking up prefixes and GreyNoise")} disabled={job.running}><Globe2 /> Look up prefixes & WHOIS</Button>
           <Button variant="primary" onClick={() => run("/api/surface/scan", { scope: "known" }, "Internet DB scan started")} disabled={pjob?.running}><Radar /> Scan all public IPs</Button>
         </>} />
       {data.demo && <Callout tone="info" className="mb-4">Sample data mode: InternetDB, RIPEstat and GreyNoise answers are simulated.</Callout>}
@@ -83,6 +91,7 @@ export default function Surface() {
         <Kpi label="Open ports seen" value={s.with_ports} tone="crit" foot="by the internet (InternetDB)" active={state.show === "ports"} onClick={() => replaceAll({ tab: "ips", show: "ports" })} />
         <Kpi label="With known CVEs" value={s.with_cves} tone="serious" active={state.show === "cves"} onClick={() => replaceAll({ tab: "ips", show: "cves" })} />
         <Kpi label="Seen scanning the internet" value={s.noisy} tone="crit" foot="GreyNoise" active={state.show === "noisy"} onClick={() => replaceAll({ tab: "ips", show: "noisy" })} />
+        <Kpi label="Enterprise" value={s.enterprise} tone="good" foot={`${fmtN(s.non_enterprise)} non-enterprise · ${fmtN(s.ips - s.enterprise - s.non_enterprise)} unmarked`} active={state.cls === "enterprise"} onClick={() => replaceAll({ tab: "ips", cls: "enterprise" })} />
         <Kpi label="Advertised, unknown" value={s.adv_unknown} tone="violet" foot={`of ${fmtN(s.adv_prefixes)} prefixes your ASNs announce`} active={tab === "advertised"} onClick={() => replaceAll({ tab: "advertised" })} />
       </KpiGrid>
       <Card className="mb-4">
@@ -104,15 +113,20 @@ export default function Surface() {
         { id: "prefixes", label: "By advertised prefix", count: s.prefixes }, { id: "asns", label: "ASNs", count: s.asns },
         { id: "advertised", label: job.running && job.kind.includes("advertised") ? "Advertised by your ASNs · fetching…" : "Advertised by your ASNs", count: s.adv_prefixes }]} />
       {tab === "ips" && (
+        <>
+        <ClassifyBar path="/api/surface/classify" filter={state} selected={sel} total={total} onDone={() => setSel(new Set())} />
         <DataTable endpoint="/api/surface/ips" exportPath="/api/surface/ips/export" state={state} setState={set} omit={["tab"]} noun="public IPs" storageKey="surface"
-          rowKey={(r: any) => r.ip} onReset={() => replaceAll({ tab })} sortable={false} columns={ipCols}
+          rowKey={(r: any) => r.ip} onReset={() => replaceAll({ tab })} sortable={false} columns={ipCols} selected={sel} onSelectedChange={setSel}
+          onData={(d: any) => setTotal(d.total)}
           filters={<>
             <SearchInput className="w-72" value={state.q || ""} onChange={(v) => set({ q: v })} placeholder="IP, asset, LOB, holder, CVE…" />
             <FilterSelect label="Show" value={state.show} onChange={(v) => set({ show: v })} any="All"
               options={[["unscanned", "Not scanned"], ["ports", "Open ports"], ["cves", "Known CVEs"], ["noisy", "Seen scanning"], ["exposed", "Marked exposed"]]} />
+            <WhoisFilters facetsPath="/api/surface/whois-facets" state={state} set={set} />
             {(state.subnet || state.prefix || state.asn) && <Badge tone="info">{state.subnet || state.prefix || `AS${state.asn}`}
               <button className="ml-1" onClick={() => set({ subnet: undefined, prefix: undefined, asn: undefined })}>×</button></Badge>}
           </>} />
+        </>
       )}
       {tab === "subnets" && <Card><SimpleTable rows={data.subnets} maxHeight="65vh" columns={groupCols("/24 subnet", (k) => replaceAll({ tab: "ips", subnet: k }), true)} /></Card>}
       {tab === "prefixes" && <Card>{!s.looked_up ? <div className="p-6 text-[13px] text-muted">Prefixes are not looked up yet: use <b>Look up prefixes</b>.</div>
@@ -129,6 +143,8 @@ export default function Surface() {
             right={<Button size="sm" variant="ghost" disabled={!data.our_asns.length || job.running} onClick={() => run("/api/surface/advertised", {}, "Refreshing advertised prefixes")}>Refresh now</Button>} />
           <SimpleTable rows={data.advertised} maxHeight="60vh" empty={data.our_asns.length ? "Not fetched yet: Refresh from RIPEstat" : "Mark the ASNs that are yours (Your ranges & ASNs)"} columns={[
             { key: "prefix", label: "Prefix", render: (a: any) => <Mono>{a.prefix}</Mono> }, { key: "asn", label: "ASN", render: (a: any) => `AS${a.asn}` },
+            { key: "whois_name", label: "WHOIS", wrap: true, render: (a: any) => a.whois_name ? <span className="flex max-w-[260px] flex-col"><b className="text-[12px]">{a.whois_name}</b>
+              {(a.whois_descr || a.whois_org) && <span className="line-clamp-2 text-[11.5px] text-fg-2">{a.whois_descr || a.whois_org}</span>}</span> : <span className="text-[11.5px] text-muted">–</span> },
             { key: "size", label: "Addresses", num: true, render: (a: any) => fmtN(a.size) },
             { key: "known", label: "Known public IPs", num: true, render: (a: any) => a.known ? fmtN(a.known) : <Badge tone="violet">none — unknown space</Badge> },
             { key: "scanned", label: "Scanned", num: true }, { key: "with_ports", label: "Open ports", num: true },

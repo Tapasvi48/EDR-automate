@@ -181,10 +181,21 @@ def _worker(jid, targets, source):
         JOB["message"] = f"{JOB['done']:,} looked up · {JOB['found']:,} with open ports" + (f" · {JOB['errors']} errors" if JOB["errors"] else "")
         from . import inventory
         inventory.refresh_async("Updating exposure from the passive scan", registry_only=True)  # open ports count as exposure evidence
+        _whois_soon([t[0] for t in targets])
     except Exception as e:  # noqa: BLE001
         JOB["message"] = f"Stopped: {e}"
     finally:
         JOB.update(running=False, finished_at=db.now_iso())
+
+
+def _whois_soon(ips):
+    """WHOIS for scanned IPs in the background (cached per registered block, so a scanned range costs a few look-ups)."""
+    from .surface import _run
+    from .whois import lookup
+    try:
+        _run("Looking up WHOIS", len(ips), lambda prog: (lambda r: f"WHOIS: {r[0]:,} registry look-ups")(lookup(ips, progress=prog)), queue=True)
+    except Exception:  # noqa: BLE001 - best effort
+        pass
 
 
 # ------------------------------------------------------------------ routes
@@ -212,7 +223,10 @@ def passive_scan_one(data: dict = Body(...)):
         if not targets:
             raise HTTPException(400, skipped[0][1] if skipped else "Not an IP")
         scan_now(c, targets[:8], source="manual")
-        rows = [_row(r) for r in db.rows(c, f"SELECT * FROM passive_results WHERE ip IN ({','.join('?' * len(targets[:8]))})",
+    from .whois import lookup
+    lookup([t[0] for t in targets[:8]])
+    with db.get_conn() as c:
+        rows = [_row(r) for r in db.rows(c, f"SELECT {COLS} FROM {FROM} WHERE r.ip IN ({','.join('?' * len(targets[:8]))})",
                                          [t[0] for t in targets[:8]])]
     from . import inventory
     inventory.refresh_async("Updating exposure from the passive scan", registry_only=True)  # answer now; exposure catches up in the background
@@ -251,7 +265,8 @@ def passive_upload_columns(data: dict = Body(...)):
 @router.get("/api/passive/status")
 def passive_status():
     with db.get_conn() as c:
-        jobs = db.rows(c, "SELECT * FROM passive_jobs ORDER BY id DESC LIMIT 10")
+        jobs = db.rows(c, """SELECT j.*, (SELECT COUNT(*) FROM passive_results r WHERE r.job_id=j.id) kept FROM passive_jobs j
+                             ORDER BY j.id DESC LIMIT 50""")
         s = db.one(c, """SELECT COUNT(*) ips, SUM(status='ok' AND ports<>'[]') with_ports, SUM(vulns<>'[]') with_vulns,
                          SUM(status='error') errors, MAX(scanned_at) last FROM passive_results""")
     for j in jobs:
@@ -259,24 +274,51 @@ def passive_status():
     return {"job": JOB, "jobs": jobs, "summary": {k: (v or 0) if k != "last" else v for k, v in s.items()}, "demo": config.DEMO}
 
 
+FROM = """passive_results r LEFT JOIN ip_whois w ON w.ip=r.ip LEFT JOIN whois_nets n ON n.handle=w.handle
+          LEFT JOIN ip_class k ON k.ip=r.ip"""
+COLS = """r.*, n.name whois_name, n.descr whois_descr, n.org whois_org, n.country whois_country, n.cidr whois_range, w.error whois_error,
+          k.class cls"""
+
+
 def _query(p):
     w, params = [], []
     if p.get("q"):
         like = f"%{p['q']}%"
-        w.append("(ip LIKE ? OR asset_ip LIKE ? OR asset_name LIKE ? OR vulns LIKE ? OR ports LIKE ? OR hostnames LIKE ?)")
-        params += [like] * 6
+        w.append("(r.ip LIKE ? OR r.asset_ip LIKE ? OR r.asset_name LIKE ? OR r.vulns LIKE ? OR r.ports LIKE ? OR r.hostnames LIKE ? "
+                 "OR n.name LIKE ? OR n.descr LIKE ? OR n.org LIKE ?)")
+        params += [like] * 9
     show = p.get("show")
     if show == "ports":
-        w.append("ports<>'[]'")
+        w.append("r.ports<>'[]'")
     elif show == "vulns":
-        w.append("vulns<>'[]'")
+        w.append("r.vulns<>'[]'")
     elif show == "none":
-        w.append("status='none'")
+        w.append("r.status='none'")
     elif show == "error":
-        w.append("status='error'")
+        w.append("r.status='error'")
     if p.get("port"):
-        w.append("(',' || REPLACE(REPLACE(REPLACE(ports,'[',''),']',''),' ','') || ',') LIKE ?")
+        w.append("(',' || REPLACE(REPLACE(REPLACE(r.ports,'[',''),']',''),' ','') || ',') LIKE ?")
         params.append(f"%,{int(p['port'])},%")
+    if p.get("job"):
+        w.append("r.job_id=?")
+        params.append(int(p["job"]))
+    if p.get("whois"):
+        if p["whois"] == "(not looked up)":
+            w.append("n.name IS NULL")
+        else:
+            w.append("n.name=?")
+            params.append(p["whois"])
+    if p.get("wq"):
+        like = f"%{p['wq']}%"
+        w.append("(n.name LIKE ? OR n.descr LIKE ? OR n.org LIKE ? OR n.country LIKE ? OR n.cidr LIKE ?)")
+        params += [like] * 5
+    if p.get("cls"):
+        vals = p["cls"].split("|")
+        cond = [f"k.class IN ({','.join('?' * len([v for v in vals if v != 'none']))})"] if any(v != "none" for v in vals) else []
+        if "none" in vals:
+            cond.append("k.class IS NULL")
+        w.append("(" + " OR ".join(cond) + ")")
+        params += [v for v in vals if v != "none"]
     return ("WHERE " + " AND ".join(w)) if w else "", params
 
 
@@ -286,24 +328,87 @@ def passive_results(request: Request):
     page, size = max(1, int(p.get("page") or 1)), min(1000, max(1, int(p.get("size") or 50)))
     where, params = _query(p)
     with db.get_conn() as c:
-        total = c.execute(f"SELECT COUNT(*) FROM passive_results {where}", params).fetchone()[0]
-        rows = [_row(r) for r in db.rows(c, f"""SELECT r.*, (SELECT lobs FROM asset_registry g WHERE g.ip=COALESCE(r.asset_ip, r.ip)) lobs
-                                                FROM passive_results r {where} ORDER BY LENGTH(vulns) DESC, LENGTH(ports) DESC, scanned_at DESC
+        total = c.execute(f"SELECT COUNT(*) FROM {FROM} {where}", params).fetchone()[0]
+        rows = [_row(r) for r in db.rows(c, f"""SELECT {COLS}, (SELECT lobs FROM asset_registry g WHERE g.ip=COALESCE(r.asset_ip, r.ip)) lobs
+                                                FROM {FROM} {where} ORDER BY LENGTH(r.vulns) DESC, LENGTH(r.ports) DESC, r.scanned_at DESC
                                                 LIMIT ? OFFSET ?""", params + [size, (page - 1) * size])]
     return {"total": total, "rows": rows}
+
+
+@router.get("/api/passive/whois-facets")
+def passive_whois_facets():
+    with db.get_conn() as c:
+        rows = db.rows(c, f"""SELECT COALESCE(n.name, '(not looked up)') name, COUNT(*) n, MAX(n.descr) descr, MAX(n.org) org
+                              FROM {FROM} GROUP BY 1 ORDER BY n DESC""")
+    return {"rows": rows}
+
+
+@router.post("/api/passive/classify")
+def passive_classify(data: dict = Body(...)):
+    """Mark results: {"ips": [...]} or {"filter": {page filters}, "scope": "filtered" | "others"}, "class": enterprise | non-enterprise | null."""
+    from .whois import set_class
+    if data.get("ips"):
+        ips = [db.canon_ip(i) for i in data["ips"]]
+    else:
+        where, params = _query(data.get("filter") or {})
+        with db.get_conn() as c:
+            hit = {r[0] for r in c.execute(f"SELECT r.ip FROM {FROM} {where}", params)}
+            if data.get("scope") == "others":
+                ips = [r[0] for r in c.execute(f"SELECT r.ip FROM {FROM} WHERE k.class IS NULL") if r[0] not in hit]
+            else:
+                ips = sorted(hit)
+    if not ips:
+        raise HTTPException(400, "No IPs match")
+    return {"marked": set_class(ips, data.get("class"), data.get("note") or "")}
+
+
+@router.post("/api/passive/results/delete")
+def passive_results_delete(data: dict = Body(...)):
+    """Delete scan results: {"ips": [...]} or {"filter": {page filters}}. The IPs leave the Attack surface unless another
+    source (inventory, matrix, CrowdStrike, VA scan, your ranges) knows them; exposure is recalculated."""
+    with db.get_conn() as c:
+        if data.get("ips"):
+            ips = [db.canon_ip(i) for i in data["ips"]]
+        else:
+            where, params = _query(data.get("filter") or {})
+            if not where:
+                raise HTTPException(400, "Pick rows or set a filter first")
+            ips = [r[0] for r in c.execute(f"SELECT r.ip FROM {FROM} {where}", params)]
+        c.executemany("DELETE FROM passive_results WHERE ip=?", [(i,) for i in ips])
+    _after_delete()
+    return {"deleted": len(ips)}
+
+
+@router.delete("/api/passive/jobs/{job_id}")
+def passive_job_delete(job_id: int):
+    """Delete a scan job and the results it found that no later scan replaced (e.g. a manual prefix / range scan)."""
+    if JOB["running"] and JOB["id"] == job_id:
+        raise HTTPException(409, "This scan is still running")
+    with db.get_conn() as c:
+        n = c.execute("DELETE FROM passive_results WHERE job_id=?", (job_id,)).rowcount
+        c.execute("DELETE FROM passive_jobs WHERE id=?", (job_id,))
+    _after_delete()
+    return {"deleted": n}
+
+
+def _after_delete():
+    from . import inventory
+    inventory.refresh_async("Updating exposure after deleting scan results", registry_only=True)
 
 
 @router.get("/api/passive/results/export")
 def passive_export(request: Request):
     where, params = _query(dict(request.query_params))
     with db.get_conn() as c:
-        rows = [_row(r) for r in db.rows(c, f"SELECT * FROM passive_results {where} ORDER BY scanned_at DESC", params)]
+        rows = [_row(r) for r in db.rows(c, f"SELECT {COLS} FROM {FROM} {where} ORDER BY r.scanned_at DESC", params)]
     for r in rows:
         for k in ("ports", "vulns", "cpes", "hostnames", "tags"):
             r[k + "_text"] = ", ".join(str(x) for x in r[k])
     return xlsx_response([("Passive scan", [("ip", "Public IP"), ("asset_ip", "Asset IP (behind NAT)"), ("asset_name", "Asset"), ("status", "Result"),
                                             ("ports_text", "Open ports"), ("vulns_text", "CVEs"), ("cpes_text", "Software (CPE)"),
-                                            ("hostnames_text", "Hostnames"), ("tags_text", "Tags"), ("scanned_at", "Looked up"), ("error", "Error")], rows)],
+                                            ("hostnames_text", "Hostnames"), ("tags_text", "Tags"), ("whois_name", "WHOIS name"),
+                                            ("whois_descr", "WHOIS description"), ("whois_org", "WHOIS organisation"), ("whois_country", "WHOIS country"),
+                                            ("whois_range", "WHOIS range"), ("cls", "Enterprise / non-enterprise"), ("scanned_at", "Looked up"), ("error", "Error")], rows)],
                          "passive_scan")
 
 

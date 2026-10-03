@@ -209,7 +209,9 @@ def _run(kind, total, fn, queue=False):
 
 # ------------------------------------------------------------------ the surface
 def _build(c):
+    from .whois import class_map, whois_map
     known = known_public(c)
+    who, cls = whois_map(c), class_map(c)
     intel = {r["ip"]: r for r in db.rows(c, "SELECT * FROM ip_intel")}
     passive = {r["ip"]: r for r in db.rows(c, "SELECT ip, status, ports, vulns, scanned_at FROM passive_results")}
     reg = {r["ip"]: r for r in db.rows(c, "SELECT ip, name, lobs, exposed, edr_status FROM asset_registry WHERE ip IS NOT NULL")}
@@ -224,7 +226,7 @@ def _build(c):
                      "subnet": str(ipaddress.ip_network(f"{ip}/24", strict=False)), "prefix": it.get("prefix"), "asn": it.get("asn"),
                      "holder": it.get("holder"), "gn_noise": it.get("gn_noise"), "gn_riot": it.get("gn_riot"), "gn_class": it.get("gn_class"),
                      "scanned": bool(pv), "scan_status": pv.get("status"), "ports": ports, "vulns": vulns, "scanned_at": pv.get("scanned_at"),
-                     "num": db.ip_to_num(ip) or 0})
+                     "num": db.ip_to_num(ip) or 0, **(who.get(ip) or {}), "cls": cls.get(ip)})
     rows.sort(key=lambda r: r["num"])
     return rows
 
@@ -234,7 +236,12 @@ def _group(rows, key):
     for r in rows:
         k = r.get(key) or "(not looked up)"
         x = g.setdefault(k, {"key": k, "ips": 0, "exposed": 0, "scanned": 0, "with_ports": 0, "with_cves": 0, "noisy": 0, "asn": r.get("asn"),
-                             "holder": r.get("holder"), "assets": set(), "lobs": set()})
+                             "holder": r.get("holder"), "assets": set(), "lobs": set(), "_who": {}, "enterprise": 0, "non_enterprise": 0})
+        x["enterprise"] += r.get("cls") == "enterprise"
+        x["non_enterprise"] += r.get("cls") == "non-enterprise"
+        if r.get("whois_name"):
+            w = x["_who"].setdefault(r["whois_name"], [0, r.get("whois_descr") or "", r.get("whois_org") or ""])
+            w[0] += 1
         x["ips"] += 1
         x["exposed"] += 1 if r["exposed"] else 0
         x["scanned"] += 1 if r["scanned"] else 0
@@ -249,6 +256,10 @@ def _group(rows, key):
     out = []
     for x in g.values():
         x["assets"], x["lobs"] = len(x["assets"]), ", ".join(sorted(x["lobs"]))
+        who = sorted(x.pop("_who").items(), key=lambda w: -w[1][0])
+        x["whois_name"] = ", ".join(n for n, _ in who[:3])
+        x["whois_descr"] = who[0][1][1] if who else ""
+        x["whois_org"] = who[0][1][2] if who else ""
         out.append(x)
     return sorted(out, key=lambda x: (-x["with_cves"], -x["with_ports"], -x["ips"]))
 
@@ -275,6 +286,7 @@ def surface(view: str = "subnet"):
     # advertised space of the ASNs marked as ours: prefixes with no known public IP are unknown surface
     nets = [(ipaddress.ip_network(r["ip"] + "/32"), r) for r in rows]
     adv_rows = []
+    c2 = db.connect()
     for p in adv:
         if p["asn"] not in asns:
             continue
@@ -285,19 +297,28 @@ def surface(view: str = "subnet"):
         if n.version != 4:
             continue
         inside = [r for a, r in nets if a.subnet_of(n)]
+        from .whois import net_for
+        w = net_for(c2, str(n.network_address)) if c2 else {}
         adv_rows.append({"asn": p["asn"], "prefix": p["prefix"], "size": n.num_addresses, "known": len(inside),
-                         "scanned": sum(1 for r in inside if r["scanned"]), "with_ports": sum(1 for r in inside if r["ports"])})
+                         "scanned": sum(1 for r in inside if r["scanned"]), "with_ports": sum(1 for r in inside if r["ports"]),
+                         "whois_name": w.get("name"), "whois_descr": w.get("descr"), "whois_org": w.get("org")})
+    c2.close()
     adv_rows.sort(key=lambda x: (x["known"] > 0, -x["size"]))
     return {"summary": {"ips": len(rows), "subnets": len({r["subnet"] for r in rows}), "prefixes": len({r["prefix"] for r in rows if r["prefix"]}),
                         "asns": len(by_asn), "exposed": sum(1 for r in rows if r["exposed"]), "scanned": sum(1 for r in rows if r["scanned"]),
                         "with_ports": sum(1 for r in rows if r["ports"]), "with_cves": sum(1 for r in rows if r["vulns"]),
                         "noisy": sum(1 for r in rows if r["gn_noise"]), "looked_up": sum(1 for r in rows if r["prefix"]),
-                        "adv_prefixes": len(adv_rows), "adv_unknown": sum(1 for a in adv_rows if not a["known"])},
+                        "adv_prefixes": len(adv_rows), "adv_unknown": sum(1 for a in adv_rows if not a["known"]),
+                        "whois": sum(1 for r in rows if r.get("whois_name")), "enterprise": sum(1 for r in rows if r.get("cls") == "enterprise"),
+                        "non_enterprise": sum(1 for r in rows if r.get("cls") == "non-enterprise")},
             "subnets": _group(rows, "subnet"), "prefixes": _group(rows, "prefix"), "asns": sorted(by_asn.values(), key=lambda a: -a["ips"]),
             "advertised": adv_rows[:2000], "ranges": ranges, "our_asns": asns, "job": JOB, "demo": config.DEMO}
 
 
 def _filter(rows, p):
+    from .whois import matches, whois_text
+    cls = {r["ip"]: r.get("cls") for r in rows}
+    rows = [r for r in rows if matches(r, p, cls)]
     if p.get("subnet"):
         rows = [r for r in rows if r["subnet"] == p["subnet"]]
     if p.get("prefix"):
@@ -309,7 +330,7 @@ def _filter(rows, p):
             or (show == "noisy" and r["gn_noise"]) or (show == "exposed" and r["exposed"])]
     if p.get("q"):
         q = p["q"].lower()
-        rows = [r for r in rows if q in f"{r['ip']} {r['name'] or ''} {r['lobs'] or ''} {r['holder'] or ''} {' '.join(r['vulns'])}".lower()]
+        rows = [r for r in rows if q in f"{r['ip']} {r['name'] or ''} {r['lobs'] or ''} {r['holder'] or ''} {' '.join(r['vulns'])} {whois_text(r)}".lower()]
     return rows
 
 
@@ -331,6 +352,8 @@ def surface_export(request: Request):
         r["gn_text"] = "seen scanning the internet" if r["gn_noise"] else "known benign service" if r["gn_riot"] else ""
     return xlsx_response([("Attack surface", [("ip", "Public IP"), ("name", "Asset"), ("asset_ip", "Behind NAT"), ("lobs", "LOB"), ("sources_text", "Known from"),
                                               ("subnet", "/24"), ("prefix", "Advertised prefix"), ("asn", "ASN"), ("holder", "Holder"),
+                                              ("whois_name", "WHOIS name"), ("whois_descr", "WHOIS description"), ("whois_org", "WHOIS organisation"),
+                                              ("whois_country", "WHOIS country"), ("whois_range", "WHOIS range"), ("cls", "Enterprise / non-enterprise"),
                                               ("ports_text", "Open ports (InternetDB)"), ("vulns_text", "CVEs"), ("gn_text", "GreyNoise"),
                                               ("scanned_at", "Passive scan")], rows)], "attack_surface")
 
@@ -369,8 +392,13 @@ def surface_enrich(data: dict = Body(default={})):
             ips = [i for i in ips if i not in done]
     if not ips:
         raise HTTPException(400, "No public IPs to look up")
-    return _run("Looking up prefixes / GreyNoise", len(ips),
-                lambda prog: (lambda r: "done" + (" · GreyNoise daily quota reached, the rest later" if r["greynoise_limited"] else ""))(enrich(ips, what, prog)))
+    def fn(prog):
+        from .whois import lookup
+        r = enrich(ips, what, prog)
+        asked, errs = lookup(ips, progress=prog)  # WHOIS too: cached per registered block, so mostly answered locally
+        return ("done" + (" · GreyNoise daily quota reached, the rest later" if r["greynoise_limited"] else "")
+                + f" · WHOIS {asked:,} registry look-ups" + (f", {errs:,} without an answer" if errs else ""))
+    return _run("Looking up prefixes, GreyNoise and WHOIS", len(ips), fn)
 
 
 def start_advertised(asns=None, queue=False):
@@ -392,6 +420,16 @@ def start_advertised(asns=None, queue=False):
         with db.get_conn() as c:
             c.execute(f"DELETE FROM asn_prefixes WHERE asn IN ({','.join('?' * len(asns))})", asns)
             c.executemany("INSERT OR REPLACE INTO asn_prefixes(asn, prefix, fetched_at) VALUES (?,?,?)", rows)
+        from .whois import lookup
+        firsts = []
+        for _, p, _ in rows:
+            try:
+                n = ipaddress.ip_network(p)
+                if n.version == 4:
+                    firsts.append(str(n.network_address))
+            except ValueError:
+                pass
+        lookup(firsts[:2000])  # who each advertised prefix is registered to (one registry answer per block)
         return f"{len(rows):,} advertised prefixes for {', '.join('AS' + a for a in asns)}"
     return _run("Fetching advertised prefixes", len(asns), fn, queue=queue)
 
@@ -428,6 +466,30 @@ def surface_settings(data: dict = Body(...)):
     if new_asns:  # ASNs just added: fetch their advertised prefixes from RIPEstat right away
         fetching = start_advertised(new_asns, queue=True)
     return {"ok": True, "fetching": new_asns if fetching else [], "queued": bool(fetching and fetching.get("queued"))}
+
+
+@router.get("/api/surface/whois-facets")
+def surface_whois_facets():
+    from .whois import facets
+    with db.get_conn() as c:
+        return {"rows": facets(_build(c))}
+
+
+@router.post("/api/surface/classify")
+def surface_classify(data: dict = Body(...)):
+    """Mark the public IPs a filter matches: {"filter": {page filters}, "class": "enterprise" | "non-enterprise" | null,
+    "scope": "filtered" (default) | "others" (every other known IP that has no mark yet)}."""
+    from .whois import set_class
+    with db.get_conn() as c:
+        rows = _build(c)
+    hit = {r["ip"] for r in _filter(rows, {k: v for k, v in (data.get("filter") or {}).items() if k not in ("page", "size", "tab")})}
+    if data.get("scope") == "others":
+        ips = [r["ip"] for r in rows if r["ip"] not in hit and not r.get("cls")]
+    else:
+        ips = sorted(hit)
+    if not ips:
+        raise HTTPException(400, "No IPs match")
+    return {"marked": set_class(ips, data.get("class"), data.get("note") or "")}
 
 
 @router.get("/api/surface/job")

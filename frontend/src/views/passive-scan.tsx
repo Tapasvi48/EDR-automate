@@ -3,12 +3,13 @@ import * as React from "react";
 import Link from "next/link";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { FileSpreadsheet, Radar, Search, UploadCloud } from "lucide-react";
+import { FileSpreadsheet, Radar, Search, Trash2, UploadCloud } from "lucide-react";
 import { api, apiUpload } from "@/lib/api";
 import { useUrlState } from "@/lib/hooks";
 import { fmtDt, fmtN, fmtRel } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import { Badge, Button, Callout, Card, CardHeader, Field, FilterSelect, Input, Kpi, KpiGrid, Loading, Modal, PageHeader, SearchInput, Select, Spinner } from "@/components/ui";
+import { Badge, Button, Callout, Card, CardHeader, Field, FilterSelect, Input, Kpi, KpiGrid, Loading, Modal, PageHeader, SearchInput, Select, Spinner, useConfirm } from "@/components/ui";
+import { ClassBadge, ClassifyBar, WhoisCell, WhoisFilters } from "@/components/whois";
 import { DataTable, type Column } from "@/components/data-table";
 import { Mono } from "@/components/badges";
 
@@ -40,6 +41,9 @@ export default function PassiveScan() {
   const [one, setOne] = React.useState<any[] | null>(null);
   const [busy, setBusy] = React.useState(false);
   const [upload, setUpload] = React.useState(false);
+  const [sel, setSel] = React.useState<Set<string>>(new Set());
+  const [total, setTotal] = React.useState(0);
+  const confirm = useConfirm();
   const st = useQuery({ queryKey: ["passive-status"], queryFn: () => api<any>("/api/passive/status"),
     refetchInterval: (q) => ((q.state.data as any)?.job?.running ? 1200 : false) });
   const wasRunning = React.useRef(false);
@@ -50,6 +54,16 @@ export default function PassiveScan() {
   }, [st.data, qc]);
   if (!st.data) return <Loading error={st.error} retry={() => st.refetch()} />;
   const s = st.data.summary, job = st.data.job;
+  const delJob = async (j: any) => {
+    if (!(await confirm({ title: `Delete scan job “${j.note || j.source}”?`, body: `Removes the ${fmtN(j.kept ?? 0)} results this scan found that no later scan replaced. IPs that only this scan knew leave the Attack surface.`, ok: "Delete", danger: true }))) return;
+    try { const r = await api<any>(`/api/passive/jobs/${j.id}`, { method: "DELETE" }); toast.success(`Deleted · ${fmtN(r.deleted)} results removed`); qc.invalidateQueries(); }
+    catch (e: any) { toast.error(e.message); }
+  };
+  const delSelected = async () => {
+    if (!(await confirm({ title: `Delete ${fmtN(sel.size)} results?`, body: "The selected IPs' scan results are removed. IPs that only the scan knew leave the Attack surface.", ok: "Delete", danger: true }))) return;
+    try { const r = await api<any>("/api/passive/results/delete", { method: "POST", body: { ips: [...sel] } }); toast.success(`${fmtN(r.deleted)} results deleted`); setSel(new Set()); qc.invalidateQueries(); }
+    catch (e: any) { toast.error(e.message); }
+  };
   const scanOne = async () => {
     if (!ip.trim()) return;
     setBusy(true); setOne(null);
@@ -68,6 +82,8 @@ export default function PassiveScan() {
     { key: "ports", label: "Open ports", wrap: true, render: (r) => <PortChips ports={r.ports} /> },
     { key: "vulns", label: "CVEs", wrap: true, render: (r) => <CveChips vulns={r.vulns} /> },
     { key: "cpes", label: "Software", wrap: true, render: (r) => <span className="text-[11.5px] text-fg-2">{r.cpes.map((c: string) => c.replace(/^cpe:\/[aoh]:/, "")).join(", ") || "–"}</span> },
+    { key: "whois", label: "WHOIS", wrap: true, render: (r) => <WhoisCell r={r} /> },
+    { key: "cls", label: "Class", render: (r) => <ClassBadge c={r.cls} /> },
     { key: "hostnames", label: "Hostnames", wrap: true, hidden: true, render: (r) => <span className="text-[11.5px]">{r.hostnames.join(", ") || "–"}</span> },
     { key: "tags", label: "Tags", hidden: true, render: (r) => r.tags.join(", ") || "–" },
     { key: "scanned_at", label: "Looked up", render: (r) => <span title={fmtDt(r.scanned_at)}>{fmtRel(r.scanned_at)}</span> },
@@ -116,22 +132,31 @@ export default function PassiveScan() {
               </div>
             )}
             {!st.data.jobs.length && !job.running && <div className="text-[12.5px] text-muted">No scan jobs yet.</div>}
-            {st.data.jobs.slice(0, 5).map((j: any) => (
-              <div key={j.id} className="flex flex-wrap items-center gap-2 rounded-lg border border-border px-3 py-2 text-[12.5px]">
-                <Badge tone="info">{j.source}</Badge><span className="truncate text-muted">{j.note}</span>
+            <div className="max-h-64 space-y-2 overflow-auto">
+            {st.data.jobs.map((j: any) => (
+              <div key={j.id} className={cn("flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2 text-[12.5px]", state.job === String(j.id) ? "border-accent bg-accent-soft/40" : "border-border")}>
+                <Badge tone="info">{j.source}</Badge><span className="truncate font-mono text-[12px]">{j.note}</span>
                 <span className="ml-auto">{fmtN(j.done ?? 0)} / {fmtN(j.total)} · <b className="text-crit-fg">{fmtN(j.found ?? 0)}</b> with ports{j.skipped?.length ? ` · ${j.skipped.length} skipped` : ""}</span>
                 <span className="text-[11.5px] text-muted">{fmtRel(j.started_at)}</span>
+                <Button size="sm" variant="ghost" title="show this scan's results" onClick={() => replaceAll(state.job === String(j.id) ? {} : { job: String(j.id) })}>{state.job === String(j.id) ? "All results" : `Results (${fmtN(j.kept ?? 0)})`}</Button>
+                <Button size="sm" variant="ghost" title="delete this scan and its results" disabled={job.running && job.id === j.id} onClick={() => delJob(j)}><Trash2 className="size-3.5" /></Button>
               </div>
             ))}
+            </div>
           </div>
         </Card>
       </div>
+      <ClassifyBar path="/api/passive/classify" filter={state} selected={sel} total={total} onDone={() => setSel(new Set())} />
       <DataTable endpoint="/api/passive/results" exportPath="/api/passive/results/export" state={state} setState={set} noun="public IPs" storageKey="passive"
-        rowKey={(r: any) => r.ip} onReset={() => replaceAll({})} sortable={false} columns={cols}
+        rowKey={(r: any) => r.ip} onReset={() => replaceAll({})} sortable={false} columns={cols} selected={sel} onSelectedChange={setSel}
+        onData={(d: any) => setTotal(d.total)}
+        toolbar={sel.size > 0 && <Button size="sm" variant="danger" onClick={delSelected}><Trash2 /> Delete {fmtN(sel.size)}</Button>}
         filters={<>
           <SearchInput className="w-72" value={state.q || ""} onChange={(v) => set({ q: v })} placeholder="IP, asset, CVE, hostname…" />
           <FilterSelect label="Show" value={state.show} onChange={(v) => set({ show: v })} any="All" options={[["ports", "Open ports"], ["vulns", "Known CVEs"], ["none", "No data"], ["error", "Errors"]]} />
           <Input className="w-28" placeholder="Port e.g. 3389" value={state.port || ""} onChange={(e) => set({ port: e.target.value.replace(/\D/g, "") })} />
+          <WhoisFilters facetsPath="/api/passive/whois-facets" state={state} set={set} />
+          {state.job && <Badge tone="info">scan #{state.job}<button className="ml-1" onClick={() => set({ job: undefined })}>×</button></Badge>}
         </>} />
       {upload && <UploadScan onClose={() => { setUpload(false); st.refetch(); }} />}
     </div>

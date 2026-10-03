@@ -505,6 +505,15 @@ CREATE TABLE IF NOT EXISTS ip_intel (
     gn_message TEXT, gn_last_seen TEXT, ripe_at TEXT, gn_at TEXT
 );
 CREATE TABLE IF NOT EXISTS vt_results (ip TEXT PRIMARY KEY, data TEXT, fetched_at TEXT);
+-- WHOIS (RDAP) of public IPs: one row per registered block (APNIC / RIPE / ARIN ... network object), and which block each IP is in
+CREATE TABLE IF NOT EXISTS whois_nets (
+    handle TEXT PRIMARY KEY, start_num INTEGER, end_num INTEGER, cidr TEXT, name TEXT, descr TEXT, org TEXT, country TEXT, rir TEXT,
+    fetched_at TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_whois_range ON whois_nets(start_num, end_num);
+CREATE TABLE IF NOT EXISTS ip_whois (ip TEXT PRIMARY KEY, handle TEXT, error TEXT, fetched_at TEXT);
+-- Enterprise / non-enterprise marks on public IPs (Attack surface, Internet DB scan)
+CREATE TABLE IF NOT EXISTS ip_class (ip TEXT PRIMARY KEY, class TEXT, note TEXT, set_at TEXT);
 CREATE TABLE IF NOT EXISTS asn_prefixes (asn TEXT, prefix TEXT, fetched_at TEXT, PRIMARY KEY (asn, prefix));
 
 -- All inventory: rows deleted by hand (hidden from the list; inventory rows behind them are removed from their LOB inventory)
