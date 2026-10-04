@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import asset360, commatrix, config, cs_posture, db, detections, satellite, seceon, splunk, falcon, feasibility, sensor_support, filetemplates, sod, inventory, legacy, niam, posture, queries, registry, sync, threats, passive, surface, alerts, intel, spotlight, subnets, whois, vulns
+from . import asset360, commatrix, config, cs_posture, db, detections, satellite, seceon, splunk, falcon, feasibility, sensor_support, filetemplates, sod, inventory, legacy, niam, posture, queries, registry, sync, threats, passive, surface, alerts, intel, spotlight, subnets, whois, falconmcp, ai_hunt, fabric, kb, briefs, ioc, chat, vulns, cql, ontology, cqlhub
 from .exporter import xlsx_response
 from .extra import router as extra_router
 
@@ -40,7 +40,9 @@ async def lifespan(app):
             c.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('match_rev', ?)", (inventory.MATCH_REV,))
     if not config.DEMO:
         sync.start_scheduler()
+    ai_hunt.warmup()  # load the on-prem model now, not on the first question
     yield
+    falconmcp.shutdown()  # stop the managed falcon-mcp process with the console
 
 
 app = FastAPI(title="EDR Asset Dashboard", lifespan=lifespan)
@@ -52,7 +54,7 @@ app = FastAPI(title="EDR Asset Dashboard", lifespan=lifespan)
 # not changed is served at once. Hot pages are recomputed in the background after each change (see _warm_loop).
 # Live answers (status, sync, Splunk / alert feeds, internet look-ups) and file downloads are never cached.
 _NO_CACHE = re.compile(r"status|/sync|/export|download|/template|/connection|/falcon/|/settings|/alerts|/analysts|/splunk|/seceon"
-                       r"|/intel|/job|/refresh|/asset/passive")
+                       r"|/intel|/job|/refresh|/asset/passive|/api/mcp|/api/ai|/api/chat|/api/ioc|/api/brief|/api/kb|/api/cql|/api/fabric/ontology|/api/fabric/node|/api/fabric/path")
 _CACHE, _HOT, _INFLIGHT = {}, {}, {}
 _CACHE_TTL, _CACHE_MAX, _CACHE_BODY_MAX = 900, 400, 8 << 20
 
@@ -1618,6 +1620,10 @@ app.include_router(intel.router)
 app.include_router(spotlight.router)
 app.include_router(subnets.router)
 app.include_router(whois.router)
+app.include_router(falconmcp.router)
+app.include_router(ai_hunt.router)
+for _r in (fabric.router, kb.router, briefs.router, ioc.router, chat.router, cql.router, ontology.router, cqlhub.router):
+    app.include_router(_r)
 
 FRONTEND = config.BASE_DIR / "frontend" / "out"
 

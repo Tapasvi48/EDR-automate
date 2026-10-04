@@ -10,6 +10,7 @@ import { Button, Card, CardHeader, Loading, PageHeader } from "@/components/ui";
 import { StackBar } from "@/components/charts";
 import { Drill, Hero, Line2, Split } from "@/components/summary-cards";
 import { NotConnected } from "@/components/sync-progress";
+import { ExplainButton } from "@/components/ai/brief";
 
 const H = (p: Record<string, any>) => "/assets/" + qs(p);
 
@@ -331,7 +332,8 @@ export default function Overview() {
       <PageHeader
         title="Overview"
         sub={d.last_sync ? `Last sync ${fmtRel(d.last_sync.finished_at)} · EDR coverage counts EDR-applicable inventory nodes (decided by OS and node type)` : "No successful sync yet"}
-        actions={<Button variant="primary" onClick={() => downloadExcel("/api/reports/executive")}><FileSpreadsheet /> Executive report</Button>}
+        actions={<><ExplainButton kind="overview" id="today" label="Daily SOC brief" size="md" />
+          <Button variant="primary" onClick={() => downloadExcel("/api/reports/executive")}><FileSpreadsheet /> Executive report</Button></>}
       />
 
       <div className="grid gap-4 lg:grid-cols-3">

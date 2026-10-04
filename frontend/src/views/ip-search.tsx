@@ -9,6 +9,10 @@ import { fmtDt, fmtN, fmtRel } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { Badge, Button, Card, CardHeader, Loading, PageHeader, SearchInput, Segmented, Tabs } from "@/components/ui";
 import { MbssReport } from "@/components/mbss-report";
+import { IocChecker } from "@/components/ai/ioc";
+import { ExplainButton } from "@/components/ai/brief";
+
+const db_is_value = (q: string) => /^[a-f0-9]{32,64}$/i.test(q) || /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(q);
 import { IntelPanel, LOOKUPS } from "@/components/intel-panel";
 import { CveChips, PortChips } from "./passive-scan";
 import { SimpleTable } from "@/components/data-table";
@@ -76,6 +80,7 @@ const VIEWS: { id: string; label: string; icon: React.ElementType }[] = [
   { id: "attack", label: "Attack path", icon: Route }, { id: "detections", label: "Detections", icon: Crosshair },
   { id: "vulns", label: "Vulnerabilities", icon: ShieldAlert }, { id: "patching", label: "Patches & MBSS", icon: PackageCheck },
   { id: "edr", label: "EDR & logging", icon: ShieldCheck }, { id: "related", label: "Related assets", icon: Network },
+  { id: "ioc", label: "Threat intel (IOC)", icon: Crosshair },
 ];
 
 function Profile({ r }: { r: any }) {
@@ -124,6 +129,8 @@ function Profile({ r }: { r: any }) {
       {view === "patching" && <Card><SatellitePanel ips={s.ips} names={s.hostnames} /></Card>}
       {view === "edr" && <EdrView s={s} r={r} />}
       {view === "related" && <RelatedView s={s} r={r} />}
+      {view === "ioc" && <div className="space-y-2"><div className="text-[12.5px] text-fg-2">Checks this asset's IPs against CrowdStrike threat intelligence, custom IOCs and our data. Paste any other IP, domain or hash too.</div>
+        <IocChecker key={s.ips.join(",")} initial={[...s.ips, ...(db_is_value(s.query) ? [s.query] : [])].filter((x, i, a) => a.indexOf(x) === i).join("\n")} autoRun compact /></div>}
     </div>
   );
 }
@@ -583,6 +590,7 @@ function Hero({ s, r }: { s: any; r: any }) {
             {s.exposure?.length > 0 && <Link href={`/exposure/?q=${encodeURIComponent(s.ips[0] || "")}`}><Badge tone="crit" title={s.exposure.map((e: any) => "• " + e.text).join("\n")}>Internet exposed</Badge></Link>}
             <EdrBadge s={s.edr_status} />
             {s.ne_ids?.length > 0 && <Badge tone="violet" title="From the NIAM dump">NE ID {s.ne_ids.join(", ")}</Badge>}
+            <span className="ml-auto print:hidden"><ExplainButton kind="asset" id={s.hostnames[0] || s.ips[0] || s.query} /></span>
           </div>
           <div className="flex flex-wrap gap-1.5">
             {s.ips.map((ip: string) => <Chip key={ip} onClick={() => copy(ip)} title="Copy"><Copy className="size-3 opacity-60" />{ip}</Chip>)}

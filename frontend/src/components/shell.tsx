@@ -5,7 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Command } from "cmdk";
 import * as Dialog from "@radix-ui/react-dialog";
-import { BadgeCheck, Boxes, Flame, Globe2, Waypoints, History, Radar, ShieldAlert, Upload, AlertTriangle, Building2, Copy, Network, FileSpreadsheet, FileText, Globe, LayoutDashboard, Menu, Monitor, Moon, PackagePlus, PlugZap, RefreshCw, Search, Settings, ShieldCheck, Sun, Target, WifiOff, ShieldQuestion, GitCompare, Database, PackageCheck, ClipboardCheck, Plug, Route, Siren, UsersRound, ListTree, ScanSearch, ChevronRight, Earth, BellRing, Bug, Cpu } from "lucide-react";
+import { BadgeCheck, Boxes, Flame, Globe2, Waypoints, History, Radar, ShieldAlert, Upload, AlertTriangle, Building2, Copy, Network, FileSpreadsheet, FileText, Globe, LayoutDashboard, Menu, Monitor, Moon, PackagePlus, PlugZap, RefreshCw, Search, Settings, ShieldCheck, Sun, Target, WifiOff, ShieldQuestion, GitCompare, Database, PackageCheck, ClipboardCheck, Plug, Route, Siren, UsersRound, ListTree, ScanSearch, ChevronRight, PanelLeftClose, PanelLeftOpen, Earth, BellRing, Bug, Cpu, Bot, Crosshair, Layers, BookOpen } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { fmtN, fmtRel } from "@/lib/format";
@@ -13,12 +13,19 @@ import { cn } from "@/lib/utils";
 import { Badge, Button } from "./ui";
 import { HostStatus } from "./badges";
 import { useHostDrawer } from "./host-drawer";
+import { ChatDock } from "./ai/chat";
 import { nextSyncLabel, useSyncStatus } from "./sync-progress";
 
 const NAV: { section?: string; items: { href: string; label: string; icon: React.ElementType }[] }[] = [
   { items: [
     { href: "/", label: "Overview", icon: LayoutDashboard },
     { href: "/ip-search/", label: "Asset 360 search", icon: Globe },
+  ] },
+  { section: "AI SOC", items: [
+    { href: "/falcon-mcp/", label: "AI SOC assistant", icon: Bot },
+    { href: "/ioc/", label: "IOC check", icon: Crosshair },
+    { href: "/falcon-mcp/?tab=fabric", label: "Data fabric", icon: Layers },
+    { href: "/falcon-mcp/?tab=kb", label: "Knowledge base", icon: BookOpen },
   ] },
   { section: "Attack surface", items: [
     { href: "/surface/", label: "Attack surface", icon: Earth },
@@ -106,6 +113,13 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [mobileNav, setMobileNav] = React.useState(false);
   const [paletteOpen, setPaletteOpen] = React.useState(false);
+  // desktop: hide the navigation panel for more room (remembered; Ctrl/⌘ + B toggles)
+  const [navHidden, setNavHidden] = React.useState(false);
+  React.useEffect(() => { try { setNavHidden(localStorage.getItem("nav-hidden") === "1"); } catch {} }, []);
+  const toggleNav = React.useCallback(() => setNavHidden((v) => {
+    try { localStorage.setItem("nav-hidden", v ? "0" : "1"); } catch {}
+    return !v;
+  }), []);
   const { status, start } = useSync();
   const meta = useQuery({ queryKey: ["meta"], queryFn: () => api<any>("/api/meta"), staleTime: 60_000 });
   if (meta.data) (globalThis as any).__staleHours = parseFloat(meta.data.settings.stale_online_hours || "1");
@@ -117,10 +131,14 @@ export function Shell({ children }: { children: React.ReactNode }) {
         e.preventDefault();
         setPaletteOpen((o) => !o);
       }
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "b") {
+        e.preventDefault();
+        toggleNav();
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [toggleNav]);
   React.useEffect(() => setMobileNav(false), [pathname]);
 
   // sidebar sections fold away; the section of the current page is always open; your choice is remembered
@@ -134,22 +152,25 @@ export function Shell({ children }: { children: React.ReactNode }) {
     try { localStorage.setItem("nav-open", JSON.stringify([...n])); } catch {}
     return n;
   });
+  if (pathname.startsWith("/ai")) return <>{children}</>; // AI SOC in its own full window / new tab
   const isActive = (href: string) => (href === "/" ? pathname === "/" : pathname.startsWith(href.replace(/\/$/, "")));
 
   return (
     <div className="flex min-h-screen">
       <aside className={cn("print:hidden",
         "fixed inset-y-0 left-0 z-40 flex w-[232px] flex-col bg-side text-[#a9b2c3] transition-transform lg:sticky lg:top-0 lg:h-screen lg:translate-x-0",
-        mobileNav ? "translate-x-0" : "-translate-x-full"
+        mobileNav ? "translate-x-0" : "-translate-x-full", navHidden && "lg:hidden"
       )}>
         <div className="flex items-center gap-2.5 px-4 pb-3 pt-4">
           <div className="grid size-8 place-items-center rounded-lg bg-gradient-to-br from-[#e5483f] to-[#a3221b] shadow-lg">
             <ShieldCheck className="size-4.5 text-white" />
           </div>
           <div className="leading-tight">
-            <div className="text-[14.5px] font-semibold text-white">EDR Asset Console</div>
+            <div className="whitespace-nowrap text-[14.5px] font-semibold text-white">EDR Asset Console</div>
             <div className="text-[11px]">CrowdStrike Falcon</div>
           </div>
+          <button onClick={toggleNav} title="Hide navigation (Ctrl/⌘ + B)" className="ml-auto hidden rounded-md p-1 text-[#6b7384] hover:bg-white/10 hover:text-white lg:block">
+            <PanelLeftClose className="size-4" /></button>
         </div>
         <button onClick={() => setPaletteOpen(true)} className="mx-3 mb-1 flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 text-left text-xs text-[#8a93a6] hover:bg-white/10">
           <Search className="size-3.5" /> Search hosts, IPs…
@@ -210,6 +231,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
       <main className="min-w-0 flex-1">
         <header className="sticky top-0 z-20 flex h-13 print:hidden items-center gap-3 border-b border-border bg-surface/85 px-4 backdrop-blur lg:px-6">
           <Button variant="ghost" size="icon" className="lg:hidden" onClick={() => setMobileNav(true)}><Menu /></Button>
+          {navHidden && <Button variant="ghost" size="icon" className="hidden lg:inline-flex" title="Show navigation (Ctrl/⌘ + B)" onClick={toggleNav}><PanelLeftOpen /></Button>}
           <button onClick={() => setPaletteOpen(true)} className="flex h-8.5 w-full max-w-md items-center gap-2 rounded-lg border border-border bg-surface-2 px-3 text-left text-[13px] text-muted hover:border-border-strong">
             <Search className="size-4 shrink-0" /> <span className="truncate">Jump to host, IP, AID or page…</span>
             <kbd className="ml-auto hidden rounded border border-border bg-surface px-1.5 text-[10.5px] sm:block">⌘K</kbd>
@@ -225,6 +247,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
         <div className="mx-auto w-full max-w-[1720px] px-4 pb-16 pt-5 lg:px-6">{children}</div>
       </main>
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
+      <React.Suspense fallback={null}><ChatDock /></React.Suspense>
     </div>
   );
 }

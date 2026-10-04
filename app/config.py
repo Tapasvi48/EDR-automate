@@ -37,6 +37,9 @@ APP_PASSWORD = _env("APP_PASSWORD")
 
 # Defaults for settings editable from the UI (stored in the settings table).
 DEFAULT_SETTINGS = {
+    # Falcon MCP connector: managed (the console runs falcon-mcp) | external | off; read-only by default
+    "ai_provider": "ollama", "ai_url": "http://127.0.0.1:11434", "ai_model": "qwen3:8b", "ai_api_key": "", "ai_summarize": "1", "ai_eval_last": "",
+    "mcp_mode": "managed", "mcp_url": "", "mcp_api_key": "", "mcp_modules": "", "mcp_read_only": "1", "mcp_port": "8781",
     # MSP scorecard targets
     "target_coverage": "95", "target_offline_pct": "5", "target_scan_days": "30", "target_scan_coverage": "90",
     "target_max_critical": "0", "target_max_risk_critical": "0",
@@ -76,7 +79,7 @@ DEFAULT_SETTINGS = {
     "servicenow_url": "",
     "servicenow_table": "cmdb_ci_server",
 }
-SECRET_SETTINGS = {"falcon_client_secret", "satellite_token", "splunk_token", "seceon_webhook_token", "virustotal_api_key"}
+SECRET_SETTINGS = {"falcon_client_secret", "satellite_token", "splunk_token", "seceon_webhook_token", "virustotal_api_key", "mcp_api_key", "ai_api_key"}
 
 # Standard inventory template fields: key -> label
 INVENTORY_FIELDS = [

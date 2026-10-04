@@ -512,6 +512,16 @@ CREATE TABLE IF NOT EXISTS whois_nets (
 );
 CREATE INDEX IF NOT EXISTS ix_whois_range ON whois_nets(start_num, end_num);
 CREATE TABLE IF NOT EXISTS ip_whois (ip TEXT PRIMARY KEY, handle TEXT, error TEXT, fetched_at TEXT);
+-- Falcon MCP tool calls made from the console (audit trail; results kept for the run history)
+CREATE TABLE IF NOT EXISTS mcp_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT, tool TEXT, args TEXT, ok INTEGER, error TEXT, seconds REAL, result TEXT, size INTEGER,
+    user TEXT, read_only INTEGER
+);
+-- Ask Falcon: every plain-English question, how it was routed (local model or keywords), the hunt run and analyst feedback
+CREATE TABLE IF NOT EXISTS ai_asks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT, question TEXT, router TEXT, model TEXT, template TEXT, slots TEXT, days INTEGER,
+    plan_seconds REAL, run_id INTEGER, ok INTEGER, total INTEGER, summary TEXT, summary_seconds REAL, feedback INTEGER, note TEXT
+);
 -- Enterprise / non-enterprise marks on public IPs (Attack surface, Internet DB scan)
 CREATE TABLE IF NOT EXISTS ip_class (ip TEXT PRIMARY KEY, class TEXT, note TEXT, set_at TEXT);
 CREATE TABLE IF NOT EXISTS asn_prefixes (asn TEXT, prefix TEXT, fetched_at TEXT, PRIMARY KEY (asn, prefix));

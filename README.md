@@ -82,6 +82,101 @@ fewer than half of the previously active hosts, so an API or scope problem can't
 in between fetch records only for agents that are new, came back, or changed / checked in since the last sync
 (`modified_timestamp` or `last_seen` after it). The online state of every agent is still refreshed on each sync.
 
+## AI SOC (left menu → AI SOC)
+- **Assistant:** a chat that hunts CrowdStrike in CQL, answers from the data fabric, explains detections / assets / CVEs,
+  checks IOCs, answers from the knowledge base, and says how two entities are connected ("how is svc_batch connected to Payments?").
+  - Conversations are saved (search, pin, delete) and grouped by day; follow-ups remember the host, IP, hash, CVE or detection.
+  - Each answer shows what the agent did (matched a tested hunt / planned by the model, where it ran, how long) and suggests follow-ups.
+  - Open it from any page with **Ask AI SOC**, bottom right.
+- **Hunt studio (CQL):** plain English → CQL → check → run → save.
+  - A library of 45 tested, MITRE-tagged hunting queries (credential dumping, lateral movement, persistence, exfiltration, C2,
+    ransomware precursors, Linux / macOS…) and your team's saved queries.
+  - A CQL parser and linter: unknown functions / fields (with "did you mean"), broken regexes, unbalanced brackets; an auto-fixer
+    rewrites SQL / SPL / KQL habits (`WHERE`, `==`, `| stats count by`, `| limit`, `| sort by`); a plain-English explanation of any query.
+  - Queries run in NG-SIEM through the CrowdStrike API directly (FalconPy, the sync's credentials), else Falcon MCP; in sample-data
+    mode against synthetic endpoint telemetry with planted attacks.
+- **Built for small on-prem models (4B–8B):**
+  - The model never writes CQL text: it fills a JSON query plan (event, filters, output) whose event / field / operator values are
+    enums; code compiles it to CQL, so syntax is always valid and fields exist on the event.
+  - Retrieval first: the closest library hunts are the few-shot examples. A question a tested hunt answers exactly gets it
+    instantly, with no model call.
+  - Grounding after: IPs, hashes, domains, users and hostnames in the question are checked against the plan and added if dropped.
+  - Without a model the library + rules answer (24 / 24 on the CQL test set; 37 / 37 on hunt routing). Settings → AI model →
+    Model check scores the configured model.
+- **Data fabric:**
+  - **Ontology:** 16 entity types (asset, CrowdStrike agent, IP, subnet, LOB, MSP, user, detection, MITRE tactic, process / file,
+    CVE, policy, NDR alert, matrix rule, network block, checked IOC) and 18 relationship types, with live counts and sources.
+  - **Graph explorer:** search any entity, click to expand its neighbours, see its properties and links; **Find a connection**
+    shows the shortest path between two entities.
+  - Sources (row counts, freshness), unified alerts (CrowdStrike + NDR, OCSF-style), entity resolution, and seven questions
+    answered from the fabric itself (exposed assets without EDR, coverage gaps, KEV on exposed assets, riskiest assets, posture
+    per LOB, asset owner, asset timeline).
+- **Knowledge base:** your SOPs, playbooks and case notes (paste or upload), plus built-ins: CQL syntax guide, CQL functions,
+  the Falcon event dictionary, the hunt library, an FQL guide, a CQL-for-SPL/KQL translation table, console glossary, MITRE ATT&CK
+  and a triage playbook. Search is SQLite FTS5 (offline).
+- **Explain with AI** buttons: detections ("Triage with AI"), Spotlight ("Explain CVE"), Asset 360, Overview ("Daily SOC brief").
+  A brief gives a rule-based assessment, next steps and numbered facts with sources; with a model, a narrative that may only cite
+  those facts.
+- **IOC check** (left menu, and an Asset 360 tab): IPs, domains, URLs and hashes against CrowdStrike threat intel and custom IOCs
+  (direct API — Falcon MCP is not needed), our detections / NDR / assets, and WHOIS / InternetDB / GreyNoise / VirusTotal.
+  Extra API scopes: Indicators (Falcon Intelligence): Read, IOC Management: Read, and the NGSIEM search scopes for CQL hunts.
+- **Full window:** AI SOC → **Full window** (no console navigation) or **New tab**; the chat's ↗ button opens a full-screen
+  chat in a new tab (`/ai/?focus=chat`).
+- **CQL Hub:** Hunt studio → Hunt library → CQL Hub → **Import** (or Knowledge → Import CQL Hub) downloads ByteRay's open (MIT)
+  community library (~185 Next-Gen SIEM queries, github.com/ByteRay-Labs/Query-Hub) once. The queries are browsable with author
+  and MITRE tags, searchable in the knowledge base, and shown as references when the AI writes a hunt.
+- **Detection triage:** a brief opens instantly (rules over the evidence): command-line behaviour analysis, indicators extracted
+  and checked against CrowdStrike intel, the host's ATT&CK chain within 48 h, spread across hosts, NDR alerts, a true-positive
+  likelihood, response steps, and ready-to-run CQL hunts. The model's narrative arrives after (structured JSON; a sentence is
+  kept only if it cites facts and every name / IP / CVE in it exists in the brief).
+- **Speed:** the model is loaded at start-up and kept in memory; rules answer the hunts they are sure of and tested library
+  hunts answer matching questions without a model call; generated queries are cached; result summaries are on demand.
+- **Local model:** Ollama (`ollama pull qwen3:8b`, or `qwen3:4b` on machines with 8 GB RAM) or any OpenAI-compatible server
+  (vLLM, LM Studio); Settings → AI model.
+
+## Falcon MCP (CrowdStrike → Falcon MCP)
+The official [CrowdStrike Falcon MCP server](https://developer.crowdstrike.com/falcon-mcp/) (`falcon-mcp`, installed with the
+requirements) is built into the console.
+
+- **Managed mode (default):** the console runs falcon-mcp on 127.0.0.1 over streamable HTTP, protected by a random API key,
+  with the CrowdStrike API client saved under Sync & settings. Secrets never reach the browser.
+- **External mode:** connect to a falcon-mcp you run yourself (URL + API key).
+- **Read-only by default:** tools that change the tenant (contain host, update detections, IOCs, policies, exclusions…) are
+  not even loaded. Turn on "Allow write tools" under Connection; each write call still asks for confirmation.
+- **Modules:** pick which ones to load (fewer modules = fewer tools for an AI assistant to choose from).
+- **Page tabs:**
+  - Quick hunts (high/critical detections, find a host, RFM sensors, critical Spotlight, process hunt in NG-SIEM,
+    indicator lookup, threat actor);
+  - every tool with a form built from its schema;
+  - an NG-SIEM CQL editor with examples;
+  - History: every call, with its arguments, timing and result;
+  - the server's FQL / CQL guides.
+- **Sample-data mode:** the real falcon-mcp server runs with its Falcon API client answering from the sample database.
+  Operations that would change a tenant are refused.
+
+### Ask Falcon (plain-English hunting, built for 8B local models)
+Type a question on the Falcon MCP page ("which hosts ran psexec this week", "is 45.83.64.1 malicious", "who has CVE-2021-44228").
+
+- **How it works:**
+  - A local model (default `qwen3:8b` on Ollama; any OpenAI-compatible server such as vLLM or LM Studio also works) picks
+    one hunt from a library of about 20 tested hunts and fills its inputs.
+  - The console validates the inputs, builds the FQL / CQL itself, runs it through Falcon MCP (read-only), and shows:
+    - the query it sent;
+    - a factual summary;
+    - an optional 3–5 line model summary;
+    - the results table.
+  - You can change the hunt, its inputs or the time range and run it again. Thumbs up / down is stored.
+- **Why an 8B model is enough:**
+  - The model never writes queries. Its answer is forced into a JSON schema whose hunt field is a fixed list.
+  - IPs, hashes, CVEs, domains and time ranges are extracted by code first.
+  - Temperature 0, thinking off, about 1.5k tokens of context. Two short calls, no agent loop.
+  - Nothing leaves the machine with a local model.
+- **Without a model**, a keyword router answers (29 of the 30 test questions).
+- **Settings → AI model → Evaluate routing** scores the configured model on 30 built-in questions (accuracy and seconds
+  per question).
+- Every question is logged in `ai_asks`: the data to grow the hunt library and to fine-tune later.
+- The full tool catalog, CQL editor, call history and guides are under **Advanced**.
+
 ## Filters, detail panels and CrowdStrike pages
 - **Filters:**
   - Every dropdown filter is a searchable multi-select (values are sent as `a|b`, read as "any of"). Sort, view and yes/no

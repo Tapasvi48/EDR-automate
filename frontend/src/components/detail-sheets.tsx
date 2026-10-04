@@ -7,6 +7,7 @@ import { api } from "@/lib/api";
 import { fmtDt, fmtRel } from "@/lib/format";
 import { Badge, Card, CardHeader, Loading, Sheet } from "./ui";
 import { Mono } from "./badges";
+import { ExplainButton } from "./ai/brief";
 
 const SEV_TONE: Record<string, any> = { critical: "crit", high: "serious", medium: "warn", low: "info", informational: "neutral" };
 const sevTone = (s?: string) => SEV_TONE[(s || "").toLowerCase()] || "neutral";
@@ -62,7 +63,8 @@ export function DetectionSheet({ id, onClose }: { id: string | null; onClose: ()
   return (
     <Sheet open={!!id} onOpenChange={(o) => !o && onClose()} width={880}
       title={d ? <span className="flex flex-wrap items-center gap-2"><Badge tone={sevTone(d.severity)}>{d.severity}</Badge>{d.name}</span> : "Detection"}
-      sub={d ? `${d.hostname || d.aid} · ${fmtDt(d.created_at)} · ${d.status || "new"}${d.assigned_to ? ` · ${d.assigned_to}` : ""}` : undefined}>
+      sub={d ? `${d.hostname || d.aid} · ${fmtDt(d.created_at)} · ${d.status || "new"}${d.assigned_to ? ` · ${d.assigned_to}` : ""}` : undefined}
+      actions={id ? <ExplainButton kind="detection" id={id} label="Triage with AI" /> : undefined}>
       {!data ? <Loading error={error} /> : (
         <div className="space-y-4">
           <Card><CardHeader title="What fired" /><KV data={data.what} /></Card>
@@ -108,7 +110,8 @@ export function SpotlightSheet({ id, onClose }: { id: string | null; onClose: ()
   return (
     <Sheet open={!!id} onOpenChange={(o) => !o && onClose()} width={880}
       title={r ? <span className="flex flex-wrap items-center gap-2"><Badge tone={sevTone(r.severity)}>{r.severity}</Badge><Mono>{r.cve}</Mono>{r.title && <span>{r.title}</span>}</span> : "Spotlight finding"}
-      sub={r ? `${r.hostname || r.aid} · ${r.ip || ""} · ${r.status}` : undefined}>
+      sub={r ? `${r.hostname || r.aid} · ${r.ip || ""} · ${r.status}` : undefined}
+      actions={r ? <ExplainButton kind="cve" id={r.cve} label="Explain CVE" /> : undefined}>
       {!data ? <Loading error={error} /> : (
         <div className="space-y-4">
           <Card>

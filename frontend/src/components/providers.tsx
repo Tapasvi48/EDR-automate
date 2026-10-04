@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "sonner";
 import { ConfirmProvider } from "./ui";
 import { HostDrawerProvider } from "./host-drawer";
+import { ChatProvider } from "./ai/chat";
 
 export function Providers({ children }: { children: React.ReactNode }) {
   const [qc] = React.useState(
@@ -12,7 +13,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
   return (
     <QueryClientProvider client={qc}>
       <ConfirmProvider>
-        <HostDrawerProvider>{children}</HostDrawerProvider>
+        <HostDrawerProvider><ChatProvider>{children}</ChatProvider></HostDrawerProvider>
       </ConfirmProvider>
       <Toaster position="bottom-right" richColors closeButton />
     </QueryClientProvider>
