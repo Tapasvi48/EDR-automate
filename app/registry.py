@@ -264,6 +264,38 @@ def refresh(c):
     from .addrparse import parse_addresses
     from .commatrix import load_rules
     import bisect
+    active_rules = load_rules(c)
+    lob_ids = {r[1].lower(): r[0] for r in c.execute("SELECT id, name FROM lobs")}
+
+    def singles(text):
+        return [str(n.network_address) for n in parse_addresses(text)[1] if n.num_addresses == 1]
+
+    def mark_matrix(ip, rule):
+        """A matrix address no other source knows still becomes an asset (ISP-direct public IPs, NAT / outside IPs, inside IPs
+        of a NAT row), so every exposed address in the matrix is listed."""
+        if not ip:
+            return
+        s = reg.get(ip) or slot(ip, ip)
+        s["in_matrix"] = 1
+        add_name(s, rule.get("application") or rule.get("name") or None)
+        if not s["lobs"] and rule.get("lob"):
+            s.setdefault("matrix_lob", rule["lob"])
+
+    for rule in active_rules:  # create the matrix-only assets first, so the matching below finds them
+        snat = [ip for ip in singles(rule["src_nat"]) if is_public(ip)]
+        if rule["inbound_internet"]:
+            for ip in singles(rule["dst"]) + singles(rule["dst_nat"]):
+                mark_matrix(ip, rule)
+        if snat:
+            for ip in singles(rule["src"]) + snat:
+                mark_matrix(ip, rule)
+        # a row that names only public IP(s) — a host directly on the ISP link, no private address behind it
+        if not rule["dst"] and not rule["dst_nat"] and not snat:
+            pubs = [ip for ip in singles(rule["src"]) if is_public(ip)]
+            if pubs and not any(not is_public(ip) for ip in singles(rule["src"])):
+                for ip in pubs:
+                    mark_matrix(ip, rule)
+                    reg[ip]["isp_direct"] = rule
     # values that are not a valid IP (typos, "NOT IN USE", Excel errors like #REF!) cannot match a rule: skip them
     v4, v6 = [], []
     for k, s in reg.items():
@@ -301,7 +333,12 @@ def refresh(c):
 
     KIND = {"rules": "Communication matrix rule", "nat_map": "NAT sheet", "public_pool": "Public IP pool", "sod_nat": "SOD / NAT rule",
             "exposure": "Exposure register"}
-    for rule in load_rules(c):
+    for s in reg.values():
+        r = s.get("isp_direct")
+        if r:
+            reason(s, "matrix", f"Matrix row {r['rule_id']}: public IP directly on the internet / ISP link" + (f" ({r['isp']})" if r.get("isp") else "")
+                   + (f" · {r['application']}" if r.get("application") else ""), "Matrix · " + (r.get("sheet") or r.get("workbook") or "rules"))
+    for rule in active_rules:
         # source NAT: the sources of a row reach the internet through a public NAT IP -> internet exposed, even when many
         # hosts share that one public IP; the public IP is linked to every host behind it
         snat = [str(n.network_address) for n in parse_addresses(rule["src_nat"])[1] if n.num_addresses == 1 and is_public(str(n.network_address))]
@@ -401,7 +438,11 @@ def refresh(c):
             reason(s, "indirect", f"Indirectly exposed: {why}")
         wl = 1 if (s["ip"] and listed(s["ip"])) or any(listed(p) for p in s["public_ips"]) else 0
         exposed = 1 if s["reasons"] and not cg and not wl else 0
-        srcs = [x for x, f in (("inventory", s["in_inventory"]), ("edr", s["in_edr"]), ("scan", s["in_scan"]), ("niam", s["in_niam"])) if f]
+        srcs = [x for x, f in (("inventory", s["in_inventory"]), ("edr", s["in_edr"]), ("scan", s["in_scan"]), ("niam", s["in_niam"]),
+                               ("matrix", s.get("in_matrix"))) if f]
+        if not s["lobs"] and s.get("matrix_lob"):  # LOB named in the matrix row, for assets no inventory owns
+            lid = lob_ids.get(s["matrix_lob"].strip().lower())
+            s["lobs"][lid if lid is not None else 0] = s["matrix_lob"]
         rows.append((s["asset_key"], s["ip"], db.ip_to_num(s["ip"]), ", ".join(s["names"][:3]) or None,
                      ", ".join(sorted(set(s["lobs"].values()))) or None, "," + ",".join(str(i) for i in s["lobs"]) + ",",
                      ", ".join(sorted(set(s["msps"].values()))) or None, "," + ",".join(str(i) for i in s["msps"]) + ",",
@@ -419,6 +460,9 @@ def refresh(c):
 
 
 # ------------------------------------------------------------------ queries
+# what kind of address an exposed asset is: its own public IP (incl. directly on the ISP link), a private IP published through a
+# public / NAT IP, or a private IP reached by an inbound rule / zone / inventory mark without a known public IP
+IP_KIND = {"public": "r.is_public=1", "nat": "(r.is_public=0 AND r.public_ips IS NOT NULL)", "private": "(r.is_public=0 AND r.public_ips IS NULL)"}
 SORTS = {"ip": "r.ip_num", "name": "r.name COLLATE NOCASE", "lobs": "r.lobs", "msps": "r.msps", "edr_status": "r.edr_status",
          "last_scan": "r.last_scan", "os": "r.os COLLATE NOCASE", "feasibility": "r.feasibility", "crit": "(r.crit*1000 + r.high)", "exposed": "r.exposed", "sources": "LENGTH(r.sources)"}
 
@@ -429,6 +473,8 @@ def query(p):
     for src in (p.get("has") or "").split("|"):
         if src in SOURCES:
             w.append(f"r.in_{src}=1")
+        elif src == "matrix":  # known only from the communication matrix
+            w.append("(r.sources LIKE '%matrix%' AND r.in_inventory=0 AND r.in_edr=0 AND r.in_scan=0 AND r.in_niam=0)")
     for src in (p.get("missing") or "").split("|"):
         if src in SOURCES:
             w.append(f"r.in_{src}=0")
@@ -464,6 +510,9 @@ def query(p):
     if p.get("exposed") in ("0", "1"):
         w.append("r.exposed=?")
         params.append(int(p["exposed"]))
+    kinds = [k for k in db.multi(p, "ip_kind") if k in IP_KIND]
+    if kinds:
+        w.append("(" + " OR ".join(IP_KIND[k] for k in kinds) + ")")
     if db.multi(p, "exposure_src"):
         s, v = db.or_like("r.exposure_src", db.multi(p, "exposure_src"), "%,{},%")
         w.append(s)
@@ -619,7 +668,9 @@ def exposure_summary():
             SUM(exposed AND edr_status='Not Installed') edr_missing,
             SUM(exposed AND edr_detail='removed from console') edr_removed,
             SUM(exposed AND edr_detail='old EDR import') edr_import,
-            SUM(exposed AND (crit + high) = 0) no_crit_high FROM asset_registry""")
+            SUM(exposed AND (crit + high) = 0) no_crit_high, SUM(exposed AND is_public=1) kind_public,
+            SUM(exposed AND is_public=0 AND public_ips IS NOT NULL) kind_nat, SUM(exposed AND is_public=0 AND public_ips IS NULL) kind_private,
+            SUM(exposed AND sources LIKE '%matrix%' AND in_inventory=0 AND in_edr=0 AND in_scan=0 AND in_niam=0) matrix_only FROM asset_registry""")
         # "how we know": only the four evidence sources the page explains (CrowdStrike, inventory, VA scan, matrix)
         know = db.one(c, """SELECT
             SUM(exposed AND (exposure_src LIKE '%,scan,%' OR exposure_src LIKE '%,ip,%')) by_scan,

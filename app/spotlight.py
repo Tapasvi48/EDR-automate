@@ -77,7 +77,7 @@ def _rows(c, p, limit=None, offset=0):
     names = _va_names(c)
     for r in rows:
         r["in_scanner"] = (r["cve"] or "").upper() in scan.get(r["ip"] or "", set())
-        r["title"] = r.get("title") or names.get((r["cve"] or "").upper()) or ""
+        r["title"] = r.get("title") or names.get((r["cve"] or "").upper()) or display_name(r)
     if p.get("in_scanner") in ("0", "1"):  # applied after the join with the VA scan
         rows = [r for r in rows if r["in_scanner"] == (p["in_scanner"] == "1")]
     return rows
@@ -127,8 +127,14 @@ def spotlight_by_cve(request: Request):
             COUNT(DISTINCT s.aid) hosts, GROUP_CONCAT(DISTINCT s.product) product, MAX(s.remediation) remediation
             {BASE} {where} GROUP BY s.cve ORDER BY hosts DESC, MAX(s.score) DESC LIMIT 2000""", params)
     for r in rows:
-        r["title"] = r["title"] or names.get((r["cve"] or "").upper()) or ""
+        r["title"] = r["title"] or names.get((r["cve"] or "").upper()) or display_name(r)
     return {"total": len(rows), "rows": rows}
+
+
+def display_name(r):
+    """CrowdStrike often sends no vulnerability name: show the CVE with the affected product (first one) instead of a blank."""
+    prod = (r.get("product") or "").split(",")[0].strip()
+    return f"{r.get('cve') or 'Unnamed vulnerability'}" + (f" · {prod}" if prod else "")
 
 
 @router.get("/api/spotlight/by-host")
@@ -177,7 +183,7 @@ def spotlight_item(id: str):
     raw = db.jloads(r.pop("raw", None), {}) or {}
     cve = raw.get("cve") or {}
     apps = raw.get("apps") or []
-    r["title"] = r.get("title") or names.get((r["cve"] or "").upper()) or ""
+    r["title"] = r.get("title") or names.get((r["cve"] or "").upper()) or display_name(r)
     vuln = {k: v for k, v in {
         "Vulnerability": r["title"], "CVE": r["cve"], "Description": r.get("description"), "Severity": r["severity"], "CVSS": r["score"],
         "CVSS vector": r.get("vector"), "ExPRT rating": r["exprt"], "Exploit status": r["exploit_status"],

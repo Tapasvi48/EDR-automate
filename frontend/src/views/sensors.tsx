@@ -3,8 +3,8 @@ import * as React from "react";
 import Link from "next/link";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { RefreshCw } from "lucide-react";
-import { api } from "@/lib/api";
+import { FileSpreadsheet, RefreshCw } from "lucide-react";
+import { api, downloadExcel } from "@/lib/api";
 import { useUrlState } from "@/lib/hooks";
 import { fmtDt, fmtN } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -39,7 +39,8 @@ export default function Sensors() {
       <PageHeader title="Sensor versions & OS support"
         sub={<>Builds CrowdStrike tags N / N-1 / N-2 (Sensor update policies API), which sensor every agent runs, and which operating systems the sensor supports — the same list <Link className="underline" href="/feasibility/">EDR feasibility</Link> decides with.
           {data.fetched?.at ? ` Fetched ${fmtDt(data.fetched.at)}${data.fetched.kernels ? ` · ${fmtN(data.fetched.kernels)} Linux kernels` : ""}.` : " Not fetched from CrowdStrike yet."}</>}
-        actions={<Button loading={busy} onClick={refresh}><RefreshCw /> Refresh from CrowdStrike</Button>} />
+        actions={<><Button onClick={() => downloadExcel("/api/sensor-support/export")}><FileSpreadsheet /> Download Excel</Button>
+          <Button loading={busy} onClick={refresh}><RefreshCw /> Refresh from CrowdStrike</Button></>} />
       {data.fetched?.kernel_error && <Callout tone="warn" className="mb-4">Supported kernels: {data.fetched.kernel_error}</Callout>}
       <div className="mb-4 grid gap-3 md:grid-cols-3">
         {Object.entries(data.builds).map(([p, bs]: [string, any]) => (

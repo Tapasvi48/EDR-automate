@@ -341,6 +341,27 @@ def local_exposed_no_edr(c, a):
                           WHERE r.exposed=1 AND r.edr_status NOT IN ('Online','Offline'){w} ORDER BY r.crit DESC, r.high DESC LIMIT 500""", p)
 
 
+def local_exposed_assets(c, a):
+    """Every internet-exposed asset, whatever its EDR state: own public IP / ISP-direct, private behind a public / NAT IP, or
+    private exposed by a rule / zone / mark — with EDR, LOB, public IPs and the evidence."""
+    w, p = _lob_where(a)
+    edr = (a.get("edr") or "").lower()
+    if edr in ("with", "yes", "installed"):
+        w += " AND r.edr_status IN ('Online','Offline')"
+    elif edr in ("without", "no", "missing"):
+        w += " AND r.edr_status NOT IN ('Online','Offline')"
+    kind = (a.get("ip_kind") or "").lower()
+    if kind.startswith("pub"):
+        w += " AND r.is_public=1"
+    elif kind.startswith("nat"):
+        w += " AND r.is_public=0 AND r.public_ips IS NOT NULL"
+    elif kind.startswith("priv"):
+        w += " AND r.is_public=0"
+    return db.rows(c, f"""SELECT r.ip, r.name, CASE WHEN r.is_public=1 THEN 'Public IP' WHEN r.public_ips IS NOT NULL THEN 'Private behind NAT'
+                          ELSE 'Private (rule / zone)' END address_type, r.public_ips, r.lobs, r.edr_status, r.crit, r.high, r.exposure_src
+                          FROM asset_registry r WHERE r.exposed=1{w} ORDER BY r.edr_status NOT IN ('Online','Offline') DESC, r.crit DESC, r.high DESC LIMIT 2000""", p)
+
+
 def local_coverage_gaps(c, a):
     w, p = _lob_where(a)
     return db.rows(c, f"""SELECT r.ip, r.name, r.lobs, r.msps, r.node_type, r.os, r.exposed FROM asset_registry r
@@ -348,7 +369,7 @@ def local_coverage_gaps(c, a):
 
 
 def local_kev_exposed(c, a):
-    return db.rows(c, """SELECT s.hostname, COALESCE(NULLIF(h.connection_ip,''), s.ip) ip, s.cve, s.title, s.severity, s.exprt, s.kev,
+    return db.rows(c, """SELECT s.hostname, COALESCE(NULLIF(h.connection_ip,''), s.ip) ip, s.cve, COALESCE(NULLIF(s.title,''), s.cve || COALESCE(' · ' || s.product, '')) title, s.severity, s.exprt, s.kev,
                          (SELECT r.lobs FROM asset_registry r WHERE r.aid=s.aid LIMIT 1) lobs FROM spotlight_vulns s LEFT JOIN hosts h ON h.aid=s.aid
                          WHERE (s.kev=1 OR UPPER(s.severity)='CRITICAL') AND EXISTS (SELECT 1 FROM asset_registry r WHERE r.aid=s.aid AND r.exposed=1)
                          ORDER BY s.kev DESC, s.score DESC LIMIT 500""")
@@ -407,7 +428,7 @@ def local_timeline(c, a):
     return timeline(c, a.get("host") or a.get("ip") or "", int(a.get("days") or 30))
 
 
-LOCAL = {"exposed_no_edr": local_exposed_no_edr, "coverage_gaps": local_coverage_gaps, "kev_exposed": local_kev_exposed,
+LOCAL = {"exposed_assets": local_exposed_assets, "exposed_no_edr": local_exposed_no_edr, "coverage_gaps": local_coverage_gaps, "kev_exposed": local_kev_exposed,
          "riskiest_assets": local_riskiest, "lob_posture": local_lob_posture, "asset_owner": local_owner, "asset_timeline": local_timeline}
 
 

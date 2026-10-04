@@ -316,7 +316,7 @@ function Thinking({ text }: { text: string }) {
   );
 }
 
-const KIND: Record<string, [string, string]> = { hunt: ["Hunt", "info"], cql: ["CQL hunt", "violet"], explain: ["Brief", "info"], ioc: ["IOC check", "warn"], knowledge: ["Knowledge base", "neutral"], path: ["Fabric graph", "violet"] };
+const KIND: Record<string, [string, string]> = { learned: ["Preference saved", "good"], hunt: ["Hunt", "info"], cql: ["CQL hunt", "violet"], explain: ["Brief", "info"], ioc: ["IOC check", "warn"], knowledge: ["Knowledge base", "neutral"], path: ["Fabric graph", "violet"] };
 
 function Trace({ m }: { m: any }) {
   const p = m.payload || {};
@@ -350,9 +350,27 @@ function Message({ m, onOpenStudio, onAsk }: { m: any; onOpenStudio: (cql: strin
         {m.kind === "ioc" && <IocResult r={p} />}
         {m.kind === "knowledge" && <KnowledgeMsg p={p} />}
         {m.kind === "path" && <PathMsg p={p} text={m.text} />}
+        {m.kind === "learned" && <div className="text-[13px]">{m.text}<div className="mt-1 text-[11.5px] text-muted">Change or remove it under AI SOC → Settings → What the AI learned.</div></div>}
+        <LessonNote p={p} />
         {!Object.keys(KIND).includes(m.kind) && <div className="text-[13px]">{m.text}</div>}
         <FollowUps m={m} onAsk={onAsk} />
       </div>
+    </div>
+  );
+}
+
+/** The AI learned from a correction, or answered the way it was taught before (undo-able). */
+function LessonNote({ p }: { p: any }) {
+  const [gone, setGone] = React.useState(false);
+  const l = p?.learned || p?.applied_lesson;
+  if (!l || gone) return null;
+  const forget = async () => { try { await api(`/api/ai/learned/lesson/${l.id}`, { method: "DELETE" }); setGone(true); toast.success("Forgotten"); } catch (e: any) { toast.error(e.message); } };
+  return (
+    <div className="mt-2.5 flex flex-wrap items-center gap-1.5 rounded-xl border border-good/30 bg-good-soft/50 px-3 py-1.5 text-[12px]">
+      <Brain className="size-3.5 text-good-fg" />
+      {p.learned ? <>Learned: next time someone asks <b>“{l.question}”</b>, I'll answer <b>“{l.right_question}”</b>.</>
+        : <>Answered as you taught me: <b>“{l.right_question}”</b> instead of <span className="text-fg-2">“{l.question}”</span>.</>}
+      <button onClick={forget} className="ml-auto text-[11.5px] text-muted underline-offset-2 hover:text-crit-fg hover:underline">{p.learned ? "undo" : "forget this"}</button>
     </div>
   );
 }

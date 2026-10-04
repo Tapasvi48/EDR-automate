@@ -398,6 +398,7 @@ function AiDialog({ ai, onClose, onSwitch }: { ai: any; onClose: () => void; onS
           <Button onClick={evaluate} disabled={ev?.running}>{ev?.running ? `Evaluating… ${ev.done}/${ev.total}` : `Evaluate routing (${ev?.total ?? 30} questions)`}</Button>
         </div>}
         {provider !== "off" && <CqlEval />}
+        <Learned />
         {r && (
           <Card className="p-3">
             <div className="mb-2 flex flex-wrap gap-x-4 text-[12.5px]"><b>{r.model}</b><span>routing accuracy <b>{r.model_accuracy}%</b></span><span>keywords {r.keyword_accuracy}%</span>
@@ -410,6 +411,27 @@ function AiDialog({ ai, onClose, onSwitch }: { ai: any; onClose: () => void; onS
         )}
       </div>
     </Modal>
+  );
+}
+
+/** Lessons from analysts' corrections and standing preferences ("remember / always / never …"). */
+function Learned() {
+  const { data, refetch } = useQuery({ queryKey: ["ai-learned"], queryFn: () => api<any>("/api/ai/learned") });
+  const forget = async (kind: string, id: number) => { await api(`/api/ai/learned/${kind}/${id}`, { method: "DELETE" }); refetch(); };
+  const n = (data?.lessons?.length || 0) + (data?.prefs?.length || 0);
+  return (
+    <Card className="p-3">
+      <div className="mb-1 flex items-center gap-2 text-[12.5px]"><b>What the AI learned</b><span className="text-muted">{n} item{n === 1 ? "" : "s"}</span></div>
+      <p className="mb-2 text-[11.5px] text-fg-2">Correct the assistant in chat (“no, I want …”) and it answers that way next time; tell it “remember / always / never …” for standing preferences.</p>
+      <div className="max-h-48 space-y-1 overflow-y-auto text-[12px] scroll-thin">
+        {data?.prefs?.map((p: any) => <div key={`p${p.id}`} className="flex items-center gap-2 rounded-lg bg-surface-2 px-2 py-1"><Badge tone="good">preference</Badge><span className="flex-1">{p.text}</span>
+          <button className="text-muted hover:text-crit-fg" onClick={() => forget("pref", p.id)}><Trash2 className="size-3.5" /></button></div>)}
+        {data?.lessons?.map((l: any) => <div key={`l${l.id}`} className="flex items-center gap-2 rounded-lg bg-surface-2 px-2 py-1"><Badge tone="info">lesson</Badge>
+          <span className="flex-1">“{l.question}” → <b>“{l.right_question}”</b> <span className="text-muted">· used {l.uses}×</span></span>
+          <button className="text-muted hover:text-crit-fg" onClick={() => forget("lesson", l.id)}><Trash2 className="size-3.5" /></button></div>)}
+        {!n && <div className="text-muted">Nothing yet.</div>}
+      </div>
+    </Card>
   );
 }
 

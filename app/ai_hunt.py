@@ -46,6 +46,9 @@ def _fql(v):
     return str(v).replace("'", "").replace("\\", "")
 
 
+INCLUDE_INFO = [False]  # set per question: True when the analyst asks for informational detections / prefers them
+
+
 def _sev_list(p):
     s = [x.strip().title() for x in re.split(r"[,|/ ]+", p.get("severity") or "") if x.strip()]
     return [x for x in s if x in SEVS]
@@ -57,6 +60,8 @@ def _det_filter(p, d):
     f = [f"created_timestamp:>'now-{d}d'"]
     if _sev_list(p):
         f.append("severity_name:[" + ",".join(f"'{s}'" for s in _sev_list(p)) + "]")
+    elif not INCLUDE_INFO[0]:  # informational detections are noise in counts and lists unless asked for
+        f.append("severity_name:!'Informational'")
     if p.get("host"):
         f.append(f"device.hostname:'{_fql(p['host'])}'")
     if p.get("tactic"):
@@ -155,6 +160,12 @@ TEMPLATES = {
                     lambda p, d: {"filter": f"value:*'*{_fql(p['text'])}*'" if p.get("text") else None, "limit": 100},
                     ["type", "value", "action", "severity", "description", "created_on"], ["list our custom IOCs"]),
     # answered from the data fabric (the console's own joined data) — no CrowdStrike call
+    "exposed_assets": ("Internet-exposed assets", "every internet-exposed asset (any EDR state): public IPs, private IPs behind NAT, ISP-direct; "
+                       "optionally one LOB, with / without EDR, or one address type",
+                       {"lob": ("lob", False), "edr": ("edrfilter", False), "ip_kind": ("ipkind", False)}, "fabric:exposed_assets",
+                       lambda p, d: {"lob": p.get("lob"), "edr": p.get("edr"), "ip_kind": p.get("ip_kind")},
+                       ["ip", "name", "address_type", "public_ips", "lobs", "edr_status", "crit", "high", "exposure_src"],
+                       ["show internet exposed hosts", "internet facing assets in Payments", "exposed assets that have EDR"]),
     "exposed_no_edr": ("Exposed assets without EDR", "internet-exposed assets that have no working CrowdStrike agent, optionally in one LOB",
                        {"lob": ("lob", False)}, "fabric:exposed_no_edr", lambda p, d: {"lob": p.get("lob")},
                        ["ip", "name", "lobs", "edr_status", "crit", "high", "exposure_src"], ["exposed assets without EDR in Payments"]),
@@ -268,6 +279,10 @@ def _ok(kind, v):
         from .fabric import index
         lobs = index()["lobs"]
         return lobs.get(v.lower()) or next((n for k, n in lobs.items() if k.startswith(v.lower()) or v.lower() in k), None)
+    if kind == "edrfilter":
+        return "with" if re.match(r"(with|yes|installed|has)", v, re.I) else "without" if re.match(r"(without|no|missing|none)", v, re.I) else None
+    if kind == "ipkind":
+        return "public" if re.match(r"pub", v, re.I) else "nat" if re.match(r"nat|behind", v, re.I) else "private" if re.match(r"priv", v, re.I) else None
     if kind == "bool":
         return "true" if v.lower() in ("true", "yes", "1") else None
     return re.sub(r"[^\w .:@\\/-]", "", v)[:80].strip() or None  # text
@@ -331,8 +346,12 @@ FABRIC_WORDS = [
 
 def route_keywords(q, ents):
     ql = " " + q.lower()
-    if "exposed" in ql and any(w in ql for w in ("no edr", "without edr", "no agent", "without an agent", "without crowdstrike", "missing edr", "no crowdstrike")):
+    exposed = re.search(r"internet[- ]?(exposed|facing)|\bexposed\b|public[- ]facing|exposure", ql)
+    if exposed and any(w in ql for w in ("no edr", "without edr", "no agent", "without an agent", "without crowdstrike", "missing edr", "no crowdstrike",
+                                         "not covered", "unprotected")):
         return "exposed_no_edr"
+    if exposed and not any(w in ql for w in ("vuln", "cve", "kev", "patch", "riskiest")):
+        return "exposed_assets"
     for tid, words in FABRIC_WORDS:
         if any(w in ql for w in words):
             return tid
@@ -386,6 +405,10 @@ def _guess_slots(tid, q, ents):
     if tid == "hunt_user_logons":
         m = re.search(r"(?:user|account)\s+([\w.@\\$-]+)|did\s+([\w.@\\$-]+)\s+log", ql)
         p["user"] = (m.group(1) or m.group(2)) if m else None
+    if tid == "exposed_assets":
+        p["edr"] = "with" if re.search(r"\bwith (edr|crowdstrike|an? agent)|\bhave (edr|crowdstrike)|edr installed|protected", ql) else None
+        p["ip_kind"] = ("public" if re.search(r"public ip|isp|direct", ql) else "nat" if re.search(r"\bnat|behind", ql)
+                        else "private" if re.search(r"private", ql) else None)
     if tid == "custom_iocs":
         p["text"] = ents.get("domain") or ents.get("ip") or ents.get("hash")
     if tid == "hosts_platform":
@@ -427,6 +450,14 @@ def _schema():
         "days": {"type": "integer"}}, "required": ["template", "params", "days"]}
 
 
+def _pref_include_info():
+    try:
+        from .learn import pref_flag
+        return pref_flag("include_informational")
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def ai_settings():
     s = db.get_settings()
     return {"provider": s.get("ai_provider") or "ollama", "url": (s.get("ai_url") or "http://127.0.0.1:11434").rstrip("/"),
@@ -438,6 +469,13 @@ def _llm(messages, schema=None, max_tokens=300, timeout=120):
     cfg = ai_settings()
     if cfg["provider"] == "off":
         raise RuntimeError("AI model switched off")
+    try:
+        from .learn import prefs_text
+        pr = prefs_text()
+    except Exception:  # noqa: BLE001
+        pr = []
+    if pr and messages and messages[0]["role"] == "system":
+        messages = [{**messages[0], "content": messages[0]["content"] + "\nAnalyst preferences (follow them): " + "; ".join(pr[-8:])}] + messages[1:]
     if cfg["provider"] == "openai":
         body = {"model": cfg["model"], "messages": messages, "temperature": 0, "max_tokens": max_tokens}
         if schema:
@@ -491,6 +529,7 @@ def plan(q, use_model=True):
     if not q:
         raise HTTPException(400, "Ask a question")
     ents = entities(q)
+    INCLUDE_INFO[0] = bool(re.search(r"\binformational|\binfo\b|all severities|every severity", q, re.I)) or _pref_include_info()
     t0, router, err, raw = time.time(), "keywords", None, None
     kw = route_keywords(q, ents)
     sure = kw != "detections_recent" or bool(re.search(r"\b(detections?|alerts?|incidents?)\b", q, re.I))
@@ -506,6 +545,11 @@ def plan(q, use_model=True):
         tid = kw
         raw = {"template": tid, "params": _guess_slots(tid, q, ents), "days": ents.get("days")}
     tid = raw["template"]
+    if router == "model":  # optional filters must be in the question: a small model likes to add some that are not
+        guess = _guess_slots(tid, q, ents)
+        for k in ("edr", "ip_kind", "severity", "exploited", "platform"):
+            if k in (raw.get("params") or {}) and not guess.get(k):
+                raw["params"].pop(k, None)
     days = max(1, min(90, int(raw.get("days") or ents.get("days") or 7)))
     if ents.get("days"):
         days = ents["days"]  # an explicit time range in the question wins
@@ -533,6 +577,8 @@ def _get(row, path):
 def compact(tid, data):
     """The rows of a tool result reduced to the template's columns (what the table and the summary use)."""
     cols = TEMPLATES[tid][5]
+    if isinstance(data, dict) and "buckets" in data:  # one aggregation comes back as an object, not a list
+        data = {"results": [data]}
     rows = data.get("results") if isinstance(data, dict) else data
     if not isinstance(rows, list):
         return cols, []
@@ -553,7 +599,7 @@ def facts(tid, rows):
             "hunt_process": ["ComputerName"], "hunt_cmdline": ["ComputerName", "UserName"], "vulns_critical": ["cve.id", "host_info.hostname"],
             "vulns_cve": ["host_info.hostname"], "hosts_offline": ["platform_name"], "hosts_rfm": ["os_version"], "hunt_network_ip": ["ComputerName"],
             "hunt_dns": ["ComputerName"], "hunt_port": ["ComputerName"], "exposed_no_edr": ["lobs", "edr_status"], "coverage_gaps": ["lobs", "node_type", "os"],
-            "kev_exposed": ["cve", "hostname"], "riskiest_assets": ["lob", "level"], "asset_timeline": ["kind"]}.get(tid, [])
+            "kev_exposed": ["cve", "hostname"], "exposed_assets": ["address_type", "edr_status", "lobs"], "riskiest_assets": ["lob", "level"], "asset_timeline": ["kind"]}.get(tid, [])
     for k in keys:
         cnt = {}
         for r in rows:
@@ -658,7 +704,8 @@ EVAL = [
     ("is 45.83.64.1 malicious", "intel_indicator"), ("is the domain badupdate.xyz known bad", "intel_indicator"),
     ("tell me about scattered spider", "intel_actor"), ("show our custom iocs", "custom_iocs"),
     ("any ransomware alerts this week", "detections_tactic"), ("top analysts by alerts handled", "detection_counts"),
-    ("which internet exposed assets have no EDR", "exposed_no_edr"), ("servers missing crowdstrike in payments", "coverage_gaps"),
+    ("which internet exposed assets have no EDR", "exposed_no_edr"), ("show internet exposed hosts", "exposed_assets"),
+    ("list all internet facing assets in payments", "exposed_assets"), ("exposed public IPs directly on the ISP link", "exposed_assets"), ("servers missing crowdstrike in payments", "coverage_gaps"),
     ("known exploited vulnerabilities on exposed hosts", "kev_exposed"), ("top 10 riskiest assets", "riskiest_assets"),
     ("security posture per LOB", "lob_posture"), ("who owns 10.20.0.95", "asset_owner"), ("timeline of PAY-SER-085 for the last month", "asset_timeline"),
 ]
@@ -755,7 +802,7 @@ def ai_plan(data: dict = Body(...)):
 
 @router.post("/api/ai/ask")
 def ai_ask(data: dict = Body(...)):
-    return ask(data.get("question"), data.get("plan"), data.get("summarize"))
+    return ask(data.get("question"), data.get("plan"), data.get("summarize"), use_model=data.get("use_model", "auto"))
 
 
 @router.post("/api/ai/summarize")

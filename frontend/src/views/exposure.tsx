@@ -64,6 +64,19 @@ export default function Exposure() {
         ))}
         <span className="ml-1 text-[11.5px] text-muted">an asset can have several</span>
       </div>
+      <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[12.5px]">
+        <span className="mr-1 text-muted">Address type</span>
+        {([["public", "Public IP (own / ISP-direct)", s.kind_public], ["nat", "Private behind a public / NAT IP", s.kind_nat],
+          ["private", "Private, exposed by rule / zone / mark", s.kind_private]] as [string, string, number][]).map(([k, l, n]) => (
+          <button key={k} onClick={() => only({ ip_kind: k })}
+            className={cn("rounded-full border px-2.5 py-0.5 transition-colors", state.ip_kind === k ? "border-accent bg-accent-soft text-accent-fg" : "border-border hover:border-border-strong")}>
+            {l} <b className="tabular">{fmtN(n || 0)}</b>
+          </button>
+        ))}
+        {s.matrix_only > 0 && <button onClick={() => only({ has: "matrix" })}
+          className={cn("rounded-full border px-2.5 py-0.5", state.has === "matrix" ? "border-accent bg-accent-soft text-accent-fg" : "border-border hover:border-border-strong")}
+          title="Addresses only the communication matrix knows (no inventory, scan, CrowdStrike or NIAM record yet)">Only in the matrix <b className="tabular">{fmtN(s.matrix_only)}</b></button>}
+      </div>
 
       <Card className="mt-4">
         <button className="flex w-full items-center gap-2 px-4 py-3 text-left text-[13px] font-semibold" onClick={() => setHow(!how)}>

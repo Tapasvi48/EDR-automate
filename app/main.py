@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import asset360, commatrix, config, cs_posture, db, detections, satellite, seceon, splunk, falcon, feasibility, sensor_support, filetemplates, sod, inventory, legacy, niam, posture, queries, registry, sync, threats, passive, surface, alerts, intel, spotlight, subnets, whois, falconmcp, ai_hunt, fabric, kb, briefs, ioc, chat, vulns, cql, ontology, cqlhub
+from . import asset360, commatrix, config, cs_posture, db, detections, satellite, seceon, splunk, falcon, feasibility, sensor_support, filetemplates, sod, inventory, legacy, niam, posture, queries, registry, sync, threats, passive, surface, alerts, intel, spotlight, subnets, whois, falconmcp, ai_hunt, fabric, kb, briefs, ioc, chat, vulns, cql, ontology, cqlhub, learn
 from .exporter import xlsx_response
 from .extra import router as extra_router
 
@@ -1622,7 +1622,7 @@ app.include_router(subnets.router)
 app.include_router(whois.router)
 app.include_router(falconmcp.router)
 app.include_router(ai_hunt.router)
-for _r in (fabric.router, kb.router, briefs.router, ioc.router, chat.router, cql.router, ontology.router, cqlhub.router):
+for _r in (fabric.router, kb.router, briefs.router, ioc.router, chat.router, cql.router, ontology.router, cqlhub.router, learn.router):
     app.include_router(_r)
 
 FRONTEND = config.BASE_DIR / "frontend" / "out"

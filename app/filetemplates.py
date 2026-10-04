@@ -72,28 +72,36 @@ TEMPLATES = {
         ("Vendor", "", "", "Cisco", "Nokia"),
         ("Circle", "", "Circle / region", "Mumbai", "Delhi"),
     ]),
-    "comm_matrix": ("Communication matrix", "A workbook with one sheet per kind of list: firewall rules, public IP pool, public ↔ private NAT "
-                    "list, SOD / NAT rules and an exposure register (the download has an example of each and a How to fill sheet). "
-                    "On upload you pick each sheet's type and match its columns. Internet-facing rows make the addresses they name "
-                    "internet-exposed; any row can also be marked by hand on the Communication matrix page.", "live", [
-        ("Rule ID", "yes", "Unique rule / flow ID", "FW-DMZ-0142", "FW-CORE-0077"),
-        ("Direction", "yes", "Inbound (from internet / ISP) / Outbound / Internal", "Inbound", "Internal"),
-        ("Source Zone", "", "Internet, ISP, Partner, DMZ, Core, OAM…", "Internet", "OAM"),
-        ("Source IP / Subnet", "yes", "IP, CIDR, range or Any", "Any", "10.30.8.0/24"),
-        ("Source NAT IP", "", "Address after source NAT", "", "10.30.250.4"),
-        ("ISP / Link", "", "ISP or link the flow enters through", "ISP-A MPLS-01", ""),
-        ("Firewall", "yes", "Firewall / cluster name", "DMZ-FW-01", "CORE-FW-02"),
-        ("Firewall Rule Name", "", "", "allow-https-web", "oam-ssh"),
-        ("Destination Zone", "", "", "DMZ", "Core"),
-        ("Destination NAT IP (Public)", "", "Public / VIP address the source connects to", "198.51.100.21", ""),
-        ("Destination IP / Subnet", "yes", "Real (internal) destination IP or CIDR", "10.10.4.21", "10.30.0.0/24"),
+    "comm_matrix": ("Communication matrix", "Recommended: the ‘Unified matrix’ sheet of the download — one row per flow, one layout for every "
+                    "pattern (published service, outbound source NAT, inside ↔ outside static NAT, ISP-direct public IP, partner / NNI, "
+                    "internal). It is read without column matching. Existing workbooks with a public IP pool, NAT list, SOD NAT or exposure "
+                    "register sheet still work (one example sheet each). Internet-facing rows list every inside, outside and public IP they "
+                    "name on Internet exposed, even when no other source knows the address.", "live", [
+        ("Rule ID", "yes", "Unique rule / flow ID", "MX-0001", "MX-0002"),
+        ("Flow type", "", "Free text: Published service · Outbound source NAT · ISP direct · Static NAT · Partner / NNI · Internal", "Published service", "Outbound source NAT"),
+        ("Direction", "yes", "Inbound (from internet / ISP / partner) · Outbound · Internal", "Inbound", "Outbound"),
+        ("Source Zone", "", "Internet, ISP, NNI-Partner, DMZ, Core, OAM…", "Internet", "OAM"),
+        ("Source IP / Subnet (inside)", "yes", "Our inside IP / CIDR / range, or Any for the internet", "Any", "10.30.8.15"),
+        ("Source NAT / Outside IP (public)", "", "Public IP the inside source is seen as (outbound NAT)", "", "49.36.10.30"),
+        ("ISP / Link", "", "ILL / ISP / MPLS / NNI link", "Airtel ILL-01", "Jio ILL-02"),
+        ("Destination Zone", "", "", "DMZ", "Internet"),
+        ("Destination Public / NAT IP", "", "Public / VIP IP (inbound NAT) — or the public IP of an ISP-direct host", "49.36.10.21", ""),
+        ("Destination IP / Subnet (inside)", "yes", "Our inside IP / CIDR behind the public IP; empty for ISP-direct hosts", "10.10.4.21", "Any"),
         ("Protocol", "yes", "tcp / udp / icmp / any", "tcp", "tcp"),
-        ("Port(s)", "yes", "Port, list or range", "443", "22, 830"),
-        ("Application / Service", "", "", "Internet banking web", "NETCONF / SSH"),
+        ("Port(s)", "yes", "Port, list or range", "443, 8443", "443"),
+        ("Service / Use", "", "", "Customer self-care portal", "Vendor patch download"),
+        ("Application", "", "", "Self-care", "OSS patching"),
+        ("Application Owner", "", "", "Digital Channels", "NetOps"),
+        ("LOB", "", "Owner LOB (used for assets no inventory lists)", "Retail Banking", "Payments"),
+        ("MS Partner", "", "", "Wipro", "TCS"),
+        ("Domain", "", "", "Digital", "OAM"),
+        ("Location / DC", "", "DC, circle or POP", "DC-Mumbai", "DC-Delhi"),
+        ("Firewall", "", "Firewall / cluster name", "DMZ-FW-01", "EDGE-FW-02"),
+        ("Firewall Rule Name", "", "", "allow-https-selfcare", "oam-out-443"),
         ("Action", "yes", "Allow / Deny", "Allow", "Allow"),
-        ("Change / CR No.", "", "Approval reference", "CR-2026-0931", "CR-2026-1102"),
+        ("Change / SOD No.", "", "Approval reference", "SOD-2026-0931", "CR-2026-1102"),
         ("Valid Till", "", "Date, blank = permanent", "", "2026-12-31"),
-        ("Remarks", "", "", "", ""),
+        ("Remarks", "", "", "public VIP → internal web server", "inside IP leaves through the outside IP"),
     ]),
     "sod": ("Vulnerability exceptions (SOD)", "Approved exceptions (SOD / risk acceptance). Matching findings are shown as Accepted, "
             "left out of open counts and risk, and reopen automatically when the exception expires.", "live", [
@@ -128,7 +136,7 @@ TEMPLATES = {
 }
 
 
-FIELD = {'ndr': {'Alert ID': 'alert_id', 'Time': 'created_at', 'Severity': 'severity', 'Alert Name': 'name', 'Category / Tactic': 'category', 'Source IP': 'src_ip', 'Destination IP': 'dst_ip', 'Host': 'host', 'Description': 'description', 'Status': 'status'}, 'inventory': {'IP': 'ip', 'Node Name': 'node_name', 'MSP': 'msp', 'Node Type': 'node_type', 'Domain': 'domain', 'Live/Non Live': 'live', 'OS': 'os', 'EDR Feasible': 'edr_feasible', 'EDR Installed': 'edr_installed', 'Remarks': 'remarks', 'NIAM Integrated': 'niam_integrated', 'NE ID': 'ne_id'}, 'vulnerability': {'IP Address': 'ip', 'Vulnerability Name': 'name', 'Severity': 'severity', 'Protocol': 'protocol', 'Port': 'port', 'Synopsis': 'synopsis', 'Description': 'description', 'Steps to Remediate': 'solution', 'Plugin Text': 'plugin_text', 'See Also': 'see_also', 'CVE': 'cve', 'Exploit Ease': 'exploit_ease', 'Plugin ID': 'plugin_id', 'First Discovered': 'first_discovered', 'Last Observed': 'last_observed', 'Vuln Publication Date': 'vuln_pub_date', 'Patch Publication Date': 'patch_pub_date', 'Remarks': 'remarks', 'Operating System': 'os'}, 'old_edr': {'Host ID': 'aid', 'Hostname': 'hostname', 'Local IP': 'local_ip', 'OS Version': 'os_version', 'Sensor Version': 'agent_version', 'First Seen': 'first_seen', 'Last Seen': 'last_seen', 'Domain': 'machine_domain'}, 'agent_tags': {'Agent ID': 'id', 'MSP': 'msp'}, 'niam': {'Host': 'host', 'NE ID': 'ne_id', 'NE Name': 'ne_name', 'NE Type': 'ne_type', 'Vendor': 'vendor', 'Circle': 'circle'}, 'comm_matrix': {'Rule ID': 'rule_id', 'Direction': 'direction', 'Source Zone': 'src_zone', 'Source IP / Subnet': 'src', 'Source NAT IP': 'src_nat', 'ISP / Link': 'isp', 'Firewall': 'firewall', 'Firewall Rule Name': 'fw_rule', 'Destination Zone': 'dst_zone', 'Destination NAT IP (Public)': 'dst_nat', 'Destination IP / Subnet': 'dst', 'Protocol': 'protocol', 'Port(s)': 'ports', 'Application / Service': 'service', 'Action': 'action', 'Change / CR No.': 'cr', 'Valid Till': 'valid_till', 'Remarks': 'remarks'}, 'sod': {'Exception ID': 'exception_id', 'Scope': 'scope', 'IP / Subnet': 'target', 'LOB': 'lob', 'Plugin ID': 'plugin_id', 'CVE': 'cve', 'Vulnerability Name': 'name', 'Port': 'port', 'Justification': 'justification', 'Compensating Control': 'control', 'Approved By': 'approved_by', 'Approval Date': 'approval_date', 'Valid Till': 'valid_till', 'Ticket / CR No.': 'ticket', 'Remarks': 'remarks'}}
+FIELD = {'ndr': {'Alert ID': 'alert_id', 'Time': 'created_at', 'Severity': 'severity', 'Alert Name': 'name', 'Category / Tactic': 'category', 'Source IP': 'src_ip', 'Destination IP': 'dst_ip', 'Host': 'host', 'Description': 'description', 'Status': 'status'}, 'inventory': {'IP': 'ip', 'Node Name': 'node_name', 'MSP': 'msp', 'Node Type': 'node_type', 'Domain': 'domain', 'Live/Non Live': 'live', 'OS': 'os', 'EDR Feasible': 'edr_feasible', 'EDR Installed': 'edr_installed', 'Remarks': 'remarks', 'NIAM Integrated': 'niam_integrated', 'NE ID': 'ne_id'}, 'vulnerability': {'IP Address': 'ip', 'Vulnerability Name': 'name', 'Severity': 'severity', 'Protocol': 'protocol', 'Port': 'port', 'Synopsis': 'synopsis', 'Description': 'description', 'Steps to Remediate': 'solution', 'Plugin Text': 'plugin_text', 'See Also': 'see_also', 'CVE': 'cve', 'Exploit Ease': 'exploit_ease', 'Plugin ID': 'plugin_id', 'First Discovered': 'first_discovered', 'Last Observed': 'last_observed', 'Vuln Publication Date': 'vuln_pub_date', 'Patch Publication Date': 'patch_pub_date', 'Remarks': 'remarks', 'Operating System': 'os'}, 'old_edr': {'Host ID': 'aid', 'Hostname': 'hostname', 'Local IP': 'local_ip', 'OS Version': 'os_version', 'Sensor Version': 'agent_version', 'First Seen': 'first_seen', 'Last Seen': 'last_seen', 'Domain': 'machine_domain'}, 'agent_tags': {'Agent ID': 'id', 'MSP': 'msp'}, 'niam': {'Host': 'host', 'NE ID': 'ne_id', 'NE Name': 'ne_name', 'NE Type': 'ne_type', 'Vendor': 'vendor', 'Circle': 'circle'}, 'comm_matrix': {'Rule ID': 'rule_id', 'Direction': 'direction', 'Source Zone': 'src_zone', 'Source IP / Subnet (inside)': 'src', 'Source NAT / Outside IP (public)': 'src_nat', 'ISP / Link': 'isp', 'Firewall': 'firewall', 'Firewall Rule Name': 'fw_rule', 'Destination Zone': 'dst_zone', 'Destination Public / NAT IP': 'dst_nat', 'Destination IP / Subnet (inside)': 'dst', 'Protocol': 'protocol', 'Port(s)': 'ports', 'Service / Use': 'service', 'Application': 'application', 'Application Owner': 'app_owner', 'LOB': 'lob', 'MS Partner': 'msp', 'Domain': 'domain', 'Location / DC': 'location', 'Action': 'action', 'Change / SOD No.': 'cr', 'Valid Till': 'valid_till', 'Remarks': 'remarks'}, 'sod': {'Exception ID': 'exception_id', 'Scope': 'scope', 'IP / Subnet': 'target', 'LOB': 'lob', 'Plugin ID': 'plugin_id', 'CVE': 'cve', 'Vulnerability Name': 'name', 'Port': 'port', 'Justification': 'justification', 'Compensating Control': 'control', 'Approved By': 'approved_by', 'Approval Date': 'approval_date', 'Valid Till': 'valid_till', 'Ticket / CR No.': 'ticket', 'Remarks': 'remarks'}}
 
 
 def _defaults(kind):

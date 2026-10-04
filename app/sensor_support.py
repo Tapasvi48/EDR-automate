@@ -324,7 +324,13 @@ def sensor_support_export():
     unmatched = [{"os": u["os"], "n": u["n"]} for u in d["unmatched"]]
     srcs = [{"name": n, "url": u} for n, u in SOURCES] + [
         {"name": "Linux rows marked 'CrowdStrike API'", "url": "your console: Sensor update policies - supported kernels (fetched on sync)"}]
-    return xlsx_response([("OS vs sensor", cols, rows), ("Sensor builds N-2", bcols, builds),
+    from .cs_posture import cs_sensors
+    fleet = cs_sensors()["fleet"]
+    fcols = [("platform", "Platform"), ("version", "Sensor Version"), ("level", "Level (N / N-1 / N-2)"), ("release", "Release"),
+             ("agents", "Agents"), ("online", "Online")]
+    lcols = [(k, k.replace("_", " ").title()) for k in (d["linux"][0].keys() if d["linux"] else ["distro", "version"])]
+    return xlsx_response([("OS vs sensor", cols, rows), ("Sensor builds N-2", bcols, builds), ("Agents per version", fcols, fleet),
+                          ("Linux kernels", lcols, d["linux"]),
                           ("OS not in list", [("os", "OS (inventory)"), ("n", "Nodes")], unmatched),
                           ("Sources", [("name", "Source"), ("url", "Link")], srcs)], "os_sensor_support")
 

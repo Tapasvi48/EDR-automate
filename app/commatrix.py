@@ -33,25 +33,28 @@ ALIASES = {
     "name": ["name", "servicename", "rulename2", "objectname", "flowname"],
     "direction": ["direction", "flowdirection", "traffictype"],
     "src_zone": ["sourcezone", "srczone", "fromzone"],
-    "src": ["sourceipsubnet", "sourceip", "sourceaddress", "srcip", "srcaddress", "source", "sourcesubnet", "src"],
-    "src_nat": ["sourcenatip", "srcnat", "snat", "sourcenat", "natip"],
+    "src": ["sourceipsubnetinside", "sourceinsideip", "insideip", "inside", "insidelocal", "insideaddress", "localip", "privatesourceip",
+            "sourceipsubnet", "sourceip", "sourceaddress", "srcip", "srcaddress", "source", "sourcesubnet", "src"],
+    "src_nat": ["sourcenatoutsideippublic", "outsideippublic", "outsideip", "outside", "outsideglobal", "outsideaddress", "translatedip",
+                "nattedip", "natedip", "nattedpublicip", "natpublicipsource", "sourcepublicip", "publicsourceip", "sourcenatip", "srcnat", "snat",
+                "sourcenat", "natip"],
     "isp": ["isplink", "isp", "link", "carrier"],
     "firewall": ["firewall", "fw", "fwl", "firewallname", "device", "whichfirewalldetailsexposedtothisip", "firewalldetails", "whichfirewall"],
     "fw_rule": ["firewallrulename", "rulename", "policyname", "policy"],
     "dst_zone": ["destinationzone", "dstzone", "tozone"],
-    "dst_nat": ["destinationnatippublic", "destinationnatip", "destnatip", "dstnat", "dnat", "publicip", "publicippool", "publicips", "vip", "natpublicip"],
-    "dst": ["destinationipsubnet", "destinationip", "destinationaddress", "dstip", "dstaddress", "destination", "destinationsubnet", "dst",
+    "dst_nat": ["destinationpublicnatip", "destinationpublicip", "destinationnatippublic", "destinationnatip", "destnatip", "dstnat", "dnat", "publicip", "publicippool", "publicips", "vip", "natpublicip"],
+    "dst": ["destinationipsubnetinside", "destinationinsideip", "destinationipsubnet", "destinationip", "destinationaddress", "dstip", "dstaddress", "destination", "destinationsubnet", "dst",
             "privateip", "internalip", "private", "internal"],
     "protocol": ["protocol", "proto"],
     "ports": ["ports", "port", "dstport", "destinationport", "serviceport", "service"],
-    "service": ["servicedetails", "use", "usage", "purpose", "applicationservice"],
+    "service": ["serviceuse", "servicedetails", "use", "usage", "purpose", "applicationservice"],
     "application": ["application", "applicaiton", "applicaton", "app", "appname", "applicationname"],
     "app_owner": ["applicationowner", "applicatonowner", "applicaitonowner", "appowner", "serviceowner", "owner", "sourcecontactdetails", "contact"],
     "action": ["action", "permit"],
-    "cr": ["changecrno", "crno", "cr", "change", "approval", "soddetails", "sod", "sodno"],
+    "cr": ["changesodno", "changecrsodno", "changecrno", "crno", "cr", "change", "approval", "soddetails", "sod", "sodno"],
     "valid_till": ["validtill", "validuntil", "expiry", "expirydate"],
     "lob": ["lob", "lineofbusiness"], "domain": ["domain"], "msp": ["mspartner", "msp", "partner", "mspname"],
-    "location": ["location", "site", "dc"],
+    "location": ["locationdc", "location", "site", "dc", "circle"],
     "remarks": ["remarks", "remark", "comments", "notes", "hoststatus", "planner"],
 }
 # Sheet types: what one sheet of a matrix workbook holds, which fields it needs, and whether its rows mean internet exposure
@@ -816,7 +819,30 @@ def comm_mark(rule_pk: int, data: dict = Body(...)):
 
 
 # ------------------------------------------------------------------ template workbook: one sheet per sheet type
+UNIFIED_HEADERS = ["Rule ID", "Flow type", "Direction", "Source Zone", "Source IP / Subnet (inside)", "Source NAT / Outside IP (public)", "ISP / Link",
+                   "Destination Zone", "Destination Public / NAT IP", "Destination IP / Subnet (inside)", "Protocol", "Port(s)", "Service / Use",
+                   "Application", "Application Owner", "LOB", "MS Partner", "Domain", "Location / DC", "Firewall", "Firewall Rule Name", "Action",
+                   "Change / SOD No.", "Valid Till", "Remarks"]
+UNIFIED_ROWS = [
+    ["MX-0001", "Published service (inbound NAT)", "Inbound", "Internet", "Any", "", "Airtel ILL-01", "DMZ", "49.36.10.21", "10.10.4.21", "tcp", "443, 8443",
+     "Customer self-care portal", "Self-care", "Digital Channels", "Retail Banking", "Wipro", "Digital", "DC-Mumbai", "DMZ-FW-01", "allow-https-selfcare",
+     "Allow", "SOD-2026-0931", "", "public VIP → internal web server"],
+    ["MX-0002", "Outbound source NAT", "Outbound", "OAM", "10.30.8.15", "49.36.10.30", "Jio ILL-02", "Internet", "", "Any", "tcp", "443",
+     "Vendor patch download", "OSS patching", "NetOps", "Payments", "TCS", "OAM", "DC-Delhi", "EDGE-FW-02", "oam-out-443", "Allow", "CR-2026-1102",
+     "2026-12-31", "inside IP leaves through the outside (public) IP"],
+    ["MX-0003", "ISP direct (public IP on the link)", "Inbound", "Internet", "Any", "", "Tata ILL-07", "Edge", "49.36.10.7", "", "tcp", "22, 443",
+     "Edge router management", "Edge router", "NetOps", "", "", "Core", "POP-Pune", "", "", "Allow", "", "", "host has only a public IP, no NAT"],
+    ["MX-0004", "Inside ↔ outside pair (static NAT)", "Inbound", "Internet", "Any", "", "", "DMZ", "49.36.10.40", "10.40.0.5", "any", "any",
+     "Partner API gateway", "Partner API", "API team", "Enterprise", "", "API", "DC-Mumbai", "EDGE-FW-02", "static-nat-40", "Allow", "SOD-2026-041", "",
+     "one-to-one NAT, all ports"],
+    ["MX-0005", "Partner / NNI interconnect", "Inbound", "NNI-Partner", "100.70.0.0/16", "", "NNI-Vodafone", "Core", "", "10.50.1.10", "udp", "2152",
+     "GTP-U roaming", "Packet core", "Core Ops", "", "", "Packet core", "DC-Chennai", "CORE-FW-01", "nni-gtpu", "Allow", "CR-2026-1150", "",
+     "reachable through a partner network: add 100.70.0.0/16 under Indirect ranges"],
+    ["MX-0006", "Internal (east–west)", "Internal", "APP", "10.20.0.0/24", "", "", "DB", "", "10.20.1.10-20", "tcp", "1521", "App to database",
+     "Billing", "Billing team", "Payments", "Wipro", "Billing", "DC-Mumbai", "CORE-FW-01", "app-db-1521", "Allow", "CR-2026-1200", "", ""],
+]
 TEMPLATE_SHEETS = [
+    ("Unified matrix (recommended)", "rules", UNIFIED_HEADERS, UNIFIED_ROWS),
     ("Firewall rules", "rules", ["Rule ID", "Name", "Direction", "Source Zone", "Source Address", "Source NAT IP", "ISP / Link", "Firewall",
                                  "Destination Zone", "Destination NAT IP (Public)", "Destination Address", "Protocol", "Service / Port",
                                  "Application", "APPLICATION OWNER", "Action", "Change / CR No.", "Valid Till", "Remarks"],
@@ -841,6 +867,21 @@ TEMPLATE_SHEETS = [
        "10.40.0.0/24", "Payments API owner", "DMZ-FW-01"]]),
 ]
 TEMPLATE_GUIDE = [
+    ("Recommended", "Use the ‘Unified matrix’ sheet for everything: one row per flow, every pattern fits the same columns, and the console reads "
+                    "it without any column matching. The other sheets are kept for existing workbooks in those layouts."),
+    ("Inside / outside", "Inside = the private address of our host. Outside = the public address it is seen as. Put the inside IP of a "
+                         "published service in ‘Destination IP / Subnet (inside)’ and its public IP in ‘Destination Public / NAT IP’; for a host "
+                         "that goes out through NAT put the inside IP in ‘Source IP / Subnet (inside)’ and the public IP in ‘Source NAT / Outside IP (public)’."),
+    ("ISP direct", "A host that has only a public IP (directly on the ISP / ILL link, no NAT): put the public IP in ‘Destination Public / NAT IP’ "
+                   "and leave the inside IP empty; set Direction Inbound and Source Zone Internet. It is listed as an exposed public asset."),
+    ("Internet exposure", "A row is internet-facing when Direction is Inbound from Internet / ISP / Untrust / Outside, the Source is Any or a "
+                          "public IP, an ISP / Link is filled, or it names a public IP with no inside IP. Every inside IP, public IP and outside IP "
+                          "of such a row is listed on Internet exposed — even when no inventory, scan or CrowdStrike knows it yet."),
+    ("Telco", "Partner / NNI / roaming / GRX interconnects: Source Zone NNI-Partner (or similar) with the partner range as Source; add the "
+              "partner and CGNAT ranges under Internet exposed → Indirect ranges so they are counted as indirectly exposed. OAM, MPLS and core "
+              "zones are internal. Location / DC can hold the circle or POP."),
+    ("Flow type", "Free text for people (Published service, Outbound source NAT, ISP direct, Static NAT, Partner / NNI, Internal); the "
+                  "console works it out from the addresses."),
     ("Sheets", "Keep one sheet per kind of list, or delete the ones you do not use. On upload you pick each sheet's type and match its columns; "
                "the types are guessed from these headers. Extra columns are fine."),
     ("Firewall rules", "Source / destination addresses and ports. A row is internet-facing when its source is Internet / ISP / untrust / "

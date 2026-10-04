@@ -69,6 +69,30 @@ def _fql_value(flt, field):
     return m.group(1).lower() if m else None
 
 
+def _det_where(flt):
+    """The parts of an alerts FQL filter the sample honours: time, severity (list / not), host, tactic."""
+    import re
+    w, p = ["1=1"], []
+    flt = flt or ""
+    if m := re.search(r"created_timestamp:>'now-(\d+)d'", flt):
+        w.append("created_at >= datetime('now', ?)")
+        p.append(f"-{m.group(1)} day")
+    if m := re.search(r"severity_name:\[([^\]]+)\]", flt):
+        sev = re.findall(r"'([^']+)'", m.group(1))
+        w.append(f"severity IN ({','.join('?' * len(sev))})")
+        p += sev
+    for m in re.finditer(r"severity_name:!'([^']+)'", flt):
+        w.append("severity<>?")
+        p.append(m.group(1))
+    if m := re.search(r"device\.hostname:'([^']+)'", flt):
+        w.append("LOWER(hostname)=LOWER(?)")
+        p.append(m.group(1))
+    if m := re.search(r"tactic:'([^']+)'", flt):
+        w.append("tactic=?")
+        p.append(m.group(1))
+    return " AND ".join(w), p
+
+
 def command(operation: str, **kw):  # noqa: C901 - one branch per operation
     if operation.startswith(WRITE_PREFIXES) and operation not in READ_POSTS:
         return {"status_code": 403, "headers": {}, "body": {"resources": [], "errors": [
@@ -83,7 +107,8 @@ def command(operation: str, **kw):  # noqa: C901 - one branch per operation
             rows = c.execute(f"SELECT h.aid, r.raw, h.online_state FROM hosts h LEFT JOIN host_raw r ON r.aid=h.aid WHERE h.aid IN ({','.join('?' * len(ids))})", ids).fetchall()
             return _ok([{**json.loads(r["raw"] or "{}"), "device_id": r["aid"], "status": "normal"} for r in rows])
         if operation == "GetQueriesAlertsV2":
-            rows = c.execute("SELECT id FROM detections ORDER BY created_at DESC").fetchall()
+            w, prm = _det_where(_params(kw).get("filter"))
+            rows = c.execute(f"SELECT id FROM detections WHERE {w} ORDER BY created_at DESC", prm).fetchall()
             return _ok([r[0] for r in rows[:_limit(kw)]], total=len(rows))
         if operation == "PostEntitiesAlertsV2":
             ids = _ids(kw)
@@ -95,9 +120,10 @@ def command(operation: str, **kw):  # noqa: C901 - one branch per operation
             specs = specs if isinstance(specs, list) else [specs]
             out = []
             for s in specs or [{"field": "severity_name", "name": "severity"}]:
+                w, prm = _det_where(s.get("filter"))
                 field = {"severity_name": "severity", "tactic": "tactic", "technique": "technique", "status": "status",
                          "device.hostname": "hostname", "assigned_to_name": "assigned_to"}.get(s.get("field"), "severity")
-                b = c.execute(f"SELECT COALESCE({field},'') k, COUNT(*) n FROM detections GROUP BY 1 ORDER BY n DESC LIMIT 20").fetchall()
+                b = c.execute(f"SELECT COALESCE({field},'') k, COUNT(*) n FROM detections WHERE {w} GROUP BY 1 ORDER BY n DESC LIMIT 20", prm).fetchall()
                 out.append({"name": s.get("name") or field, "buckets": [{"label": r["k"], "count": r["n"]} for r in b]})
             return _ok(out)
         if operation == "combinedQueryVulnerabilities":

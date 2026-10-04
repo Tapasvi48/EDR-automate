@@ -131,8 +131,22 @@ in between fetch records only for agents that are new, came back, or changed / c
   kept only if it cites facts and every name / IP / CVE in it exists in the brief).
 - **Speed:** the model is loaded at start-up and kept in memory; rules answer the hunts they are sure of and tested library
   hunts answer matching questions without a model call; generated queries are cached; result summaries are on demand.
+- **Learns from you:** correct the assistant in chat ("no, I want all exposed hosts, not only the ones without EDR") and it
+  answers the corrected question and stores a lesson — the next similar question is answered that way. "Remember / always /
+  never …" become standing preferences (e.g. include informational detections; by default they are left out of detection
+  lists and counts). Settings → AI model → What the AI learned lists and removes them.
 - **Local model:** Ollama (`ollama pull qwen3:8b`, or `qwen3:4b` on machines with 8 GB RAM) or any OpenAI-compatible server
   (vLLM, LM Studio); Settings → AI model.
+
+## Communication matrix: one template for every layout
+Download the template (Templates → Communication matrix) and use its **Unified matrix** sheet: one row per flow, read without
+column matching. It covers published services (public / NAT IP → inside IP), outbound source NAT (inside IP → outside / public
+IP), static inside ↔ outside NAT, hosts with only a public IP directly on the ISP / ILL link, partner / NNI interconnects and
+internal flows. Every inside, outside and public IP of an internet-facing row is listed on **Internet exposed** — also when no
+inventory, VA scan, CrowdStrike or NIAM record knows the address yet ("Only in the matrix") — with its **address type**: public IP
+(own / ISP-direct), private behind a public / NAT IP, or private exposed by a rule / zone / mark. Older layouts (firewall rules,
+public IP pool, NAT list, SOD NAT, exposure register) still import, and headers such as Inside IP / Outside IP / Natted IP are
+recognised.
 
 ## Falcon MCP (CrowdStrike → Falcon MCP)
 The official [CrowdStrike Falcon MCP server](https://developer.crowdstrike.com/falcon-mcp/) (`falcon-mcp`, installed with the

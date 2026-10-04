@@ -27,7 +27,7 @@ export default function Spotlight() {
   const findingCols: Column[] = [
     { key: "severity", label: "Severity", render: (r) => sev(r.severity) },
     { key: "cve", label: "Vulnerability", wrap: true, render: (r) => <span className="flex max-w-[360px] flex-col">
-      <span className="font-medium">{r.title || <span className="text-muted">(no name from CrowdStrike)</span>}</span>
+      <span className="font-medium">{r.title || r.cve}</span>
       <span className="flex items-center gap-1.5 font-mono text-[11px] text-muted">{r.cve}{r.kev ? <Badge tone="crit">CISA KEV</Badge> : null}</span></span> },
     { key: "score", label: "CVSS", num: true },
     { key: "exprt", label: "ExPRT", render: (r) => r.exprt ? sev(r.exprt) : <span className="text-muted">–</span> },

@@ -169,12 +169,31 @@ def respond(sid, text):
     text = (text or "").strip()[:800]
     if not text:
         raise HTTPException(400, "Type a question")
+    from . import learn
     with db.get_conn() as c:
         _ensure(c)
         s = _session(c, sid)
+        prev_q = c.execute("SELECT text FROM chat_messages WHERE session_id=? AND role='user' ORDER BY id DESC LIMIT 1", (sid,)).fetchone()
+        prev_a = db.one(c, "SELECT kind, text FROM chat_messages WHERE session_id=? AND role='assistant' ORDER BY id DESC LIMIT 1", (sid,))
         c.execute("INSERT INTO chat_messages(session_id, role, at, text, kind) VALUES (?,?,?,?,?)", (sid, "user", db.now_iso(), text, "question"))
     ctx = s["context"]
-    kind, target, q = route(text, ctx)
+    if learn.REMEMBER.search(text) and not text.rstrip().endswith("?"):  # a standing preference, not a question
+        flag = learn.add_pref(text)
+        summary = f"Noted. I'll remember: “{text.strip()}”" + (" (applied to detection lists and counts)" if flag else "")
+        with db.get_conn() as c:
+            mid = c.execute("INSERT INTO chat_messages(session_id, role, at, text, kind, payload) VALUES (?,?,?,?,?,?)",
+                            (sid, "assistant", db.now_iso(), summary, "learned", json.dumps({"pref": text, "flag": flag}))).lastrowid
+            c.execute("UPDATE chat_sessions SET updated_at=? WHERE id=?", (db.now_iso(), sid))
+        return {"id": mid, "role": "assistant", "kind": "learned", "text": summary, "payload": {"pref": text, "flag": flag}, "context": ctx}
+    asked, correction, applied = text, None, None
+    if prev_q and prev_a and learn.CORRECTION.search(text):  # "no, I want …": answer the corrected question and learn from it
+        asked = learn.corrected_question(text, prev_q[0])
+        correction = (prev_q[0], prev_a["kind"], prev_a["text"])
+    else:
+        lesson = learn.lesson_for(text)
+        if lesson and lesson["right_question"].strip().lower() != text.strip().lower():
+            asked, applied = lesson["right_question"], lesson
+    kind, target, q = route(asked, ctx)
     if kind == "ioc":
         r = ioc.check_one(target)
         payload, summary = r, f"{r['value']}: {r['verdict']} — {'; '.join(r.get('why') or [])}"
@@ -210,6 +229,11 @@ def respond(sid, text):
         ctx = _remember(ctx, payload.get("entities") or {}, payload)
         summary = f"{payload.get('title')}: {payload.get('total', 0)} results" if payload.get("ok") else (payload.get("error") or "needs more input")
         payload = {k: v for k, v in payload.items() if k != "entities"}
+    if correction and isinstance(payload, dict):
+        lid = learn.add_lesson(correction[0], correction[1], correction[2], asked, kind, text)
+        payload["learned"] = {"id": lid, "question": correction[0], "right_question": asked}
+    if applied and isinstance(payload, dict):
+        payload["applied_lesson"] = {"id": applied["id"], "question": applied["question"], "right_question": applied["right_question"], "note": applied["note"]}
     with db.get_conn() as c:
         mid = c.execute("INSERT INTO chat_messages(session_id, role, at, text, kind, payload) VALUES (?,?,?,?,?,?)",
                         (sid, "assistant", db.now_iso(), summary[:1000], kind, json.dumps(payload, default=str)[:600_000])).lastrowid

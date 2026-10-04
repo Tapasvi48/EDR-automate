@@ -226,10 +226,12 @@ def overview_context():
         k = db.one(c, """SELECT SUM(console_state='active' AND is_primary=1) agents, SUM(console_state='active' AND is_primary=1 AND online_state='offline') offline
                          FROM hosts""")
         det = db.one(c, """SELECT COUNT(*) n, SUM(severity IN ('Critical','High')) ch, SUM(LOWER(COALESCE(status,'new')) NOT IN ('closed','resolved')) open,
-                           SUM(COALESCE(assigned_to,'')='' AND LOWER(COALESCE(status,'new'))='new') unassigned FROM detections WHERE created_at >= ?""",
+                           SUM(COALESCE(assigned_to,'')='' AND LOWER(COALESCE(status,'new'))='new') unassigned FROM detections WHERE created_at >= ?
+                           AND COALESCE(severity,'')<>'Informational'""",
                      ((db.now_iso()[:10]),))
-        det7 = db.one(c, "SELECT COUNT(*) n, SUM(severity IN ('Critical','High')) ch FROM detections WHERE created_at >= date('now','-7 day')")
-        top = db.rows(c, """SELECT name, COUNT(*) n FROM detections WHERE created_at >= date('now','-7 day') GROUP BY name ORDER BY n DESC LIMIT 3""")
+        det7 = db.one(c, "SELECT COUNT(*) n, SUM(severity IN ('Critical','High')) ch FROM detections WHERE created_at >= date('now','-7 day') AND COALESCE(severity,'')<>'Informational'")
+        top = db.rows(c, """SELECT name, COUNT(*) n FROM detections WHERE created_at >= date('now','-7 day') AND COALESCE(severity,'')<>'Informational'
+                            GROUP BY name ORDER BY n DESC LIMIT 3""")
         gaps = c.execute("SELECT COUNT(*) FROM asset_registry WHERE in_inventory=1 AND edr_applicable=1 AND edr_status='Not Installed'").fetchone()[0]
         exp = db.one(c, "SELECT SUM(exposed) e, SUM(exposed AND edr_status='Not Installed') e_no_edr, SUM(exposed AND crit>0) e_crit FROM asset_registry")
         spot = db.one(c, "SELECT SUM(UPPER(severity)='CRITICAL') crit, SUM(COALESCE(kev,0)) kev FROM spotlight_vulns")
