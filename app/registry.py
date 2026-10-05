@@ -155,6 +155,19 @@ def inventory_exposure(extra):
 EDR_RANK = {"Online": 0, "Offline": 1, "Not Installed": 2}
 
 
+def code_rev():
+    """Fingerprint of the code that builds the registry. When it changes (an upgrade), the stored registry was built by the
+    old code, so it is rebuilt at startup instead of waiting for the next upload or sync."""
+    import hashlib
+    from pathlib import Path
+    h = hashlib.sha1()
+    for name in ("registry.py", "commatrix.py", "addrparse.py"):
+        p = Path(__file__).with_name(name)
+        if p.exists():
+            h.update(p.read_bytes())
+    return h.hexdigest()[:16]
+
+
 def refresh(c):
     reg = {}
 
@@ -262,9 +275,17 @@ def refresh(c):
     # --- communication matrix, every sheet type: internet-facing rows expose what they point at. A row matches an asset by
     # its private / internal IP (or a subnet / range containing it), its public / NAT IP, or its host name.
     from .addrparse import parse_addresses
-    from .commatrix import load_rules
+    from .commatrix import PATTERNS, internet_without_nat, load_rules, matrix_owned, reclassify
     import bisect
+    reclassify(c)  # rows uploaded under older inbound logic are judged again (manual marks kept)
     active_rules = load_rules(c)
+    # our assets from the matrix: private IPs, and public IPs directly on the internet (no private IP behind them). A public
+    # NAT IP is shown on its private asset (Public IPs column), never as an asset of its own; any other public IP in the matrix
+    # (internet destinations, partner sources, VPN peers) is not ours.
+    natted, direct = matrix_owned(active_rules)
+
+    def ours_ip(ip):
+        return not is_public(ip) or ip in direct
     lob_ids = {r[1].lower(): r[0] for r in c.execute("SELECT id, name FROM lobs")}
 
     def singles(text):
@@ -285,15 +306,16 @@ def refresh(c):
         snat = [ip for ip in singles(rule["src_nat"]) if is_public(ip)]
         if rule["inbound_internet"]:
             for ip in singles(rule["dst"]) + singles(rule["dst_nat"]):
-                mark_matrix(ip, rule)
-        if snat:
-            for ip in singles(rule["src"]) + snat:
-                mark_matrix(ip, rule)
-        # a row that names only public IP(s) — a host directly on the ISP link, no private address behind it
-        if not rule["dst"] and not rule["dst_nat"] and not snat:
-            pubs = [ip for ip in singles(rule["src"]) if is_public(ip)]
-            if pubs and not any(not is_public(ip) for ip in singles(rule["src"])):
-                for ip in pubs:
+                if ours_ip(ip):
+                    mark_matrix(ip, rule)
+        if snat or internet_without_nat(rule, natted | direct):  # private sources behind a public source NAT IP, or let out
+            for ip in singles(rule["src"]):                           # to the internet by the firewall without NAT
+                if not is_public(ip):
+                    mark_matrix(ip, rule)
+        # a sheet listing public IPs in the source column: hosts directly on the ISP link
+        if rule.get("sheet_type") == "mx11" and not rule["dst"] and not rule["dst_nat"]:
+            for ip in singles(rule["src"]):
+                if ip in direct:
                     mark_matrix(ip, rule)
                     reg[ip]["isp_direct"] = rule
     # values that are not a valid IP (typos, "NOT IN USE", Excel errors like #REF!) cannot match a rule: skip them
@@ -317,6 +339,10 @@ def refresh(c):
     for k, s in reg.items():
         for n in s["names"]:
             by_name.setdefault(db.norm_hostname(n), set()).add(k)
+
+    def keep(k):  # a matched asset counts for the matrix only when it is ours (private, or a directly connected public IP)
+        ip = reg[k]["ip"]
+        return not ip or ours_ip(ip)
 
     def hits_for(text):
         _, nets, names = parse_addresses(text)
@@ -345,20 +371,32 @@ def refresh(c):
         if snat:
             where = "Matrix · " + (rule.get("sheet") or rule.get("workbook") or "rules")
             for k in hits_for(rule["src"]):
+                if reg[k]["ip"] and is_public(reg[k]["ip"]):
+                    continue
                 for p in snat:
                     if p != reg[k]["ip"]:
                         nat_pairs.append((k, p, "matrix", f"Source NAT {rule['rule_id']} (sources leave through {p})", where))
+        if not snat and internet_without_nat(rule, natted | direct):  # private source -> internet IPs through the firewall, no NAT IP
+            where = "Matrix · " + (rule.get("sheet") or rule.get("workbook") or "rules")
+            to = rule["dst"] or rule.get("dst_zone") or "internet"
+            text = (f"Matrix rule {rule['rule_id']}: reaches the internet without a NAT IP (to {to[:60]})"
+                    + (f" via {rule['firewall']}" if rule.get("firewall") else "")
+                    + (f" · {(rule['protocol'] or '').upper()} {rule['ports']}".rstrip() if rule.get("ports") else ""))
+            for k in hits_for(rule["src"]):
+                if reg[k]["ip"] and not is_public(reg[k]["ip"]):
+                    reason(reg[k], "matrix", text, where)
         if not rule["inbound_internet"]:
             continue
         st = rule.get("sheet_type") or "rules"
-        inner = hits_for(rule["dst"])
-        publ = hits_for(rule["dst_nat"])
+        inner = {k for k in hits_for(rule["dst"]) if keep(k)}
+        publ = {k for k in hits_for(rule["dst_nat"]) if keep(k)}
         pubs = [str(n.network_address) for n in parse_addresses(rule["dst_nat"])[1] if n.num_addresses == 1]
         svc = f"{(rule['protocol'] or 'any').upper()} {rule['ports'] or 'any port'}"
         where = f"{rule.get('sheet') or ''}".strip()
         who = " · ".join(x for x in (rule.get("application"), rule.get("app_owner") and f"owner {rule['app_owner']}") if x)
-        if st == "rules":
-            text = (f"{KIND[st]} {rule['rule_id']}: {rule['src_zone'] or rule['src'] or 'internet'} → {svc}"
+        if st not in KIND or st == "rules":  # firewall rules and the MX-00xx pattern sheets
+            label = KIND["rules"] if st == "rules" else (PATTERNS[st][0] if st in PATTERNS else KIND["rules"])
+            text = (f"{label} {rule['rule_id']}: {rule['src_zone'] or rule['src'] or 'internet'} → {svc}"
                     + (f" via {rule['firewall']}" if rule["firewall"] else "") + (f" ({rule['isp']})" if rule["isp"] else ""))
         else:
             text = (f"{KIND.get(st, 'Matrix sheet')}{f' ‘{where}’' if where else ''}: public IP {rule['dst_nat'] or '–'}"
@@ -437,7 +475,12 @@ def refresh(c):
         if why:
             reason(s, "indirect", f"Indirectly exposed: {why}")
         wl = 1 if (s["ip"] and listed(s["ip"])) or any(listed(p) for p in s["public_ips"]) else 0
-        exposed = 1 if s["reasons"] and not cg and not wl else 0
+        # a public IP that fronts private IPs (NAT / VIP / egress): the private assets carry the exposure and show this IP as
+        # their public IP, so it is not an exposed asset of its own (unless marked by hand)
+        front = bool(s["ip"] and is_public(s["ip"]) and s["nat_of"] - {None, ""} and "manual" not in s["exp_src"])
+        if front:
+            reason(s, "nat", f"Public NAT IP of {', '.join(sorted(x for x in s['nat_of'] if x)[:5])}: listed on those assets")
+        exposed = 1 if s["reasons"] and not cg and not wl and not front else 0
         srcs = [x for x, f in (("inventory", s["in_inventory"]), ("edr", s["in_edr"]), ("scan", s["in_scan"]), ("niam", s["in_niam"]),
                                ("matrix", s.get("in_matrix"))) if f]
         if not s["lobs"] and s.get("matrix_lob"):  # LOB named in the matrix row, for assets no inventory owns

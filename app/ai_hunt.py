@@ -14,6 +14,7 @@ Why it works with an 8B model:
   * Every question, plan, latency and thumbs up / down is stored (ai_asks): the evaluation set and, later, fine-tuning data.
     A built-in evaluation (EVAL) scores the configured model's routing accuracy and latency."""
 import json
+import os
 import re
 import threading
 import time
@@ -458,10 +459,49 @@ def _pref_include_info():
         return False
 
 
+# The model runs on the same machine as the console (CPU, no GPU), so it must never take the whole box:
+# - one request at a time (clicks queue instead of running 3 generations in parallel),
+# - at most half of the CPU cores, so the web UI, sync and the desktop stay responsive,
+# - only ONE model resident in RAM (switching models used to leave the old ones loaded for hours),
+# - unloaded after 30 minutes idle.
+_LLM_LOCK = threading.Semaphore(1)
+KEEP_ALIVE = "30m"
+
+
+def _threads(s):
+    try:
+        n = int(s.get("ai_threads") or 0)
+    except ValueError:
+        n = 0
+    return n if n > 0 else max(2, (os.cpu_count() or 4) // 2)
+
+
 def ai_settings():
     s = db.get_settings()
     return {"provider": s.get("ai_provider") or "ollama", "url": (s.get("ai_url") or "http://127.0.0.1:11434").rstrip("/"),
-            "model": s.get("ai_model") or "qwen3:8b", "key": s.get("ai_api_key") or "", "summarize": (s.get("ai_summarize") or "1") != "0"}
+            "model": s.get("ai_model") or "qwen3:4b-instruct", "key": s.get("ai_api_key") or "", "summarize": (s.get("ai_summarize") or "1") != "0",
+            "threads": _threads(s)}
+
+
+def unload_other_models(cfg=None):
+    """Free RAM held by models other than the configured one (Ollama keeps every model it ran until keep_alive expires)."""
+    cfg = cfg or ai_settings()
+    if cfg["provider"] != "ollama":
+        return []
+    try:
+        loaded = [m["name"] for m in requests.get(f"{cfg['url']}/api/ps", timeout=5).json().get("models", [])]
+    except Exception:  # noqa: BLE001
+        return []
+    want = {cfg["model"], f"{cfg['model']}:latest"}
+    gone = []
+    for name in loaded:
+        if name not in want:
+            try:
+                requests.post(f"{cfg['url']}/api/generate", json={"model": name, "keep_alive": 0}, timeout=30)
+                gone.append(name)
+            except Exception:  # noqa: BLE001
+                pass
+    return gone
 
 
 def _llm(messages, schema=None, max_tokens=300, timeout=120):
@@ -484,15 +524,16 @@ def _llm(messages, schema=None, max_tokens=300, timeout=120):
                           headers={"Authorization": f"Bearer {cfg['key']}"} if cfg["key"] else {})
         r.raise_for_status()
         return r.json()["choices"][0]["message"]["content"]
-    body = {"model": cfg["model"], "messages": messages, "stream": False, "think": False, "keep_alive": "4h",
-            "options": {"temperature": 0, "num_ctx": 4096, "num_predict": max_tokens}}
+    body = {"model": cfg["model"], "messages": messages, "stream": False, "think": False, "keep_alive": KEEP_ALIVE,
+            "options": {"temperature": 0, "num_ctx": 4096, "num_predict": max_tokens, "num_thread": cfg["threads"]}}
     if schema:
         body["format"] = schema
-    r = requests.post(f"{cfg['url']}/api/chat", json=body, timeout=timeout)
-    if r.status_code == 400 and "think" in r.text:  # older Ollama: no "think" switch
-        body.pop("think")
-        messages[-1]["content"] += " /no_think"
+    with _LLM_LOCK:
         r = requests.post(f"{cfg['url']}/api/chat", json=body, timeout=timeout)
+        if r.status_code == 400 and "think" in r.text:  # older Ollama: no "think" switch
+            body.pop("think")
+            messages[-1]["content"] += " /no_think"
+            r = requests.post(f"{cfg['url']}/api/chat", json=body, timeout=timeout)
     r.raise_for_status()
     return r.json()["message"]["content"]
 
@@ -505,8 +546,11 @@ def warmup():
 
     def go():
         try:
-            requests.post(f"{cfg['url']}/api/generate", json={"model": cfg["model"], "prompt": "ok", "stream": False, "keep_alive": "4h",
-                                                             "options": {"num_predict": 1}}, timeout=180)
+            unload_other_models(cfg)
+            with _LLM_LOCK:
+                requests.post(f"{cfg['url']}/api/generate", json={"model": cfg["model"], "prompt": "ok", "stream": False,
+                                                                 "keep_alive": KEEP_ALIVE,
+                                                                 "options": {"num_predict": 1, "num_thread": cfg["threads"]}}, timeout=180)
         except Exception:  # noqa: BLE001
             pass
     threading.Thread(target=go, daemon=True).start()
@@ -769,6 +813,8 @@ def ai_config_save(data: dict = Body(...)):
     for k in ("url", "model"):
         if data.get(k):
             vals[f"ai_{k}"] = str(data[k]).strip()
+    if "threads" in data:
+        vals["ai_threads"] = str(data["threads"] or "").strip()
     if data.get("api_key"):
         vals["ai_api_key"] = str(data["api_key"]).strip()
     if "summarize" in data:

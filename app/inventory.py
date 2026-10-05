@@ -625,10 +625,14 @@ def near_hostname(inv_name, cs_name, cs_names, inv_names):
     return f"hostname {inv_name} ~ {cs_name} (only {long_} with that stem) and the IP is on a NIC of that agent"
 
 
-def refresh_matches(c, lob_id=None):
+def refresh_matches(c, lob_id=None, checkpoint=None):
+    """checkpoint: called between steps. The background worker passes its connection's commit, so the write lock is
+    released between steps and a user's edit (e.g. deleting a matrix sheet) waits for one step, not the whole re-match."""
+    step = checkpoint or (lambda: None)
     settings = db.get_settings(c)
     stale_cut = (datetime.now(timezone.utc) - timedelta(days=float(settings.get("inventory_stale_days") or 7))).strftime("%Y-%m-%dT%H:%M:%SZ")
     sync_msps(c, lob_id)
+    step()
     hosts = {}
     by_conn, by_nic, by_hn = {}, {}, {}
     for r in c.execute("""SELECT aid, hostname, hostname_norm, local_ip, connection_ip, console_state, online_state, last_seen,
@@ -769,18 +773,23 @@ def refresh_matches(c, lob_id=None):
            cs_online_state=?, cs_last_seen=?, cs_agent_version=?, cs_os=?, edr_actual=?, verification=?,
            edr_state=?, applicable=?, coverage_status=?, feasible=?, feasible_reason=?, os_resolved=?, os_source=?, os_support=?
            WHERE lob_id=? AND item_key=?""", updates)
+    step()
     tag_duplicates(c, lob_id)
     rebuild_host_map(c)
+    step()
     from .queries import compute_gone  # EDR history: one row per device that left the console
     compute_gone(c)
     from .sod import apply as apply_exceptions  # SOD: accept / reopen findings before anything counts them
     apply_exceptions(c)
+    step()
     from .vulns import refresh_assets  # scanned IPs take their MSP / EDR status from inventory + Falcon
     refresh_assets(c, lob_id)
     from . import niam  # NIAM nodes take LOB / EDR / vulnerability status from the same data
     niam.refresh(c)
+    step()
     from . import posture  # risk scores, scan ages and today's MSP scorecard snapshot
     posture.refresh(c)
+    step()
     from . import registry  # every IP from every source, joined (All inventory, Internet exposed, coverage gaps)
     registry.refresh(c)
 
@@ -953,9 +962,10 @@ def _refresh_worker():
         with _refresh_lock:
             full, REFRESH["full"] = REFRESH.get("full"), False
         try:
+            _set_pending("full" if full else "registry")
             with db.get_conn() as c:
                 if full:
-                    refresh_matches(c)
+                    refresh_matches(c, checkpoint=c.commit)
                 else:
                     registry.refresh(c)
             REFRESH["error"] = None
@@ -967,4 +977,19 @@ def _refresh_worker():
                 REFRESH.update(again=False, started_at=db.now_iso())
                 continue
             REFRESH["running"] = False
-            return
+        if not REFRESH["error"]:
+            _set_pending(None)
+        return
+
+
+def _set_pending(kind):
+    """Remember a background re-match in the database until it finishes: a restart in the middle (or a failure) would
+    otherwise leave pages built from data that has since changed, e.g. exposure from a deleted matrix. Resumed at startup."""
+    try:
+        with db.get_conn() as c:
+            if kind is None:
+                c.execute("DELETE FROM settings WHERE key='refresh_pending'")
+            elif kind == "full" or db.one(c, "SELECT value FROM settings WHERE key='refresh_pending'") is None:
+                c.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('refresh_pending', ?)", (kind,))
+    except Exception:  # noqa: BLE001 - the re-match itself matters more than the marker
+        pass

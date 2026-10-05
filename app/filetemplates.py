@@ -72,25 +72,25 @@ TEMPLATES = {
         ("Vendor", "", "", "Cisco", "Nokia"),
         ("Circle", "", "Circle / region", "Mumbai", "Delhi"),
     ]),
-    "comm_matrix": ("Communication matrix", "Recommended: the ‘Unified matrix’ sheet of the download — one row per flow, one layout for every "
-                    "pattern (published service, outbound source NAT, inside ↔ outside static NAT, ISP-direct public IP, partner / NNI, "
-                    "internal). It is read without column matching. Existing workbooks with a public IP pool, NAT list, SOD NAT or exposure "
-                    "register sheet still work (one example sheet each). Internet-facing rows list every inside, outside and public IP they "
-                    "name on Internet exposed, even when no other source knows the address.", "live", [
-        ("Rule ID", "yes", "Unique rule / flow ID", "MX-0001", "MX-0002"),
-        ("Flow type", "", "Free text: Published service · Outbound source NAT · ISP direct · Static NAT · Partner / NNI · Internal", "Published service", "Outbound source NAT"),
-        ("Direction", "yes", "Inbound (from internet / ISP / partner) · Outbound · Internal", "Inbound", "Outbound"),
-        ("Source Zone", "", "Internet, ISP, NNI-Partner, DMZ, Core, OAM…", "Internet", "OAM"),
-        ("Source IP / Subnet (inside)", "yes", "Our inside IP / CIDR / range, or Any for the internet", "Any", "10.30.8.15"),
-        ("Source NAT / Outside IP (public)", "", "Public IP the inside source is seen as (outbound NAT)", "", "49.36.10.30"),
-        ("ISP / Link", "", "ILL / ISP / MPLS / NNI link", "Airtel ILL-01", "Jio ILL-02"),
+    "comm_matrix": ("Communication matrix", "Three sheet types: Firewall rules (Source Zone / ISP / Destination Zone; each row is "
+                    "internet-facing when its source zone is Internet / ISP / Untrust / Outside, an ISP link is filled, or the source is "
+                    "Any / a public IP), Public IP + private IP (every row exposed, both IPs linked), and Only public IP (every row "
+                    "exposed). The type is guessed from the columns on upload; the ‘Which sheet to use’ sheet of the download explains "
+                    "each. Exposed rows list every IP they name on Internet exposed, even when no other source knows the address.", "live", [
+        ("Rule ID", "", "Unique rule / flow ID (blank = row number)", "MX-0001", "MX-0002"),
+        ("Direction", "", "Inbound · Outbound · Internal (for people; exposure comes from the zone / source / ISP / NAT columns)", "Inbound", "Outbound"),
+        ("Source Zone", "", "Internet / ISP / Untrust / Outside / External make the row internet-facing; DMZ, Core, OAM, NNI-Partner do not", "Internet", "OAM"),
+        ("Source IP / Subnet (inside)", "yes*", "*one of Source IP, Destination Public / NAT IP or Destination IP is required. Our inside IP / CIDR / range, "
+         "Any for the internet, or a partner public IP", "Any", "10.30.8.15"),
+        ("Source NAT / Outside IP (public)", "", "Public IP the inside source leaves through (outbound NAT): the source becomes exposed", "", "49.36.10.30"),
+        ("ISP / Link", "", "ILL / ISP link; filled = internet-facing (leave empty for partner / NNI links)", "Airtel ILL-01", "Jio ILL-02"),
         ("Destination Zone", "", "", "DMZ", "Internet"),
-        ("Destination Public / NAT IP", "", "Public / VIP IP (inbound NAT) — or the public IP of an ISP-direct host", "49.36.10.21", ""),
-        ("Destination IP / Subnet (inside)", "yes", "Our inside IP / CIDR behind the public IP; empty for ISP-direct hosts", "10.10.4.21", "Any"),
-        ("Protocol", "yes", "tcp / udp / icmp / any", "tcp", "tcp"),
-        ("Port(s)", "yes", "Port, list or range", "443, 8443", "443"),
+        ("Destination Public / NAT IP", "yes*", "Public / VIP IP (inbound NAT), or the public IP of a host with only a public IP", "49.36.10.21", ""),
+        ("Destination IP / Subnet (inside)", "yes*", "Our inside IP / CIDR behind the public IP; empty for a public-IP-only host", "10.10.4.21", "Any"),
+        ("Protocol", "", "tcp / udp / icmp / any", "tcp", "tcp"),
+        ("Port(s)", "", "Port, list or range", "443, 8443", "443"),
         ("Service / Use", "", "", "Customer self-care portal", "Vendor patch download"),
-        ("Application", "", "", "Self-care", "OSS patching"),
+        ("Application", "", "Also used as the name of assets only the matrix knows", "Self-care", "OSS patching"),
         ("Application Owner", "", "", "Digital Channels", "NetOps"),
         ("LOB", "", "Owner LOB (used for assets no inventory lists)", "Retail Banking", "Payments"),
         ("MS Partner", "", "", "Wipro", "TCS"),
@@ -98,10 +98,10 @@ TEMPLATES = {
         ("Location / DC", "", "DC, circle or POP", "DC-Mumbai", "DC-Delhi"),
         ("Firewall", "", "Firewall / cluster name", "DMZ-FW-01", "EDGE-FW-02"),
         ("Firewall Rule Name", "", "", "allow-https-selfcare", "oam-out-443"),
-        ("Action", "yes", "Allow / Deny", "Allow", "Allow"),
+        ("Action", "", "Allow / Deny (Deny / Drop is never internet-facing; blank = Allow)", "Allow", "Allow"),
         ("Change / SOD No.", "", "Approval reference", "SOD-2026-0931", "CR-2026-1102"),
-        ("Valid Till", "", "Date, blank = permanent", "", "2026-12-31"),
-        ("Remarks", "", "", "public VIP → internal web server", "inside IP leaves through the outside IP"),
+        ("Valid Till", "", "Date, blank = permanent; past date = rule ignored", "", "2026-12-31"),
+        ("Remarks", "", "", "EXPOSED - public + private (destination NAT)", "EXPOSED - outbound through source NAT"),
     ]),
     "sod": ("Vulnerability exceptions (SOD)", "Approved exceptions (SOD / risk acceptance). Matching findings are shown as Accepted, "
             "left out of open counts and risk, and reopen automatically when the exception expires.", "live", [

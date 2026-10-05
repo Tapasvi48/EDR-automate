@@ -2,7 +2,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, ArrowUpRight, Network, Radar, RefreshCw, Copy, Crosshair, Download, FileSpreadsheet, Globe2, History, LayoutGrid, Logs, PackageCheck, Printer, Route, Search, Server, ShieldAlert, ShieldCheck, ShieldX, ClipboardCheck } from "lucide-react";
+import { Activity, ArrowUpRight, Network, Radar, RefreshCw, Copy, Crosshair, Download, FileSpreadsheet, Globe2, History, LayoutGrid, Logs, PackageCheck, Printer, Route, Search, Server, ShieldAlert, ShieldCheck, ShieldX, ClipboardCheck, Waypoints } from "lucide-react";
 import { api, downloadExcel } from "@/lib/api";
 import { useUrlState } from "@/lib/hooks";
 import { fmtDt, fmtN, fmtRel } from "@/lib/format";
@@ -76,7 +76,8 @@ function RangeView({ r, q }: { r: any; q: string }) {
 
 const VIEWS: { id: string; label: string; icon: React.ElementType }[] = [
   { id: "overview", label: "Overview", icon: LayoutGrid }, { id: "inventory", label: "Inventory", icon: Server },
-  { id: "exposure", label: "Exposure", icon: Globe2 }, { id: "internet", label: "Internet scan", icon: Radar },
+  { id: "exposure", label: "Exposure", icon: Globe2 }, { id: "matrix", label: "Communication matrix", icon: Waypoints },
+  { id: "internet", label: "Internet scan", icon: Radar },
   { id: "attack", label: "Attack path", icon: Route }, { id: "detections", label: "Detections", icon: Crosshair },
   { id: "vulns", label: "Vulnerabilities", icon: ShieldAlert }, { id: "patching", label: "Patches & MBSS", icon: PackageCheck },
   { id: "edr", label: "EDR & logging", icon: ShieldCheck }, { id: "related", label: "Related assets", icon: Network },
@@ -92,13 +93,14 @@ function Profile({ r }: { r: any }) {
   if (!s.found) return isPublicV4(s.query) ? (
     <div className="mt-5 space-y-3">
       <Card className="flex flex-wrap items-center gap-2 px-4 py-3 text-[13px]"><Badge tone="violet">Not a known asset</Badge>
-        <span className="text-muted">{s.query} is in no inventory, CrowdStrike, VA scan or NIAM dump. Here is what the internet knows about it.</span></Card>
+        <span className="text-muted">{s.query} is in no inventory, CrowdStrike, VA scan, NIAM dump or communication matrix. Here is what the internet knows about it.</span></Card>
       <IntelPanel ip={s.query} showAsset />
     </div>
-  ) : <Card className="mt-5 p-8 text-center text-muted">Nothing found for “{s.query}” in CrowdStrike, any inventory, vulnerability scan or the NIAM dump.</Card>;
+  ) : <Card className="mt-5 p-8 text-center text-muted">Nothing found for “{s.query}” in CrowdStrike, any inventory, vulnerability scan, the NIAM dump or the communication matrix.</Card>;
   const v = s.vulns;
   const badge: Record<string, React.ReactNode> = {
     exposure: r.internet?.verdict === "exposed" ? <Dot tone="crit" /> : null,
+    matrix: r.flows?.length ? <Count n={r.flows.length} tone={r.flows.some((f: any) => f.inbound_internet) ? "crit" : "neutral"} /> : null,
     attack: p?.blast?.weak ? <Count n={p.blast.weak} tone="crit" /> : null,
     detections: p?.det && (p.det.n + (p.ndr?.n || 0)) ? <Count n={p.det.n + (p.ndr?.n || 0)} tone={p.det.high ? "crit" : "warn"} /> : null,
     vulns: v.Critical + v.High ? <Count n={v.Critical + v.High} tone={v.Critical ? "crit" : "warn"} /> : null,
@@ -122,6 +124,7 @@ function Profile({ r }: { r: any }) {
       {view === "internet" && <InternetScanView s={s} r={r} />}
       {view === "exposure" && <div className="space-y-4"><InternetSection i={r.internet} />
         {r.behind_nat?.length > 0 && <RangeView r={{ rows: r.behind_nat, total: r.behind_nat.length, by_nat: s.ips[0] }} q={s.ips[0]} />}<Card><CardHeader title="Open ports" hint="from vulnerability scan findings" /><PortsTable rows={r.ports || []} /></Card></div>}
+      {view === "matrix" && <MatrixFlows rows={r.flows || []} />}
       {view === "attack" && <AttackCard s={s} r={r} />}
       {view === "detections" && <DetectionsSection agents={r.agents} ips={s.ips} names={s.hostnames} />}
       {view === "vulns" && <div className="space-y-4"><Card><CardHeader title="Vulnerabilities" hint={`${v.Critical} critical · ${v.High} high · ${v.Medium} medium · ${v.Low} low open · ${fmtN(v.fixed)} fixed`} /><VulnTable rows={r.vulns} /></Card>
@@ -935,4 +938,32 @@ function RescanButton({ ips }: { ips: string[] }) {
     } catch (e: any) { toast.error(e.message); } finally { setBusy(false); }
   };
   return <Button className="h-11 print:hidden" loading={busy} onClick={go} title={`Look up ${ips.join(", ")} again on the internet sources`}><RefreshCw /> Rescan internet</Button>;
+}
+
+/* ---------------- Communication matrix rows that name this asset (source, destination, public / NAT IP) ---------------- */
+function MatrixFlows({ rows }: { rows: any[] }) {
+  return (
+    <Card>
+      <CardHeader title="Communication matrix" hint={rows.length ? `${fmtN(rows.length)} row(s) name this asset · ${fmtN(rows.filter((f) => f.inbound_internet).length)} internet-facing` : undefined}
+        right={<Link href="/matrix/" className="text-[12.5px] text-accent-fg hover:underline">Open matrix</Link>} />
+      {rows.length ? (
+        <SimpleTable rows={rows} maxHeight="60vh" columns={[
+          { key: "role", label: "This asset is", render: (f: any) => <Badge tone={f.role === "Destination" ? "info" : "outline"}>{f.role}</Badge> },
+          { key: "inbound_internet", label: "Internet", render: (f: any) => f.inbound_internet ? <Badge tone="crit">inbound</Badge> : f.src_nat ? <Badge tone="warn">source NAT</Badge> : "" },
+          { key: "rule_id", label: "Rule", render: (f: any) => <Mono>{f.rule_id}</Mono> },
+          { key: "src", label: "Source", wrap: true, render: (f: any) => <span>{f.src_zone ? <span className="text-muted">{f.src_zone} · </span> : null}{f.src || "–"}</span> },
+          { key: "src_nat", label: "Source NAT IP", wrap: true },
+          { key: "dst_nat", label: "Public / NAT IP", wrap: true },
+          { key: "dst", label: "Destination", wrap: true, render: (f: any) => <span>{f.dst_zone ? <span className="text-muted">{f.dst_zone} · </span> : null}{f.dst || "–"}</span> },
+          { key: "ports", label: "Ports", render: (f: any) => <span>{[f.protocol, f.ports].filter(Boolean).join(" ") || "any"}</span> },
+          { key: "action", label: "Action" },
+          { key: "application", label: "Application", wrap: true },
+          { key: "app_owner", label: "Owner", wrap: true },
+          { key: "isp", label: "ISP / link" }, { key: "firewall", label: "Firewall" },
+          { key: "valid_till", label: "Valid till" },
+          { key: "sheet", label: "Sheet", render: (f: any) => <span className="text-[11.5px] text-muted" title={f.workbook}>{f.sheet || f.workbook || "–"}</span> },
+        ]} />
+      ) : <div className="p-6 text-center text-[13px] text-muted">No communication matrix row names this asset (as source, destination, public / NAT IP or source NAT IP).</div>}
+    </Card>
+  );
 }

@@ -4,6 +4,7 @@ import logging
 import re
 import time
 import secrets
+import sqlite3
 import threading
 from contextlib import asynccontextmanager
 
@@ -35,9 +36,17 @@ async def lifespan(app):
         sync.compute_devices(c, settings)  # columns / matching rules may be new after an upgrade
         sync.detect_reinstalls(c, settings, emit_events=False)
         inventory.tag_duplicates(c)
+        reg_rev = registry.code_rev()
         if settings.get("match_rev") != inventory.MATCH_REV:  # matching rules changed in this release
-            inventory.refresh_matches(c)
+            inventory.refresh_matches(c)  # also rebuilds the asset registry
             c.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('match_rev', ?)", (inventory.MATCH_REV,))
+            c.execute("DELETE FROM settings WHERE key='refresh_pending'")
+        elif settings.get("refresh_pending"):  # a background re-match was cut off by a restart (or failed): run it again
+            full = settings["refresh_pending"] == "full"
+            db.after_commit(lambda: inventory.refresh_async("Finishing the update interrupted by the restart", registry_only=not full))
+        elif settings.get("registry_rev") != reg_rev:  # exposure / matrix code changed: matrix NAT feeds matching too, so a full re-match in the background
+            db.after_commit(lambda: inventory.refresh_async("Recalculating matches and internet exposure after the upgrade"))
+        c.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('registry_rev', ?)", (reg_rev,))
     if not config.DEMO:
         sync.start_scheduler()
     ai_hunt.warmup()  # load the on-prem model now, not on the first question
@@ -258,6 +267,13 @@ async def basic_auth(request: Request, call_next):
 @app.exception_handler(ValueError)
 async def value_error(_, exc):
     return JSONResponse({"detail": str(exc)}, status_code=400)
+
+
+@app.exception_handler(sqlite3.OperationalError)
+async def db_busy(_, exc):
+    if "locked" in str(exc):  # a long background write (sync, re-match) still holds the database: ask to retry, not a crash
+        return JSONResponse({"detail": "The console is busy updating data in the background. Try again in a few seconds."}, status_code=503)
+    raise exc
 
 
 def _page(p):

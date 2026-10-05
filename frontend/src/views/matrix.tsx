@@ -13,8 +13,14 @@ import { DataTable, SimpleTable } from "@/components/data-table";
 import { MatrixUpload } from "@/components/matrix-upload";
 import { MatrixIpsPanel } from "./matrix-ips";
 
-const TYPE_TONE: Record<string, any> = { rules: "info", public_pool: "violet", nat_map: "warn", sod_nat: "serious", exposure: "crit" };
-const SHORT: Record<string, string> = { rules: "Rule", public_pool: "Pool", nat_map: "NAT", sod_nat: "SOD NAT", exposure: "Register" };
+// MX-00xx pattern sheets: the code as the short name; exposing patterns red, the others neutral
+const MX_EXPOSING = new Set(["mx01", "mx02", "mx03", "mx04", "mx07", "mx08", "mx09", "mx10", "mx11"]);
+const MX = Object.fromEntries(Array.from({ length: 14 }, (_, i) => `mx${String(i + 1).padStart(2, "0")}`).map((k) => [k, `MX-00${k.slice(2)}`]));
+const TYPE_TONE: Record<string, any> = { rules: "info", public_pool: "violet", nat_map: "warn", sod_nat: "serious", exposure: "crit",
+  zones: "info", pubpriv: "warn", pubonly: "violet", register: "crit", snat: "serious", sod: "serious", fwpolicy: "info",
+  ...Object.fromEntries(Object.keys(MX).map((k) => [k, MX_EXPOSING.has(k) ? "crit" : "outline"])) };
+const SHORT: Record<string, string> = { rules: "Rule", public_pool: "Pool", nat_map: "NAT", sod_nat: "SOD NAT", exposure: "Register",
+  zones: "Rule", pubpriv: "Public+private", pubonly: "Public IP", register: "Register", snat: "Source NAT", sod: "SOD NAT", fwpolicy: "Policy", ...MX };
 
 /** Addresses of one cell, one chip each (the cell's delimiters already split and expanded by the server). */
 function Chips({ items, link, max = 6, tone }: { items?: string[]; link?: boolean; max?: number; tone?: string }) {

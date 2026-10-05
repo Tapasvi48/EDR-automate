@@ -16,7 +16,7 @@ import { RegistryTable } from "@/components/registry-table";
 const RULES: [string, string, string][] = [
   ["inventory", "LOB inventory", "An “Internet Facing” / “Exposure” / “Zone” column says Yes, DMZ or Internet, or a “Public IP” / “NAT IP” column gives the node a public address (also when several nodes share one NAT IP)."],
   ["scan", "VA scan", "A scan covered a public IP: the asset's own public IP, or the public / NAT IP of an inventory node (its findings are what the internet can see)."],
-  ["matrix", "Communication matrix", "An internet-facing row of any matrix sheet (inbound rule from Internet / ISP / any, public IP pool, NAT list, SOD NAT, exposure register) names the asset's private IP, public / NAT IP, subnet, range or host name; or a row source-NATs the asset to a public IP (every host behind a shared NAT IP counts). Rows can be marked internet-facing by hand."],
+  ["matrix", "Communication matrix", "Three kinds of asset: (1) a public IP no rule NATs to a private IP (directly on the internet); (2) a private IP with its public / NAT IP, from an inbound destination-NAT rule or an outbound source-NAT rule (the public IP is shown on the private asset, not as an asset of its own); (3) a private IP the firewall lets in from or out to the internet with no NAT IP. Internet destinations, partner sources and VPN peers are never listed. Rows can be marked internet-facing by hand."],
   ["ip", "Public IP", "The asset's own IPv4 is globally routable and comes from an inventory, the NIAM dump or a VA scan. A global IPv6 address alone is not evidence (IPv6 needs no NAT, so most IPv6 addresses are global): IPv6 assets are exposed only through the communication matrix, an inventory Internet Facing / Public IP column, or Mark exposed."],
   ["edr", "CrowdStrike connection IP", "The agent's connection IP (the interface it reaches the CrowdStrike cloud from) is a public IPv4. CrowdStrike assets are listed under their connection IP; the local IP and the external (egress / NAT) IP are not exposure evidence."],
   ["passive", "Passive scan", "Shodan InternetDB (Internet DB scan page) sees open ports on the asset's public IP or the public / NAT IP it sits behind."],
@@ -66,8 +66,8 @@ export default function Exposure() {
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[12.5px]">
         <span className="mr-1 text-muted">Address type</span>
-        {([["public", "Public IP (own / ISP-direct)", s.kind_public], ["nat", "Private behind a public / NAT IP", s.kind_nat],
-          ["private", "Private, exposed by rule / zone / mark", s.kind_private]] as [string, string, number][]).map(([k, l, n]) => (
+        {([["public", "Public IP only (direct, no private IP behind)", s.kind_public], ["nat", "Private + public / NAT IP", s.kind_nat],
+          ["private", "Private, internet without NAT IP", s.kind_private]] as [string, string, number][]).map(([k, l, n]) => (
           <button key={k} onClick={() => only({ ip_kind: k })}
             className={cn("rounded-full border px-2.5 py-0.5 transition-colors", state.ip_kind === k ? "border-accent bg-accent-soft text-accent-fg" : "border-border hover:border-border-strong")}>
             {l} <b className="tabular">{fmtN(n || 0)}</b>

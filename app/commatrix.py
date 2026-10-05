@@ -36,7 +36,7 @@ ALIASES = {
     "src": ["sourceipsubnetinside", "sourceinsideip", "insideip", "inside", "insidelocal", "insideaddress", "localip", "privatesourceip",
             "sourceipsubnet", "sourceip", "sourceaddress", "srcip", "srcaddress", "source", "sourcesubnet", "src"],
     "src_nat": ["sourcenatoutsideippublic", "outsideippublic", "outsideip", "outside", "outsideglobal", "outsideaddress", "translatedip",
-                "nattedip", "natedip", "nattedpublicip", "natpublicipsource", "sourcepublicip", "publicsourceip", "sourcenatip", "srcnat", "snat",
+                "sourcenattedip", "sourcenatedip", "nattedip", "natedip", "nattedpublicip", "natpublicipsource", "sourcepublicip", "publicsourceip", "sourcenatip", "srcnat", "snat",
                 "sourcenat", "natip"],
     "isp": ["isplink", "isp", "link", "carrier"],
     "firewall": ["firewall", "fw", "fwl", "firewallname", "device", "whichfirewalldetailsexposedtothisip", "firewalldetails", "whichfirewall"],
@@ -46,7 +46,7 @@ ALIASES = {
     "dst": ["destinationipsubnetinside", "destinationinsideip", "destinationipsubnet", "destinationip", "destinationaddress", "dstip", "dstaddress", "destination", "destinationsubnet", "dst",
             "privateip", "internalip", "private", "internal"],
     "protocol": ["protocol", "proto"],
-    "ports": ["ports", "port", "dstport", "destinationport", "serviceport", "service"],
+    "ports": ["ports", "port", "portprotocol", "protocolport", "portsprotocol", "dstport", "destinationport", "serviceport", "service"],
     "service": ["serviceuse", "servicedetails", "use", "usage", "purpose", "applicationservice"],
     "application": ["application", "applicaiton", "applicaton", "app", "appname", "applicationname"],
     "app_owner": ["applicationowner", "applicatonowner", "applicaitonowner", "appowner", "serviceowner", "owner", "sourcecontactdetails", "contact"],
@@ -57,39 +57,198 @@ ALIASES = {
     "location": ["locationdc", "location", "site", "dc", "circle"],
     "remarks": ["remarks", "remark", "comments", "notes", "hoststatus", "planner"],
 }
-# Sheet types: what one sheet of a matrix workbook holds, which fields it needs, and whether its rows mean internet exposure
-SHEET_TYPES = {
-    "rules": {"label": "Firewall rules (source → destination)", "need": [["src", "dst", "dst_nat"]],
-              "hint": "Name · Source Zone · Source Address · Destination Zone · Destination Address · Service / Port · Application owner"},
-    "public_pool": {"label": "Public IP pool", "need": [["dst_nat"]],
-                    "hint": "S.No · Public IP pool · Use · Application · Application owner"},
-    "nat_map": {"label": "Public ↔ private IP (NAT)", "need": [["dst_nat"], ["dst"]],
-                "hint": "S.No · Public IP · Private IP · Application · Application owner · Which firewall exposes it"},
-    "sod_nat": {"label": "SOD / NAT rules", "need": [["dst", "dst_nat"]],
-                "hint": "SOD details · dest_nat_ip · destination_ip · fwl · location · nat_ip · port · protocol · rule · source_ip"},
-    "exposure": {"label": "Internet exposure register", "need": [["dst_nat", "dst"]],
-                 "hint": "Public IP · Internal IP · Port · Service details · Destination IP · LOB · Domain · MS Partner · Service owner · Firewall"},
+# Sheet types offered on upload: one per pattern of the template (MX-0001 … MX-0014). A pattern decides how EVERY row of the sheet is
+# read: inbound = rows are internet-facing (1) or not (0); clear = fields emptied so they cannot expose anything; defaults = values
+# filled when the cell is empty (for display). need = groups of fields, one of each group must be mapped.
+_ANY_ADDR = [["src", "dst", "dst_nat"]]
+PATTERNS = {
+    # the three sheet types offered on upload (inbound None = decided per row from the zones / ISP / source)
+    "zones": ("Firewall rules (Source Zone / ISP / Destination Zone)",
+              "Each row is checked: Source Zone Internet / ISP / Untrust / Outside, a filled ISP link, or a source of Any / a public IP "
+              "= exposed. Deny rows and internal zones are not.", _ANY_ADDR, None, (), {}),
+    "pubpriv": ("Public IP + private IP", "Each row's public IP is NATed to its private IP: both are exposed and linked.",
+                [["dst_nat"], ["dst"]], 1, (), {"direction": "Inbound", "src_zone": "Internet", "src": "Any"}),
+    "pubonly": ("Only public IP", "Each row is a public IP with no private IP behind it (ISP direct): the public IP is exposed.",
+                [["dst_nat"]], 1, ("dst",), {"direction": "Inbound", "src_zone": "Internet", "src": "Any"}),
+    "register": ("Public IP · Internal IP · Port · Service · Destination IP",
+                 "Each Public IP leads to its Internal IP (and the Destination IP when filled): all are exposed and linked.",
+                 [["dst_nat"], ["dst", "src"]], 1, (), {"direction": "Inbound", "src_zone": "Internet"}),
+    "snat": ("Source IP · Destination IP · Port / Protocol · Source Natted IP",
+             "Each source IP goes out to the internet through its Source Natted (public) IP: the source is exposed and linked to it.",
+             [["src"], ["src_nat"]], 0, ("dst_nat",), {"direction": "Outbound"}),
+    "fwpolicy": ("Firewall policy (Rule Name · Zones · IP/Object · NAT Translated IP …)",
+                 "Each rule checked by its zones: from Internet / Untrust / Outside or a source of Any = exposed; NAT Translated IP is the "
+                 "inside server of an inbound rule or the public IP an outbound rule leaves as. Deny rules are never exposed.",
+                 [["src", "dst"]], None, (), {}),
+    "sod": ("SOD NAT (SODdetails · dest_nat_ip · destination_ip · nat_ip · source_ip …)",
+            "Each row checked: a public dest_nat_ip exposes destination_ip (linked); a public nat_ip exposes source_ip (linked).",
+            [["dst", "dst_nat", "src"]], None, (), {}),
+    # earlier sheet types: kept so rows uploaded with them still read and show correctly
+    "mx01": ("MX-0001 · Public + private (destination NAT)", "Public IP NATed to an inside server: both IPs exposed and linked.",
+             [["dst_nat"], ["dst"]], 1, (), {"direction": "Inbound", "src_zone": "Internet", "src": "Any"}),
+    "mx02": ("MX-0002 · Outbound via source NAT", "Inside host goes out through a public IP: the inside host is exposed and linked.",
+             [["src"], ["src_nat"]], 0, (), {"direction": "Outbound"}),
+    "mx03": ("MX-0003 · Public IP only (ISP direct)", "Host with only a public IP on the ISP link, no NAT: the public IP is exposed.",
+             [["dst_nat"]], 1, ("dst",), {"direction": "Inbound", "src_zone": "Internet", "src": "Any"}),
+    "mx04": ("MX-0004 · Static NAT, all ports", "One-to-one public ↔ private NAT on every port: both exposed and linked.",
+             [["dst_nat"], ["dst"]], 1, (), {"direction": "Inbound", "src_zone": "Internet", "src": "Any", "ports": "any", "protocol": "any"}),
+    "mx05": ("MX-0005 · Partner / NNI link", "Partner / NNI / roaming flow: not directly exposed (add the range under Indirect ranges).",
+             [["src", "dst"]], 0, ("src_nat",), {"direction": "Inbound", "src_zone": "NNI-Partner"}),
+    "mx06": ("MX-0006 · Internal (east–west)", "Inside to inside flow: not exposed.",
+             [["src", "dst"]], 0, ("src_nat",), {"direction": "Internal"}),
+    "mx07": ("MX-0007 · Own public IP (no NAT)", "Server that owns a public IP (in the destination column): the public IP is exposed.",
+             [["dst"]], 1, (), {"direction": "Inbound", "src_zone": "Internet", "src": "Any"}),
+    "mx08": ("MX-0008 · Internet → private IP", "Inbound from the internet to a private IP, public IP unknown: the private IP is exposed.",
+             [["dst"]], 1, (), {"direction": "Inbound", "src_zone": "Untrust", "src": "Any"}),
+    "mx09": ("MX-0009 · Partner public IP → internal", "One partner public IP allowed in to an internal server: the server is exposed.",
+             [["src"], ["dst"]], 1, (), {"direction": "Inbound", "src_zone": "Partner"}),
+    "mx10": ("MX-0010 · Partner public range → internal", "A partner public subnet / range allowed in to an internal server: the server is exposed.",
+             [["src"], ["dst"]], 1, (), {"direction": "Inbound", "src_zone": "External"}),
+    "mx11": ("MX-0011 · Public IP in source column", "A list of public IPs in the source column only: each public IP is exposed (ISP direct).",
+             [["src"]], 0, ("dst", "dst_nat", "src_nat"), {}),
+    "mx12": ("MX-0012 · Outbound, no NAT", "Outbound to the internet without a NAT IP: not exposed.",
+             [["src"]], 0, ("src_nat",), {"direction": "Outbound"}),
+    "mx13": ("MX-0013 · Denied rule", "Deny / drop rules: kept for reference, never exposed.",
+             _ANY_ADDR, 0, ("src_nat",), {"action": "Deny"}),
+    "mx14": ("MX-0014 · Expired rule", "Expired rules: kept for reference, ignored.",
+             _ANY_ADDR, 0, ("src_nat",), {}),
 }
+# Fields offered for mapping per pattern: the pattern's own address fields first (with what they mean in THAT pattern), then
+# the flow and descriptive fields. Fields a pattern does not list are not read from its sheets.
+FIELD_DESC = {
+    "rule_id": "Unique ID of the row (blank = row number)", "protocol": "tcp / udp / icmp / any", "ports": "Port, list or range (443, 80,443, 8000-8100)",
+    "service": "What the flow is for", "application": "Application name; also names assets only the matrix knows",
+    "app_owner": "Team / person who owns the application", "lob": "Owning LOB, used when no inventory lists the IP",
+    "msp": "Managed service partner", "domain": "Domain / tower", "location": "DC, circle or POP", "firewall": "Firewall that enforces the rule",
+    "fw_rule": "Rule name on the firewall", "cr": "Change / CR / SOD approval number", "valid_till": "Last day the rule is valid (blank = permanent)",
+    "remarks": "Free notes", "isp": "ISP / ILL link the traffic comes in on", "src_zone": "Zone of the source", "dst_zone": "Zone of the destination",
+    "direction": "Inbound / Outbound / Internal", "action": "Allow / Deny", "name": "Rule or service name",
+}
+_FLOW = ["protocol", "ports", "service"]
+_INFO = ["rule_id", "application", "app_owner", "lob", "msp", "domain", "location", "firewall", "fw_rule", "cr", "valid_till", "remarks"]
+PATTERN_FIELDS = {
+    "zones": [("src_zone", "Zone the traffic comes from; Internet / ISP / Untrust / Outside = from the internet"),
+              ("isp", "ISP / ILL link; filled = from the internet"), ("dst_zone", "Zone of the destination, e.g. DMZ"),
+              ("src", "Source IP / subnet, or Any"), ("dst", "Destination server IP / subnet"),
+              ("dst_nat", "Destination public / NAT IP (optional)"), ("src_nat", "Source NAT public IP (optional; exposes the source)"),
+              ("direction", None), ("action", "Allow / Deny; Deny rows are never exposed"), *_FLOW],
+    "pubpriv": [("dst_nat", "The public IP"), ("dst", "The private IP behind the public IP"), ("isp", None), *_FLOW],
+    "pubonly": [("dst_nat", "The public IP"), ("isp", "ISP / ILL link the public IP sits on"), *_FLOW],
+    # (key, description, label shown for this type): the register's own column names
+    "register": [("dst_nat", "Public IP the internet reaches", "Public IP"), ("dst", "Internal IP behind the public IP", "Internal IP"),
+                 ("ports", "Port(s) open on the public IP", "Port"), ("service", "What the service is", "Service Details"),
+                 ("src", "Another internal address the public IP leads to (also exposed and linked)", "Destination IP"),
+                 ("remarks", "Free notes", "REMARK")],
+    "snat": [("src", "Inside host that goes out", "source_ip"), ("dst", "Where it connects to (internet IP; not listed as ours)", "destination_ip"),
+             ("ports", "Port and protocol, e.g. 443/tcp", "Port / Protocol"),
+             ("src_nat", "Public IP the source leaves through; a public IP here makes the source exposed", "Source Natted IP")],
+    "fwpolicy": [("fw_rule", "Rule name on the firewall", "Rule Name"),
+                 ("src_zone", "Zone the traffic comes from; Internet / Untrust / Outside = from the internet", "Source Zone"),
+                 ("src", "Source IP / object, or Any", "Source IP/Object"), ("dst_zone", "Zone of the destination, e.g. DMZ", "Destination Zone"),
+                 ("dst", "Destination IP / object (public IP of an inbound NAT rule)", "Destination IP/Object"),
+                 ("protocol", None, "Protocol"), ("ports", None, "Port"), ("action", "Allow / Deny; Deny is never exposed", "Action"),
+                 ("x_logging", "Kept in the remarks", "Logging"), ("name", "NAT rule name", "NAT Rule"),
+                 ("src_nat", "Inbound rule: the inside server behind the destination. Outbound rule: the public IP the source leaves as",
+                  "NAT Translated IP"),
+                 ("x_vpn", "VPN peer; kept in the remarks, not listed as ours", "VPN Peer"), ("x_nexthop", "Kept in the remarks", "Route Next Hop"),
+                 ("remarks", None, "Remarks")],
+    "sod": [("cr", "SOD / approval reference", "SODdetails"),
+            ("dst_nat", "Public IP the traffic comes in on (destination NAT); public = destination_ip exposed", "dest_nat_ip"),
+            ("dst", "Inside server behind dest_nat_ip", "destination_ip"), ("firewall", "Firewall that enforces it", "fwl"),
+            ("location", "DC / site", "location"),
+            ("src_nat", "Public IP the source leaves through (source NAT); public = source_ip exposed", "nat_ip"),
+            ("ports", "Port(s)", "port"), ("protocol", "tcp / udp / any", "protocol"), ("rule_id", "Rule number / name", "rule"),
+            ("src", "Source IP, or Any", "source_ip")],
+    "mx01": [("dst_nat", "Public / VIP IP the internet connects to"), ("dst", "Inside server IP behind that public IP"),
+             ("src", "Allowed internet source (blank = Any)"), ("isp", None), *_FLOW],
+    "mx02": [("src", "Inside host(s) that go out to the internet"), ("src_nat", "Public IP they leave through (source NAT / outside IP)"),
+             ("dst", "Where they connect to (optional)"), ("isp", None), *_FLOW],
+    "mx03": [("dst_nat", "The host's public IP (no private IP behind it)"), ("isp", "ISP / ILL link the public IP sits on"), *_FLOW],
+    "mx04": [("dst_nat", "Public IP of the one-to-one NAT"), ("dst", "Inside IP it is translated to (all ports)"), ("isp", None)],
+    "mx05": [("src", "Partner / NNI / roaming range"), ("dst", "Our inside IP the partner reaches"), ("src_zone", "Partner zone (e.g. NNI-Partner)"), *_FLOW],
+    "mx06": [("src", "Inside source IP / subnet"), ("dst", "Inside destination IP / subnet"), ("src_zone", None), ("dst_zone", None), *_FLOW],
+    "mx07": [("dst", "The server's own public IP"), ("isp", None), *_FLOW],
+    "mx08": [("dst", "Inside IP reachable from the internet"), ("src", "Allowed source (blank = Any)"), ("src_zone", None), *_FLOW],
+    "mx09": [("src", "The partner's public IP"), ("dst", "Our inside server it reaches"), *_FLOW],
+    "mx10": [("src", "The partner's public subnet / range"), ("dst", "Our inside server it reaches"), *_FLOW],
+    "mx11": [("src", "The public IP (one per row)"), ("isp", "ISP / ILL link it sits on")],
+    "mx12": [("src", "Inside host going out"), ("dst", "Internet destination (not ours, never listed)"), *_FLOW],
+    "mx13": [("src", "Source of the denied flow"), ("dst", "Inside destination of the denied flow"), ("dst_nat", "Public IP of the denied flow"),
+             ("action", "Deny / Drop (blank = Deny)"), *_FLOW],
+    "mx14": [("src", "Source of the expired flow"), ("dst", "Inside destination of the expired flow"), ("dst_nat", "Public IP of the expired flow"),
+             *_FLOW],
+}
+_LABEL = {"src": "Source IP / Subnet", "src_nat": "Source NAT / Outside IP (public)", "dst_nat": "Destination Public / NAT IP",
+          "dst": "Destination IP / Subnet"}
+
+
+def pattern_fields(stype):
+    """[(key, label, description)] for a pattern sheet, or None for the older sheet types (every field)."""
+    spec = PATTERN_FIELDS.get(stype)
+    if not spec:
+        return None
+    labels = {k: l for k, l, _ in FIELDS}
+    out, seen = [], set()
+    for item in [*spec, *_INFO]:
+        k, d, lab = (tuple(item) + (None, None))[:3] if isinstance(item, tuple) else (item, None, None)
+        if k not in seen:
+            seen.add(k)
+            out.append((k, lab or _LABEL.get(k) or labels[k], d or FIELD_DESC.get(k, "")))
+    return out
+
+
+# Older sheet types: rows uploaded before the patterns keep these (and the demo data uses them)
+SHEET_TYPES = {
+    "rules": {"label": "Firewall rules (mixed)", "need": _ANY_ADDR, "hint": ""},
+    "public_pool": {"label": "Public IP pool", "need": [["dst_nat"]], "hint": ""},
+    "nat_map": {"label": "NAT list (public ↔ private)", "need": [["dst_nat"], ["dst"]], "hint": ""},
+    "sod_nat": {"label": "SOD NAT", "need": [["dst", "dst_nat"]], "hint": ""},
+    "exposure": {"label": "Exposure register", "need": [["dst_nat", "dst"]], "hint": ""},
+    **{k: {"label": p[0], "need": p[2], "hint": p[1]} for k, p in PATTERNS.items()},
+}
+LIST_TYPES = ("public_pool", "nat_map", "sod_nat", "exposure")  # older list sheets: any public IP on them is internet-facing
 # per sheet type, aliases that win over the generic ones (e.g. "Destination IP" on a register is a second internal address)
 TYPE_ALIASES = {
     "nat_map": {"dst_nat": ["publicip", "publicippool", "public"], "dst": ["privateip", "private", "internalip"]},
     "exposure": {"dst_nat": ["publicip"], "dst": ["internalip", "privateip"], "src": ["destinationip"]},
     "sod_nat": {"dst_nat": ["destnatip"], "src_nat": ["natip"], "dst": ["destinationip"], "src": ["sourceip"]},
     "public_pool": {"dst_nat": ["publicippool", "publicip", "publicips", "pool"]},
+    "register": {"dst_nat": ["publicip"], "dst": ["internalip", "privateip"], "src": ["destinationip"], "ports": ["port"],
+                 "service": ["servicedetails"], "remarks": ["remark"]},
+    "snat": {"src": ["sourceip"], "dst": ["destinationip"], "ports": ["portprotocol", "protocolport", "port"],
+             "src_nat": ["sourcenattedip", "sourcenatedip", "sourcenatip", "nattedip", "natip"]},
+    "fwpolicy": {"fw_rule": ["rulename"], "src": ["sourceipobject", "sourceip", "sourceobject"],
+                 "dst": ["destinationipobject", "destinationip", "destinationobject"], "ports": ["port"], "name": ["natrule"],
+                 "src_nat": ["nattranslatedip", "translatedip"], "x_logging": ["logging", "log"], "x_vpn": ["vpnpeer", "vpn"],
+                 "x_nexthop": ["routenexthop", "nexthop"]},
+    "sod": {"cr": ["soddetails"], "dst_nat": ["destnatip"], "dst": ["destinationip"], "firewall": ["fwl"], "location": ["location"],
+            "src_nat": ["natip"], "ports": ["port"], "protocol": ["protocol"], "rule_id": ["rule"], "src": ["sourceip"]},
 }
 
 
-def guess_type(headers):
+OFFERED = ("zones", "pubpriv", "pubonly", "register", "snat", "sod", "fwpolicy")  # sheet types in the upload dropdown
+NOTE_LABELS = {"x_logging": "Logging", "x_vpn": "VPN peer", "x_nexthop": "Next hop"}  # columns kept in the remarks
+
+
+def guess_type(headers, sheet=""):
+    """Sheet type from the columns: only a public IP -> Only public IP; public + private IP and no source / zone / ISP -> Public IP +
+    private IP; anything else (source, zones, ISP) -> Firewall rules. Public IP + Internal IP columns -> the register."""
     n = {_norm(h) for h in headers}
-    if n & {"soddetails", "destnatip", "fwl"}:
-        return "sod_nat"
-    if "publicippool" in n or ("pool" in " ".join(n) and not n & {"privateip", "internalip"}):
-        return "public_pool"
-    if n & {"internalip"} and n & {"publicip"} and n & {"hoststatus", "servicedetails", "lob", "mspartner", "planner"}:
-        return "exposure"
-    if n & {"publicip"} and n & {"privateip", "internalip"}:
-        return "nat_map"
-    return "rules"
+    if "publicip" in n and "internalip" in n:
+        return "register"
+    if "nattranslatedip" in n or "sourceipobject" in n or "destinationipobject" in n:
+        return "fwpolicy"
+    if "soddetails" in n or ("destnatip" in n and "natip" in n):
+        return "sod"
+    if "sourcenattedip" in n or "sourcenatedip" in n:
+        return "snat"
+    has = set(suggest_mapping(headers, "rules"))
+    rulish = has & {"src", "src_nat", "direction", "action"}
+    if "dst_nat" in has and "dst" not in has and not rulish:
+        return "pubonly"
+    if "dst_nat" in has and "dst" in has and not rulish:
+        return "pubpriv"
+    return "zones"
 
 
 INTERNET_ZONE = re.compile(r"internet|isp|untrust|outside|external|public|wan", re.I)
@@ -108,7 +267,7 @@ def suggest_mapping(headers, stype="rules"):
     over = TYPE_ALIASES.get(stype, {})
     order = [k for k in over] + [k for k in KEYS if k not in over]
     for f in order:
-        for alias in [*(_norm(n) for n in custom.get(f, [])), *over.get(f, []), *ALIASES[f]]:
+        for alias in [*(_norm(n) for n in custom.get(f, [])), *over.get(f, []), *ALIASES.get(f, [])]:  # x_ keys: notes of one type
             hit = next((h for h in headers if h not in used and norm[h] == _norm(alias)), None)
             if hit:
                 mapping[f] = hit
@@ -131,6 +290,12 @@ def is_inbound_internet(r):
     from .registry import is_public
     if (r["action"] or "allow").strip().lower() not in ("allow", "permit", "accept", "yes", ""):
         return False
+    # traffic going OUT to the internet is never inbound, whatever the source zone / ISP column says
+    if re.match(r"^\s*out", r["direction"] or "", re.I) or INTERNET_ZONE.search(r.get("dst_zone") or ""):
+        return False
+    d_any, d_nets = endpoints(r["dst"])
+    if d_any and not parse_addresses(r.get("dst_nat") or "")[1]:  # destination Any: not one of our hosts
+        return False
     if re.match(r"^\s*in", r["direction"] or "", re.I) and (INTERNET_ZONE.search(r["src_zone"] or "") or r["isp"]):
         return True
     if INTERNET_ZONE.search(r["src_zone"] or "") or r["isp"]:
@@ -141,20 +306,111 @@ def is_inbound_internet(r):
     return any(n.num_addresses == 1 and is_public(str(n.network_address)) for n in nets)
 
 
+RULE_TYPES = ("rules", "zones", "fwpolicy")  # sheet types whose rows are judged one by one (zones / ISP / source)
+
+
+def reclassify(c):
+    """Re-judge stored firewall-rule rows with the current is_inbound_internet (rows uploaded under older logic), keeping
+    manual marks. Every consumer (exposure, data fabric, ontology, threats, Asset 360) reads inbound_internet."""
+    upd = []
+    for r in db.rows(c, f"""SELECT * FROM comm_rules WHERE COALESCE(sheet_type,'rules') IN ({','.join('?' * len(RULE_TYPES))})""", RULE_TYPES):
+        v = 1 if is_inbound_internet(r) else 0
+        if v != r["inbound_auto"]:
+            upd.append((v, r["id"]))
+    if upd:
+        c.executemany("UPDATE comm_rules SET inbound_auto=? WHERE id=?", upd)
+        apply_overrides(c)
+    return len(upd)
+
+
+def matrix_owned(rules):
+    """Which public IPs of the matrix are OURS.
+    natted: a public IP translated to / from one of our private IPs in the same row (destination NAT / source NAT). It belongs
+            to that private asset (shown as its public IP), it is not an asset of its own.
+    direct: a public IP an internet-facing row reaches with no private IP behind it (directly on the ISP link). An asset.
+    Any other public IP in the matrix (internet destinations, partner sources, VPN peers) is not ours."""
+    from .registry import is_public
+
+    def singles(text):
+        return [str(n.network_address) for n in parse_addresses(text)[1] if n.num_addresses == 1]
+    natted, direct = set(), set()
+    for r in rules:
+        for a, b in (("dst", "dst_nat"), ("src", "src_nat")):
+            na, nb = parse_addresses(r[a])[1], parse_addresses(r[b])[1]
+            if na and nb:
+                if any(_is_private(n) for n in na):
+                    natted |= {str(n.network_address) for n in nb if n.num_addresses == 1 and not _is_private(n)}
+                if any(_is_private(n) for n in nb):
+                    natted |= {str(n.network_address) for n in na if n.num_addresses == 1 and not _is_private(n)}
+        if r["inbound_internet"] and not any(_is_private(n) for n in parse_addresses(r["dst"])[1]):
+            direct |= {ip for ip in singles(r["dst"]) + singles(r["dst_nat"]) if is_public(ip)}
+        if r.get("sheet_type") == "mx11" and not r["dst"] and not r["dst_nat"]:  # public IPs listed in the source column
+            direct |= {ip for ip in singles(r["src"]) if is_public(ip)}
+    return natted, direct - natted
+
+
+def internet_without_nat(r, our_public=frozenset()):
+    """A private source let out to the internet by the firewall with no public NAT IP in the row: allowed, not inbound, no
+    public source NAT, and the destination is the internet (an internet zone, a public IP that is not ours, or Any with no
+    internal destination zone)."""
+    from .registry import is_public
+    if r["inbound_internet"] or (r["action"] or "allow").strip().lower() not in ("allow", "permit", "accept", "yes", ""):
+        return False
+    if any(is_public(str(n.network_address)) for n in parse_addresses(r["src_nat"])[1]):
+        return False
+    d_any, d_nets, _ = parse_addresses(r["dst"])
+    zone = r.get("dst_zone") or ""
+    if INTERNET_ZONE.search(zone):
+        return True
+    if any(not _is_private(n) and str(n.network_address) not in our_public for n in d_nets):
+        return True
+    return bool(d_any and not zone)
+
+
 def active(r, now):
     return not r["valid_till"] or r["valid_till"] >= now
 
 
 def build(parsed, mapping, stype="rules", workbook="", sheet=""):
     st = SHEET_TYPES.get(stype) or SHEET_TYPES["rules"]
+    pf = pattern_fields(stype)
+    if pf:  # a pattern sheet reads only its own fields
+        mapping = {k: v for k, v in mapping.items() if k in {f for f, _, _ in pf}}
     for group in st["need"]:
         if not any(mapping.get(k) for k in group):
             raise ValueError(f"{st['label']}: map " + " or ".join(dict((a, b) for a, b, _ in FIELDS)[k] for k in group))
     idx = {h: i for i, h in enumerate(parsed["headers"])}
     out, warnings, bad, seen = [], [], 0, set()
     tag = (sheet or "")[:12]
+    pat = PATTERNS.get(stype)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     for n, r in enumerate(parsed["rows"], start=1):
         v = {k: (r[idx[mapping[k]]] if mapping.get(k) in idx else "").strip() for k in KEYS}
+        notes = [f"{NOTE_LABELS.get(k, k)}: {str(r[idx[h]]).strip()}" for k, h in mapping.items()
+                 if k.startswith("x_") and h in idx and str(r[idx[h]]).strip()]
+        if notes:  # columns with no field of their own (Logging, VPN Peer, Route Next Hop) are kept in the remarks
+            v["remarks"] = " · ".join([v["remarks"], *notes] if v["remarks"] else notes)
+        if stype == "fwpolicy" and v["src_nat"]:  # NAT Translated IP: which side it belongs to depends on the rule's direction
+            from .registry import is_public
+            t = v["src_nat"]
+            if is_inbound_internet(v):  # inbound: public destination -> translated inside server (or the translated IP is the public one)
+                if any(is_public(str(x.network_address)) for x in parse_addresses(t)[1]):
+                    v["dst_nat"] = t
+                else:
+                    v["dst_nat"], v["dst"] = v["dst"], t
+                v["src_nat"] = ""
+            # outbound: the translated IP is the public address the source leaves as (stays in src_nat)
+        if pat:  # the sheet's pattern decides for every row
+            for k in pat[4]:
+                v[k] = ""
+            for k, d in pat[5].items():
+                v[k] = v[k] or d
+            if stype == "register" and v["src"]:  # Destination IP: a second internal address behind the public IP
+                v["dst"] = ", ".join(x for x in (v["dst"], v["src"]) if x)
+            if stype == "register":
+                v["src"] = "Any"
+            if stype == "mx14" and not (v["valid_till"] and (db.parse_ts(v["valid_till"]) or v["valid_till"])[:10] < today):
+                v["valid_till"] = "1970-01-01"
         d_any, d_nets, d_names = parse_addresses(v["dst"])
         p_any, p_nets, _ = parse_addresses(v["dst_nat"])
         s_any, s_nets, s_names = parse_addresses(v["src"])
@@ -162,8 +418,8 @@ def build(parsed, mapping, stype="rules", workbook="", sheet=""):
             bad += 1
             continue
         rid = v["rule_id"] or f"row-{n}"
-        if stype != "rules" or rid in seen:
-            rid = f"{tag}:{rid}" if stype != "rules" and tag else rid
+        if stype in LIST_TYPES or rid in seen:
+            rid = f"{tag}:{rid}" if stype in LIST_TYPES and tag else rid
         if rid in seen:
             rid = f"{rid}#{n}"
         seen.add(rid)
@@ -171,7 +427,14 @@ def build(parsed, mapping, stype="rules", workbook="", sheet=""):
         v["dst_nat"] = ", ".join(str(x.network_address) if x.num_addresses == 1 else str(x) for x in p_nets) or v["dst_nat"]
         v["valid_till"] = (db.parse_ts(v["valid_till"]) or v["valid_till"])[:10]
         v["protocol"] = v["protocol"].lower()
-        if stype == "rules":
+        if pat:
+            v["inbound_internet"] = pat[3] if pat[3] is not None else (1 if is_inbound_internet(v) else 0)
+            if stype == "sod":  # a public dest_nat_ip (or a public destination_ip on a row without nat_ip): published to the internet;
+                from .registry import is_public  # on a source-NAT row the destination is the far end, not ours
+                pub = lambda nets: any(is_public(str(x.network_address)) for x in nets)
+                if pub(p_nets) or (pub(d_nets) and not v["src_nat"]):
+                    v["inbound_internet"] = 1
+        elif stype == "rules":
             v["inbound_internet"] = 1 if is_inbound_internet(v) else 0
         else:  # NAT / pool / register sheets: a public IP (or a public internal address) means reachable from the internet
             from .registry import is_public
@@ -200,13 +463,15 @@ class RuleIndex:
     def __init__(self, rules):
         self.rules = rules
         self.nets = {"src": {}, "dst": {}}
-        self.nat = {}
+        self.nat, self.snat = {}, {}
         for i, r in enumerate(rules):
             for side, text in (("src", r["src"]), ("dst", r["dst"])):
                 for n in endpoints(text)[1]:
                     self.nets[side].setdefault((n.version, n.prefixlen), {}).setdefault(int(n.network_address), set()).add(i)
             for ip in db.all_ips(r["dst_nat"]):
                 self.nat.setdefault(ip, set()).add(i)
+            for ip in db.all_ips(r["src_nat"]):  # the public IP a source leaves as: its rows belong to that IP too
+                self.snat.setdefault(ip, set()).add(i)
 
     def _hits(self, side, addrs):
         out = set()
@@ -228,6 +493,8 @@ class RuleIndex:
         for ip in ips:
             dst |= self.nat.get(ip, set())
         src = self._hits("src", addrs)
+        for ip in ips:
+            src |= self.snat.get(ip, set())
         return [{**self.rules[i], "role": "Destination" if i in dst else "Source"} for i in sorted(dst | src)]
 
 
@@ -300,9 +567,13 @@ def _load(data):
 
 def _sheet_info(token, sheet=None, header_row=None, stype=None):
     parsed = inventory.parse_upload(token, sheet, header_row)
-    t = stype or guess_type(parsed["headers"])
+    t = stype or guess_type(parsed["headers"], parsed["sheet"])
+    mapping = suggest_mapping(parsed["headers"], t)
+    pf = pattern_fields(t)
+    if pf:  # only the fields this pattern reads
+        mapping = {k: v for k, v in mapping.items() if k in {f for f, _, _ in pf}}
     return {"sheet": parsed["sheet"], "header_row": parsed["header_row"], "headers": parsed["headers"], "row_count": len(parsed["rows"]),
-            "sample": parsed["rows"][:5], "type": t, "mapping": suggest_mapping(parsed["headers"], t), "filename": parsed["filename"],
+            "sample": parsed["rows"][:5], "type": t, "mapping": mapping, "filename": parsed["filename"],
             "sheets": parsed["sheets"]}
 
 
@@ -311,7 +582,8 @@ def _fields():
 
 
 def _types():
-    return [{"id": k, "label": v["label"], "hint": v["hint"], "need": v["need"]} for k, v in SHEET_TYPES.items()]
+    return [{"id": k, "label": SHEET_TYPES[k]["label"], "hint": SHEET_TYPES[k]["hint"], "need": SHEET_TYPES[k]["need"],
+             "fields": [{"key": f, "label": l, "desc": d} for f, l, d in pattern_fields(k)]} for k in OFFERED]
 
 
 @router.post("/api/comm/parse")
@@ -332,7 +604,9 @@ def comm_workbook(data: dict = Body(...)):
             sheets.append({"sheet": name, "error": str(e), "include": False})
             continue
         info.pop("sheets", None)
-        info["include"] = info["row_count"] > 0
+        need = (SHEET_TYPES.get(info["type"]) or SHEET_TYPES["rules"])["need"]
+        # guide sheets (Which sheet to use, How to fill) have no address column: left out unless picked by hand
+        info["include"] = info["row_count"] > 0 and all(any(info["mapping"].get(k) for k in g) for g in need)
         sheets.append(info)
     return {"token": data["token"], "filename": first["filename"], "sheets": sheets, "fields": _fields(), "types": _types()}
 
@@ -595,23 +869,19 @@ def matrix_ips(c):
         for n in (r["name"] or "").split(", "):
             if n:
                 names.setdefault(db.norm_hostname(n), []).append(ip)
-    v4 = sorted((int(ipaddress.ip_address(ip)), ip) for ip in reg if ":" not in ip)
+    def _num(ip):  # inventory IP cells can hold typos / text ("NOT IN USE", #REF!): those cannot sit in a subnet
+        try:
+            return int(ipaddress.IPv4Address(ip))
+        except ValueError:
+            return None
+    v4 = sorted((n, ip) for ip in reg if ":" not in ip for n in [_num(ip)] if n is not None)
     v4n = [n for n, _ in v4]
     rules = load_rules(c)
     # Our assets are private (10.x, 172.16-31.x, 192.168.x …). A public IP is ours when the matrix translates it to / from one of
     # those private IPs in the same rule (destination ↔ translated destination, source ↔ translated source), when it is in your
     # public ranges or your ASNs' advertised prefixes, when you marked it enterprise, or when inventory / VA / NIAM has it.
-    natted = set()
-    for r in rules:
-        for a, b in (("dst", "dst_nat"), ("src", "src_nat")):
-            na, nb = parse_addresses(r[a])[1], parse_addresses(r[b])[1]
-            if not na or not nb:
-                continue
-            if any(_is_private(n) for n in na):
-                natted |= {str(n.network_address) for n in nb if n.num_addresses == 1 and not _is_private(n)}
-            if any(_is_private(n) for n in nb):
-                natted |= {str(n.network_address) for n in na if n.num_addresses == 1 and not _is_private(n)}
-    our_public = natted
+    natted, direct = matrix_owned(rules)
+    our_public = natted | direct
     from .surface import ASNS_KEY, RANGES_KEY, _setting_list
     from .registry import _nets
     our_nets = [n for e in _setting_list(c, RANGES_KEY) for n in _nets(e.get("value"))]
@@ -686,6 +956,8 @@ def matrix_ips(c):
                 ours, why = True, "marked enterprise"
             elif e["address"] in natted:
                 ours, why = True, "NAT of one of our private IPs in the matrix"
+            elif e["address"] in direct:
+                ours, why = True, "public IP directly on the internet (no private IP behind it)"
             elif in_ours(n):
                 ours, why = True, "inside your public ranges / your ASNs' prefixes"
             elif "exposed" in e["roles"] or {"public", "public_src"} & e["roles"]:
@@ -819,80 +1091,158 @@ def comm_mark(rule_pk: int, data: dict = Body(...)):
 
 
 # ------------------------------------------------------------------ template workbook: one sheet per sheet type
-UNIFIED_HEADERS = ["Rule ID", "Flow type", "Direction", "Source Zone", "Source IP / Subnet (inside)", "Source NAT / Outside IP (public)", "ISP / Link",
+# Every column is a mappable field (no extra columns). Each sample row's Remarks says whether the console counts it as internet exposed.
+UNIFIED_HEADERS = ["Rule ID", "Direction", "Source Zone", "Source IP / Subnet (inside)", "Source NAT / Outside IP (public)", "ISP / Link",
                    "Destination Zone", "Destination Public / NAT IP", "Destination IP / Subnet (inside)", "Protocol", "Port(s)", "Service / Use",
                    "Application", "Application Owner", "LOB", "MS Partner", "Domain", "Location / DC", "Firewall", "Firewall Rule Name", "Action",
                    "Change / SOD No.", "Valid Till", "Remarks"]
 UNIFIED_ROWS = [
-    ["MX-0001", "Published service (inbound NAT)", "Inbound", "Internet", "Any", "", "Airtel ILL-01", "DMZ", "49.36.10.21", "10.10.4.21", "tcp", "443, 8443",
-     "Customer self-care portal", "Self-care", "Digital Channels", "Retail Banking", "Wipro", "Digital", "DC-Mumbai", "DMZ-FW-01", "allow-https-selfcare",
-     "Allow", "SOD-2026-0931", "", "public VIP → internal web server"],
-    ["MX-0002", "Outbound source NAT", "Outbound", "OAM", "10.30.8.15", "49.36.10.30", "Jio ILL-02", "Internet", "", "Any", "tcp", "443",
-     "Vendor patch download", "OSS patching", "NetOps", "Payments", "TCS", "OAM", "DC-Delhi", "EDGE-FW-02", "oam-out-443", "Allow", "CR-2026-1102",
-     "2026-12-31", "inside IP leaves through the outside (public) IP"],
-    ["MX-0003", "ISP direct (public IP on the link)", "Inbound", "Internet", "Any", "", "Tata ILL-07", "Edge", "49.36.10.7", "", "tcp", "22, 443",
-     "Edge router management", "Edge router", "NetOps", "", "", "Core", "POP-Pune", "", "", "Allow", "", "", "host has only a public IP, no NAT"],
-    ["MX-0004", "Inside ↔ outside pair (static NAT)", "Inbound", "Internet", "Any", "", "", "DMZ", "49.36.10.40", "10.40.0.5", "any", "any",
-     "Partner API gateway", "Partner API", "API team", "Enterprise", "", "API", "DC-Mumbai", "EDGE-FW-02", "static-nat-40", "Allow", "SOD-2026-041", "",
-     "one-to-one NAT, all ports"],
-    ["MX-0005", "Partner / NNI interconnect", "Inbound", "NNI-Partner", "100.70.0.0/16", "", "NNI-Vodafone", "Core", "", "10.50.1.10", "udp", "2152",
+    # rule, direction, src zone, src inside, src NAT (public), ISP, dst zone, dst public / NAT, dst inside, proto, ports, service, application,
+    # owner, LOB, MSP, domain, location, firewall, fw rule, action, CR / SOD, valid till, remarks
+    ["MX-0001", "Inbound", "Internet", "Any", "", "Airtel ILL-01", "DMZ", "49.36.10.21", "10.10.4.21", "tcp", "443, 8443",
+     "Customer self-care portal", "Self-care", "Digital Channels", "Retail Banking", "Wipro", "Digital", "DC-Mumbai", "DMZ-FW-01",
+     "allow-https-selfcare", "Allow", "SOD-2026-0931", "",
+     "EXPOSED - public + private (destination NAT): 49.36.10.21 and 10.10.4.21 both listed and linked. One public / private pair per row."],
+    ["MX-0002", "Outbound", "OAM", "10.30.8.15", "49.36.10.30", "Jio ILL-02", "Internet", "", "Any", "tcp", "443",
+     "Vendor patch download", "OSS patching", "NetOps", "Payments", "TCS", "OAM", "DC-Delhi", "EDGE-FW-02", "oam-out-443", "Allow",
+     "CR-2026-1102", "2026-12-31",
+     "EXPOSED - outbound through source NAT: 10.30.8.15 leaves through the public IP 49.36.10.30, both listed and linked."],
+    ["MX-0003", "Inbound", "Internet", "Any", "", "Tata ILL-07", "Edge", "49.36.10.7", "", "tcp", "22, 443",
+     "Edge router management", "Edge router", "NetOps", "", "", "Core", "POP-Pune", "", "", "Allow", "", "",
+     "EXPOSED - public IP only (ISP direct, no NAT): public IP in Destination Public / NAT IP, inside IP left empty."],
+    ["MX-0004", "Inbound", "Internet", "Any", "", "", "DMZ", "49.36.10.40", "10.40.0.5", "any", "any",
+     "Partner API gateway", "Partner API", "API team", "Enterprise", "", "API", "DC-Mumbai", "EDGE-FW-02", "static-nat-40", "Allow",
+     "SOD-2026-041", "", "EXPOSED - static one-to-one NAT, all ports: same result as MX-0001."],
+    ["MX-0005", "Inbound", "NNI-Partner", "100.70.0.0/16", "", "", "Core", "", "10.50.1.10", "udp", "2152",
      "GTP-U roaming", "Packet core", "Core Ops", "", "", "Packet core", "DC-Chennai", "CORE-FW-01", "nni-gtpu", "Allow", "CR-2026-1150", "",
-     "reachable through a partner network: add 100.70.0.0/16 under Indirect ranges"],
-    ["MX-0006", "Internal (east–west)", "Internal", "APP", "10.20.0.0/24", "", "", "DB", "", "10.20.1.10-20", "tcp", "1521", "App to database",
-     "Billing", "Billing team", "Payments", "Wipro", "Billing", "DC-Mumbai", "CORE-FW-01", "app-db-1521", "Allow", "CR-2026-1200", "", ""],
+     "NOT EXPOSED directly - partner / NNI link. Add 100.70.0.0/16 under Internet exposed > Indirect ranges."],
+    ["MX-0006", "Internal", "APP", "10.20.0.0/24", "", "", "DB", "", "10.20.1.10-20", "tcp", "1521", "App to database",
+     "Billing", "Billing team", "Payments", "Wipro", "Billing", "DC-Mumbai", "CORE-FW-01", "app-db-1521", "Allow", "CR-2026-1200", "",
+     "NOT EXPOSED - internal east-west flow."],
+    ["MX-0007", "Inbound", "Internet", "Any", "", "", "DMZ", "", "49.36.10.50", "tcp", "443",
+     "Public web server", "Corporate site", "Web team", "Enterprise", "", "Web", "DC-Mumbai", "DMZ-FW-01", "allow-web-50", "Allow", "", "",
+     "EXPOSED - server owns a public IP, written in the inside column (no NAT): same result as MX-0003."],
+    ["MX-0008", "Inbound", "Untrust", "Any", "", "", "DMZ", "", "10.10.5.30", "tcp", "8443",
+     "Vendor support portal", "Support portal", "IT Ops", "Enterprise", "Wipro", "IT", "DC-Mumbai", "DMZ-FW-01", "allow-8443", "Allow", "", "",
+     "EXPOSED - inbound from the internet to a private IP whose public IP is not known: listed as private, exposed by rule."],
+    ["MX-0009", "Inbound", "Partner", "203.0.113.50", "", "", "DMZ", "", "10.40.0.6", "tcp", "443",
+     "Partner settlement API", "Settlement", "API team", "Payments", "", "API", "DC-Mumbai", "EDGE-FW-02", "partner-in-443", "Allow", "", "",
+     "EXPOSED - one public source IP (a partner) to an internal server. The partner IP itself is not listed as our asset."],
+    ["MX-0010", "Inbound", "External", "203.0.113.0/24", "", "", "DMZ", "", "10.40.0.7", "tcp", "443",
+     "Partner range to API", "Settlement", "API team", "Payments", "", "API", "DC-Mumbai", "EDGE-FW-02", "partner-range-443", "Allow", "", "",
+     "EXPOSED - a partner public subnet / range allowed in to an internal server. The partner range is not listed as ours."],
+    ["MX-0011", "", "", "49.36.10.9", "", "", "", "", "", "", "", "Public IP register entry", "Mail relay", "IT Messaging", "", "", "",
+     "", "", "", "", "", "",
+     "EXPOSED - a public IP alone in the source column (no destination, no NAT) is read as a public IP directly on the ISP link."],
+    ["MX-0012", "Outbound", "Trust", "10.20.0.15", "", "", "Internet", "", "8.8.8.8", "udp", "53", "DNS forwarding",
+     "DNS", "NetOps", "", "", "Core", "DC-Mumbai", "CORE-FW-01", "dns-out", "Allow", "", "",
+     "NOT EXPOSED - outbound to an internet IP without NAT. 8.8.8.8 is not ours and is never listed. "
+     "Use an MX-0002 sheet when the source leaves through a public NAT IP."],
+    ["MX-0013", "Inbound", "Internet", "Any", "", "Airtel ILL-01", "DMZ", "49.36.10.60", "10.10.6.10", "tcp", "3389",
+     "Blocked RDP", "Legacy app", "IT Ops", "", "", "", "DC-Mumbai", "DMZ-FW-01", "deny-rdp", "Deny", "", "",
+     "NOT EXPOSED - Action Deny / Drop is never internet-facing."],
+    ["MX-0014", "Inbound", "Internet", "Any", "", "Airtel ILL-01", "DMZ", "49.36.10.70", "10.10.7.10", "tcp", "443",
+     "Old campaign site", "Campaign", "Marketing", "Retail Banking", "", "Digital", "DC-Mumbai", "DMZ-FW-01", "allow-campaign", "Allow",
+     "CR-2025-0400", "2025-03-31", "NOT EXPOSED - Valid Till is in the past: an expired rule is ignored."],
 ]
-TEMPLATE_SHEETS = [
-    ("Unified matrix (recommended)", "rules", UNIFIED_HEADERS, UNIFIED_ROWS),
-    ("Firewall rules", "rules", ["Rule ID", "Name", "Direction", "Source Zone", "Source Address", "Source NAT IP", "ISP / Link", "Firewall",
-                                 "Destination Zone", "Destination NAT IP (Public)", "Destination Address", "Protocol", "Service / Port",
-                                 "Application", "APPLICATION OWNER", "Action", "Change / CR No.", "Valid Till", "Remarks"],
-     [["FW-DMZ-0142", "web-in", "Inbound", "OUTSIDE", "any", "", "ISP-A", "DMZ-FW-01", "DMZ", "198.51.100.21", "h-10.10.4.21; h-10.10.4.22",
-       "tcp", "tcp_443;tcp_8443", "Internet banking", "Digital Channels", "Allow", "CR-2026-0931", "", ""],
-      ["FW-CORE-0077", "dns-out", "Outbound", "DNS BIND", "10.1.55.194/195/200/201", "203.0.113.200", "", "CORE-FW-02", "OUTSIDE", "",
-       "any", "udp", "dns_udp, dns_tcp", "DNS resolvers", "NetOps", "Allow", "CR-2026-1102", "2026-12-31", ""],
-      ["FW-APP-0003", "web-to-app", "Internal", "DMZ", "10.10.4.0/24", "", "", "CORE-FW-01", "APP", "", "10.20.0.10-20, APP-SRV-01",
-       "tcp", "8080", "App tier", "App team", "Allow", "CR-2026-1200", "", ""]]),
-    ("Public IP pool", "public_pool", ["S.NO", "PUBLIC IP POOL", "USE", "APPLICATION", "APPLICATION OWNER"],
-     [["1", "198.51.100.0/28", "Internet banking VIPs", "NetBanking", "Digital Channels"],
-      ["2", "203.0.113.10/11/12", "Mail gateways", "Email", "IT Messaging"]]),
-    ("NAT list", "nat_map", ["S.NO", "PUBLIC IP", "PRIVATE-IP", "APPLICATION", "APPLICATION OWNER", "Which firewall details exposed to this IP"],
-     [["1", "198.51.100.21", "10.10.4.21", "Internet banking", "Digital Channels", "DMZ-FW-01"],
-      ["2", "198.51.100.30", "10.1.55.194/195", "Partner API", "API team", "EDGE-FW-02"]]),
-    ("SOD NAT", "sod_nat", ["SODdetails", "dest_nat_ip", "destination_ip", "fwl", "location", "nat_ip", "port", "protocol", "rule", "source_ip"],
-     [["SOD-2026-041", "198.51.100.40", "10.30.0.10", "EDGE-FW-02", "DC-Mumbai", "", "22", "tcp", "NAT-12", "203.0.113.5"]]),
-    ("Exposure register", "exposure", ["S.NO", "Public IP", "Internal IP", "Port", "Service Details", "Destination IP", "REMARK",
-                                       "Source Contact Details", "Planner", "Host Status", "LOB", "Domain", "MS Partner", "Subnet", "Service Owner",
-                                       "Which firewall details exposed to this IP"],
-     [["1", "198.51.100.50", "10.40.0.5", "443/tcp, 8443", "Partner API", "", "", "noc@example.com", "Q4", "Live", "Payments", "Core", "Wipro",
-       "10.40.0.0/24", "Payments API owner", "DMZ-FW-01"]]),
-]
+# Template: one sheet per offered type, with sample rows taken from UNIFIED_ROWS (rule id -> new remark for that sheet)
+SAMPLES = {
+    "zones": ("Firewall rules", [
+        ("MX-0001", "EXPOSED - Source Zone Internet + ISP link: public 49.36.10.21 and private 10.10.4.21 listed and linked."),
+        ("MX-0008", "EXPOSED - Source Zone Untrust, source Any: the DMZ server 10.10.5.30 is listed."),
+        ("MX-0006", "NOT EXPOSED - internal zones (APP to DB), no ISP link."),
+        ("MX-0013", "NOT EXPOSED - Action Deny."),
+    ]),
+    "pubpriv": ("Public + private IP", [
+        ("MX-0001", "EXPOSED - public 49.36.10.21 and private 10.10.4.21, linked."),
+        ("MX-0004", "EXPOSED - public 49.36.10.40 and private 10.40.0.5, linked."),
+    ]),
+    "pubonly": ("Only public IP", [
+        ("MX-0003", "EXPOSED - public IP 49.36.10.7 on the ISP link."),
+    ]),
+}
+FILL = {"zones": "Source Zone, ISP / Link, Destination Zone, Source IP, Destination IP (+ Destination Public / NAT IP if you have it)",
+        "pubpriv": "Destination Public / NAT IP = the public IP, Destination IP / Subnet = the private IP",
+        "pubonly": "Destination Public / NAT IP = the public IP",
+        "register": "Public IP, Internal IP (+ Port, Service Details, Destination IP, REMARK)"}
+REGISTER_SHEET = ("Public-Internal IP register", "register", ["Public IP", "Internal IP", "Port", "Service Details", "Destination IP", "REMARK"],
+                  [["198.51.100.50", "10.40.0.5", "443/tcp, 8443", "Partner API", "10.40.0.6",
+                    "EXPOSED - public 198.51.100.50 leads to 10.40.0.5 and 10.40.0.6: all listed and linked."]])
+SAMPLES["register"] = (REGISTER_SHEET[0], [])
+FILL["snat"] = "source_ip, Source Natted IP (+ destination_ip, Port / Protocol)"
+SNAT_SHEET = ("Source NAT", "snat", ["source_ip", "destination_ip", "Port / Protocol", "Source Natted IP"],
+              [["10.30.8.15", "203.0.113.80", "443/tcp", "49.36.10.30"], ["10.30.8.16", "203.0.113.80", "443/tcp", "49.36.10.30"]])
+SAMPLES["snat"] = (SNAT_SHEET[0], [])
+FILL["sod"] = "dest_nat_ip + destination_ip (inbound) and / or nat_ip + source_ip (outbound); SODdetails, fwl, location, port, protocol, rule"
+SOD_SHEET = ("SOD NAT", "sod", ["SODdetails", "dest_nat_ip", "destination_ip", "fwl", "location", "nat_ip", "port", "protocol", "rule", "source_ip"],
+             [["SOD-2026-041", "198.51.100.40", "10.30.0.10", "EDGE-FW-02", "DC-Mumbai", "", "22", "tcp", "NAT-12", "203.0.113.5"],
+              ["SOD-2026-052", "", "203.0.113.80", "EDGE-FW-02", "DC-Delhi", "49.36.10.30", "443", "tcp", "NAT-13", "10.30.8.15"]])
+SAMPLES["sod"] = (SOD_SHEET[0], [])
+FILL["fwpolicy"] = "Rule Name, Source Zone, Source IP/Object, Destination Zone, Destination IP/Object, Action (+ NAT Translated IP, Protocol, Port)"
+FWP_SHEET = ("Firewall policy", "fwpolicy",
+             ["Rule Name", "Source Zone", "Source IP/Object", "Destination Zone", "Destination IP/Object", "Protocol", "Port", "Action", "Logging",
+              "NAT Rule", "NAT Translated IP", "VPN Peer", "Route Next Hop", "Remarks"],
+             [["allow-web-in", "Untrust", "Any", "DMZ", "49.36.10.21", "tcp", "443", "Allow", "Yes", "DNAT-21", "10.10.4.21", "", "",
+               "EXPOSED - inbound: public 49.36.10.21 translated to the DMZ server 10.10.4.21, both listed and linked."],
+              ["oam-out", "Trust", "10.30.8.15", "Untrust", "Any", "tcp", "443", "Allow", "No", "SNAT-30", "49.36.10.30", "", "",
+               "EXPOSED - outbound: 10.30.8.15 leaves as 49.36.10.30, linked."],
+              ["vpn-partner-db", "VPN", "172.16.5.0/24", "Trust", "10.20.0.10", "tcp", "1521", "Allow", "Yes", "", "", "203.0.113.9", "10.0.0.1",
+               "NOT EXPOSED - partner flow over site-to-site VPN."],
+              ["deny-rdp", "Untrust", "Any", "DMZ", "10.10.6.10", "tcp", "3389", "Deny", "Yes", "", "", "", "", "NOT EXPOSED - Deny rule."]])
+SAMPLES["fwpolicy"] = (FWP_SHEET[0], [])
+
+
+def _type_sheet(k):
+    """Template sheet of a type: only the columns that type reads, with its sample rows."""
+    if k == "register":  # the register's own six columns
+        return REGISTER_SHEET
+    if k == "snat":  # the source NAT sheet's own four columns
+        return SNAT_SHEET
+    if k == "sod":  # the SOD NAT sheet's own ten columns
+        return SOD_SHEET
+    if k == "fwpolicy":  # the firewall policy export's own fourteen columns
+        return FWP_SHEET
+    col = suggest_mapping(UNIFIED_HEADERS)
+    pf = pattern_fields(k)
+    name, samples = SAMPLES[k]
+    rows = []
+    for rid, remark in samples:
+        row = next(r for r in UNIFIED_ROWS if r[0] == rid)
+        rows.append([remark if f == "remarks" else row[UNIFIED_HEADERS.index(col[f])] for f, _, _ in pf])
+    return (name, k, [_LABEL.get(f) or col[f] for f, _, _ in pf], rows)
+
+
+TEMPLATE_SHEETS = [_type_sheet(k) for k in OFFERED]
+CHOOSE = [(PATTERNS[k][0], PATTERNS[k][1], FILL[k], SAMPLES[k][0]) for k in OFFERED]
 TEMPLATE_GUIDE = [
-    ("Recommended", "Use the ‘Unified matrix’ sheet for everything: one row per flow, every pattern fits the same columns, and the console reads "
-                    "it without any column matching. The other sheets are kept for existing workbooks in those layouts."),
-    ("Inside / outside", "Inside = the private address of our host. Outside = the public address it is seen as. Put the inside IP of a "
-                         "published service in ‘Destination IP / Subnet (inside)’ and its public IP in ‘Destination Public / NAT IP’; for a host "
-                         "that goes out through NAT put the inside IP in ‘Source IP / Subnet (inside)’ and the public IP in ‘Source NAT / Outside IP (public)’."),
-    ("ISP direct", "A host that has only a public IP (directly on the ISP / ILL link, no NAT): put the public IP in ‘Destination Public / NAT IP’ "
-                   "and leave the inside IP empty; set Direction Inbound and Source Zone Internet. It is listed as an exposed public asset."),
-    ("Internet exposure", "A row is internet-facing when Direction is Inbound from Internet / ISP / Untrust / Outside, the Source is Any or a "
-                          "public IP, an ISP / Link is filled, or it names a public IP with no inside IP. Every inside IP, public IP and outside IP "
-                          "of such a row is listed on Internet exposed — even when no inventory, scan or CrowdStrike knows it yet."),
-    ("Telco", "Partner / NNI / roaming / GRX interconnects: Source Zone NNI-Partner (or similar) with the partner range as Source; add the "
-              "partner and CGNAT ranges under Internet exposed → Indirect ranges so they are counted as indirectly exposed. OAM, MPLS and core "
-              "zones are internal. Location / DC can hold the circle or POP."),
-    ("Flow type", "Free text for people (Published service, Outbound source NAT, ISP direct, Static NAT, Partner / NNI, Internal); the "
-                  "console works it out from the addresses."),
-    ("Sheets", "Keep one sheet per kind of list, or delete the ones you do not use. On upload you pick each sheet's type and match its columns; "
-               "the types are guessed from these headers. Extra columns are fine."),
-    ("Firewall rules", "Source / destination addresses and ports. A row is internet-facing when its source is Internet / ISP / untrust / "
-                       "outside / any, or a public IP."),
-    ("Public IP pool", "Our public IPs. Every row counts as internet-facing."),
-    ("NAT list", "Public IP → private IP. The private IP (and the asset behind it) is internet exposed."),
-    ("SOD NAT", "Approved NAT rules: dest_nat_ip (public) → destination_ip (internal)."),
-    ("Exposure register", "Public IP → internal IP with owner, LOB and firewall."),
+    ("Sheet type", "Each sheet is one of seven types: Firewall rules (Source Zone / ISP / Destination Zone), Public IP + private IP, "
+                   "Only public IP, the Public IP · Internal IP register, Source NAT, SOD NAT, or Firewall policy. The type is guessed from the columns on upload and can be changed in the dropdown."),
+    ("Firewall rules", "Each row is checked on its own: Source Zone Internet / ISP / Untrust / Outside / External, a filled ISP / Link, "
+                       "or a source of Any or one public IP makes it internet-facing; then its destination, public / NAT IP and source NAT "
+                       "IP are listed as exposed. Deny rows, expired rows and internal zones are not."),
+    ("Public IP + private IP", "Every row is exposed: the public IP and the private IP behind it are both listed and linked. "
+                               "No zone or ISP column is needed."),
+    ("Only public IP", "Every row is exposed: the public IP is listed. No zone or ISP column is needed."),
+    ("Public IP · Internal IP register", "Columns Public IP, Internal IP, Port, Service Details, Destination IP, REMARK. Every row is "
+                                         "exposed: the public IP, the internal IP and the destination IP (when filled) are listed and linked."),
+    ("Source NAT", "Columns source_ip, destination_ip, Port / Protocol, Source Natted IP. A row whose Source Natted IP is public exposes "
+                   "its source_ip, linked to that public IP (several sources may share one). destination_ip is the far end and is not "
+                   "listed as ours. A private Source Natted IP exposes nothing."),
+    ("SOD NAT", "Columns SODdetails, dest_nat_ip, destination_ip, fwl, location, nat_ip, port, protocol, rule, source_ip. Each row: a "
+                "public dest_nat_ip exposes destination_ip, linked to it (inbound); a public nat_ip exposes source_ip, linked to it "
+                "(outbound; destination_ip is then the far end and not listed). A row can be both."),
+    ("Firewall policy", "Columns Rule Name, Source Zone, Source IP/Object, Destination Zone, Destination IP/Object, Protocol, Port, Action, "
+                        "Logging, NAT Rule, NAT Translated IP, VPN Peer, Route Next Hop, Remarks. Each rule: from Untrust / Internet / "
+                        "Outside or a source of Any (Allow) = internet-facing. Inbound with a NAT Translated IP: the destination is the "
+                        "public IP and the translated IP the inside server, both exposed and linked. Outbound with a public NAT Translated "
+                        "IP: the source is exposed, linked to it. Logging, VPN Peer and Route Next Hop are kept in the remarks."),
+    ("Telco", "Partner / NNI / roaming / GRX links on a Firewall rules sheet: Source Zone NNI-Partner with ISP / Link EMPTY (a filled "
+              "ISP / Link makes the row internet-facing); add the partner and CGNAT ranges under Internet exposed → Indirect ranges."),
+    ("Sample rows", "Delete the sample rows before uploading your own rows. Delete the sheets you do not use."),
     ("Address cells", "One IP; lists split by , ; | / space or new line; ranges 10.1.1.10-10.1.1.20 or 10.1.1.10-20; subnets 10.1.0.0/24; "
                       "last-octet shorthand 10.1.55.194/195/200; h-10.1.1.5, n-10.1.0.0/24, 10.1.1.5_nat, 10.1.1.5_vm; IPv6 2101:3900:3d5a::/48; "
-                      "host / object names (matched to inventory hostnames); Any."),
+                      "host / object names (matched to inventory hostnames); Any. New assets are created only from single IPs; subnets "
+                      "and ranges mark IPs already known from inventory, CrowdStrike, scans or NIAM."),
     ("Port cells", "443 · 80,443 · 8000-8100 · tcp/443 · 443/tcp · tcp_8443 · udp-53 · dns_tcp · https · any."),
     ("Mark by hand", "After upload, any row can be marked internet-facing or not on the Communication matrix page; the mark is kept when "
                      "the same workbook / sheet / row is uploaded again."),
@@ -901,7 +1251,9 @@ TEMPLATE_GUIDE = [
 
 @router.get("/api/comm/template")
 def comm_template():
-    sheets = [(name, [(f"c{i}", h) for i, h in enumerate(hd)], [{f"c{i}": v for i, v in enumerate(r)} for r in rows]) for name, _, hd, rows in TEMPLATE_SHEETS]
+    sheets = [("Which sheet to use", [("a", "Sheet type (pick on upload)"), ("b", "Use when"), ("c", "Fill these columns"), ("d", "Template sheet")],
+               [dict(zip("abcd", r)) for r in CHOOSE])]
+    sheets += [(name, [(f"c{i}", h) for i, h in enumerate(hd)], [{f"c{i}": v for i, v in enumerate(r)} for r in rows]) for name, _, hd, rows in TEMPLATE_SHEETS]
     sheets.append(("How to fill", [("k", "Topic"), ("v", "How")], [{"k": k, "v": v} for k, v in TEMPLATE_GUIDE]))
     return xlsx_response(sheets, "template_communication_matrix")
 

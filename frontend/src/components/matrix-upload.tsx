@@ -70,7 +70,9 @@ export function MatrixUpload({ open, onOpenChange }: { open: boolean; onOpenChan
     return s.sample.map((r) => r[i]).filter(Boolean).slice(0, 2).join(" · ");
   };
   const needKeys = new Set((tdef?.need || []).flat());
-  const orderedFields = [...fields.filter((f) => needKeys.has(f.key)), ...fields.filter((f) => !needKeys.has(f.key))];
+  // a pattern lists its own fields (with what each means for it); fields it does not list are not read
+  const orderedFields: any[] = tdef?.fields?.length ? tdef.fields
+    : [...fields.filter((f) => needKeys.has(f.key)), ...fields.filter((f) => !needKeys.has(f.key))];
 
   return (
     <Modal open={open} onOpenChange={onOpenChange} wide title={<span className="flex items-center gap-2"><FileSpreadsheet className="size-4" /> Upload communication matrix workbook</span>}
@@ -87,8 +89,9 @@ export function MatrixUpload({ open, onOpenChange }: { open: boolean; onOpenChan
         </div>
       ) : !wb ? (
         <>
-          <Callout className="mb-4">One workbook can hold several sheets of different kinds: firewall rules, a public IP pool, public ↔ private NAT
-            lists, SOD / NAT rule sheets or an exposure register. After upload, pick the type of each sheet and match its columns to the template fields.
+          <Callout className="mb-4">Each sheet is one of seven types: <b>Firewall rules</b> (Source Zone / ISP / Destination Zone, every row
+            checked on its own), <b>Public IP + private IP</b>, <b>Only public IP</b>, the <b>Public IP · Internal IP register</b> (Public IP, Internal IP, Port, Service Details, Destination IP, REMARK), <b>Source NAT</b> (source_ip, destination_ip, Port / Protocol, Source Natted IP), <b>SOD NAT</b> (SODdetails, dest_nat_ip, destination_ip, fwl, location, nat_ip, port, protocol, rule, source_ip), or a <b>Firewall policy</b> export (Rule Name, zones, IP/Object, Action, NAT Translated IP, VPN Peer …). The type is guessed from the columns; change it in the
+            sheet list if needed, then match the columns to the fields shown for that type.
             Addresses may be single IPs, lists (, ; / or new lines), ranges (10.1.1.10-20), subnets, last-octet shorthand (10.1.55.194/195/200),
             IPv6 prefixes, object names like h-10.1.1.5 or 10.1.1.5_nat, and host names.</Callout>
           <div onClick={() => fileRef.current?.click()} onDragOver={(e) => { e.preventDefault(); setDrag(true); }} onDragLeave={() => setDrag(false)}
@@ -145,7 +148,13 @@ export function MatrixUpload({ open, onOpenChange }: { open: boolean; onOpenChan
                     <input type="checkbox" className="mt-1" checked={x.include} disabled={!!x.error} onClick={(e) => e.stopPropagation()} onChange={(e) => patch(i, { include: e.target.checked })} />
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-1 truncate text-[12.5px] font-medium"><SheetIcon className="size-3.5 shrink-0 text-muted" />{x.sheet}</div>
-                      <div className="truncate text-[11px] text-muted">{x.error ? x.error : `${fmtN(x.row_count)} rows · ${types.find((t) => t.id === x.type)?.label || ""}`}</div>
+                      {x.error ? <div className="truncate text-[11px] text-muted">{x.error}</div> : <>
+                        <div className="text-[11px] text-muted">{fmtN(x.row_count)} rows</div>
+                        <select aria-label={`Type of sheet ${x.sheet}`} className="mt-1 h-7 w-full rounded-md border border-border-strong bg-surface px-1.5 text-[11.5px]"
+                          value={x.type} onClick={(e) => e.stopPropagation()} onChange={(e) => { setCur(i); reread(i, { type: e.target.value }); }}>
+                          {types.map((t) => <option key={t.id} value={t.id} title={t.hint}>{t.label}</option>)}
+                        </select>
+                      </>}
                       {miss && <div className="text-[11px] text-crit-fg">map required columns</div>}
                     </div>
                   </div>
@@ -161,7 +170,7 @@ export function MatrixUpload({ open, onOpenChange }: { open: boolean; onOpenChan
                   <Field label="Header row"><Input type="number" min={1} className="w-20" value={s.header_row} onChange={(e) => e.target.value && reread(cur, { header_row: +e.target.value })} /></Field>
                   <Checkbox checked={s.include} onChange={(v) => patch(cur, { include: v })} label="Include this sheet" />
                 </div>
-                {tdef && <div className="text-[11.5px] text-muted">Typical columns: {tdef.hint}</div>}
+                {tdef && <div className="text-[11.5px] text-muted">{tdef.hint}</div>}
                 <div className="max-h-[46vh] overflow-auto rounded-xl border border-border scroll-thin">
                   <table className="w-full text-[12.5px]">
                     <thead className="sticky top-0 bg-surface-2"><tr className="text-left text-xs text-fg-2"><th className="px-3 py-2">Template field</th><th className="px-3 py-2">Column in this sheet</th><th className="px-3 py-2">Sample</th></tr></thead>
@@ -170,7 +179,10 @@ export function MatrixUpload({ open, onOpenChange }: { open: boolean; onOpenChan
                         const need = needKeys.has(f.key);
                         return (
                           <tr key={f.key} className="border-t border-border">
-                            <td className="px-3 py-1.5 font-medium">{f.label}{need && <span className="ml-1 text-crit-fg" title="this sheet type needs one of the starred fields">*</span>}</td>
+                            <td className="px-3 py-1.5">
+                              <div className="font-medium">{f.label}{need && <span className="ml-1 text-crit-fg" title="this sheet type needs one of the starred fields">*</span>}</div>
+                              {f.desc && <div className="text-[11px] leading-snug text-muted">{f.desc}</div>}
+                            </td>
                             <td className="px-3 py-1">
                               <select className={cn("h-8 w-full rounded-md border bg-surface px-2", s.mapping[f.key] ? "border-good" : "border-border-strong")}
                                 value={s.mapping[f.key] || ""} onChange={(e) => patch(cur, { mapping: { ...s.mapping, [f.key]: e.target.value } })}>

@@ -122,8 +122,11 @@ def profile(c, q):
         a["edr_detail"] = agent_detail(a)
     agents.sort(key=agent_rank)
     best = agents[0] if agents else None
+    flows = commatrix.flows_for(c, ipl) if ipl else []
+    in_registry = bool(ipl) and c.execute(f"SELECT 1 FROM asset_registry WHERE ip IN ({_in(len(ipl))}) LIMIT 1", ipl).fetchone() is not None
     summary = {
-        "query": q, "found": bool(agents or inv or vulns or niam),
+        # found also when only the communication matrix knows the IP (its rows and exposure are still worth showing)
+        "query": q, "found": bool(agents or inv or vulns or niam or flows or in_registry), "in_matrix": bool(flows),
         "ips": ipl, "hostnames": sorted({a["hostname"] for a in agents if a["hostname"]} | {r["node_name"] for r in inv if r["node_name"]}),
         "edr_status": best["edr_status"] if best else "Not Installed",
         "edr_agent": best, "edr_detail": best["edr_detail"] if best else "", "active_agents": sum(1 for a in agents if a["console_state"] == "active"),
@@ -146,7 +149,6 @@ def profile(c, q):
     fixes = cve_fixes(c, ipl)
     for v in vulns:  # Nessus CVE -> the Satellite erratum that fixes it on this host
         v["fix"] = fix_for(fixes, v["ip"], v.get("cve"))
-    flows = commatrix.flows_for(c, ipl) if ipl else []
     for r in inv:  # where each inventory record comes from (manual upload today; ServiceNow CMDB / Jaspersoft later)
         v = db.one(c, """SELECT v.version_no, v.filename, v.uploaded_at, v.uploaded_by FROM inventory_versions v
                          JOIN inventory_current ic ON ic.lob_id=v.lob_id WHERE v.lob_id=? AND ic.item_key=?
