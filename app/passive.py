@@ -19,7 +19,8 @@ from .exporter import xlsx_response
 
 router = APIRouter()
 URL = "https://internetdb.shodan.io/{ip}"
-WORKERS = 16  # InternetDB answers in ~0.1-0.3 s and tolerates parallel lookups; one HTTPS session per worker thread
+WORKERS = 6  # InternetDB answers in ~0.1-0.3 s but rate-limits (HTTP 429) bursts: 16 parallel lookups lost ~1 in 5 IPs
+RATE_LIMITED = "rate limited by InternetDB, try again later"
 JOB = {"running": False, "id": None, "total": 0, "done": 0, "found": 0, "errors": 0, "source": "", "started_at": None, "finished_at": None,
        "message": ""}
 _lock = threading.Lock()
@@ -41,23 +42,27 @@ def _lookup(ip):
     """(status, data, error) for one public IP. status: ok | none (InternetDB has nothing) | error."""
     if config.DEMO:
         return _demo(ip)
-    for attempt in range(4):
+    for attempt in range(6):
         try:
             r = _session().get(URL.format(ip=ip), timeout=12)
         except Exception as e:  # noqa: BLE001
-            if attempt == 3:
+            if attempt == 5:
                 return "error", None, str(e)[:300]
             time.sleep(1.5 * (attempt + 1))
             continue
         if r.status_code == 404:
             return "none", {"ports": [], "vulns": [], "cpes": [], "hostnames": [], "tags": []}, None
-        if r.status_code == 429:  # rate limited: back off and retry
-            time.sleep(2 * (attempt + 1))
+        if r.status_code == 429:  # rate limited: wait as long as the server asks (Retry-After), else back off exponentially
+            try:
+                wait = float(r.headers.get("Retry-After") or 0)
+            except ValueError:
+                wait = 0
+            time.sleep(min(30.0, max(wait, 2 ** attempt)))
             continue
         if r.status_code >= 400:
             return "error", None, f"HTTP {r.status_code}: {r.text[:200]}"
         return "ok", r.json(), None
-    return "error", None, "rate limited by InternetDB, try again later"
+    return "error", None, RATE_LIMITED
 
 
 def _demo(ip):
@@ -174,6 +179,22 @@ def _worker(jid, targets, source):
                     with db.get_conn() as c:
                         _store(c, buf)
                     buf = []
+        # second, slow pass for the IPs InternetDB rate-limited: one at a time with a pause, so a big scan does not lose them
+        with db.get_conn() as c:
+            _store(c, buf)
+            limited = {r["ip"] for r in db.rows(c, "SELECT ip FROM passive_results WHERE job_id=? AND status='error' AND error=?",
+                                                (jid, RATE_LIMITED))}
+        retry_t = [t for t in targets if t[0] in limited]
+        buf = []
+        for t in retry_t:
+            time.sleep(1.0)
+            (ip, asset_ip, name), st, d, err = one(t)
+            buf.append((ip, asset_ip, name, st, json.dumps(d.get("ports") or []), json.dumps(d.get("vulns") or []),
+                        json.dumps(d.get("cpes") or []), json.dumps(d.get("hostnames") or []), json.dumps(d.get("tags") or []), err,
+                        db.now_iso(), jid, source))
+            if st != "error":
+                JOB["errors"] -= 1
+                JOB["found"] += 1 if d.get("ports") else 0
         with db.get_conn() as c:
             _store(c, buf)
             c.execute("UPDATE passive_jobs SET finished_at=?, done=?, found=?, errors=? WHERE id=?",

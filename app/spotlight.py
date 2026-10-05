@@ -14,8 +14,15 @@ SEV_ORDER = "CASE s.severity WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1 WHEN 'MED
 EXPLOITABLE = ("Available", "Easily accessible", "Actively used")
 
 
+VA_SIG = ("SELECT COUNT(*), SUM(status='open'), MAX(rowid) FROM vuln_findings",)
+
+
 def _scanner_cves(c):
-    """{ip: {CVE, ...}} of open VA-scan findings (for the 'also in VA scan' column)."""
+    """{ip: {CVE, ...}} of open VA-scan findings (for the 'also in VA scan' column). Kept until the VA findings change."""
+    return db.memo("spot_scanner", db.sig(c, *VA_SIG), lambda: _scanner_cves_build(c))
+
+
+def _scanner_cves_build(c):
     out = {}
     for r in c.execute("SELECT ip, cve FROM vuln_findings WHERE status='open' AND COALESCE(cve,'')<>''"):
         out.setdefault(r["ip"], set()).update(x.strip().upper() for x in r["cve"].split(",") if x.strip())
@@ -24,6 +31,10 @@ def _scanner_cves(c):
 
 def _va_names(c):
     """{CVE: VA-scan finding name}: a readable name for Spotlight findings that come without one."""
+    return db.memo("spot_va_names", db.sig(c, *VA_SIG), lambda: _va_names_build(c))
+
+
+def _va_names_build(c):
     out = {}
     for r in c.execute("SELECT cve, name FROM vuln_findings WHERE COALESCE(cve,'')<>'' AND COALESCE(name,'')<>''"):
         for x in r["cve"].split(","):
@@ -85,20 +96,26 @@ def _rows(c, p, limit=None, offset=0):
 
 @router.get("/api/spotlight/summary")
 def spotlight_summary():
-    with db.get_conn() as c:
-        s = db.one(c, f"""SELECT COUNT(*) findings, COUNT(DISTINCT aid) hosts, COUNT(DISTINCT cve) cves,
-            SUM(UPPER(severity)='CRITICAL') critical, SUM(UPPER(severity)='HIGH') high, SUM(UPPER(severity)='MEDIUM') medium,
-            SUM(UPPER(severity)='LOW') low, SUM(exploit_status IN ({','.join('?' * len(EXPLOITABLE))})) exploitable,
-            SUM(UPPER(exprt) IN ('CRITICAL','HIGH')) exprt_high, MAX(fetched_at) fetched_at FROM spotlight_vulns""", list(EXPLOITABLE))
-        scan = _scanner_cves(c)
-        both = only_spot = 0
-        for r in c.execute("SELECT COALESCE(NULLIF(h.connection_ip,''), s.ip) ip, s.cve FROM spotlight_vulns s LEFT JOIN hosts h ON h.aid=s.aid"):
-            if (r["cve"] or "").upper() in scan.get(r["ip"] or "", set()):
-                both += 1
-            else:
-                only_spot += 1
-        lobs = db.rows(c, """SELECT l.id, l.name, COUNT(*) n FROM spotlight_vulns s JOIN host_map hm ON hm.aid=s.aid JOIN lobs l ON l.id=hm.lob_id
-                             GROUP BY l.id ORDER BY n DESC""")
+    with db.get_conn() as c:  # 200,000 findings x the VA scan: kept until Spotlight, the hosts, the LOB map or the VA scan change
+        key = db.sig(c, "SELECT COUNT(*), MAX(fetched_at) FROM spotlight_vulns", "SELECT COUNT(*), MAX(last_seen) FROM hosts",
+                     "SELECT COUNT(*) FROM host_map", *VA_SIG)
+        return db.memo("spot_summary", key, lambda: _summary(c))
+
+
+def _summary(c):
+    s = db.one(c, f"""SELECT COUNT(*) findings, COUNT(DISTINCT aid) hosts, COUNT(DISTINCT cve) cves,
+        SUM(UPPER(severity)='CRITICAL') critical, SUM(UPPER(severity)='HIGH') high, SUM(UPPER(severity)='MEDIUM') medium,
+        SUM(UPPER(severity)='LOW') low, SUM(exploit_status IN ({','.join('?' * len(EXPLOITABLE))})) exploitable,
+        SUM(UPPER(exprt) IN ('CRITICAL','HIGH')) exprt_high, MAX(fetched_at) fetched_at FROM spotlight_vulns""", list(EXPLOITABLE))
+    scan = _scanner_cves(c)
+    both = only_spot = 0
+    for r in c.execute("SELECT COALESCE(NULLIF(h.connection_ip,''), s.ip) ip, s.cve FROM spotlight_vulns s LEFT JOIN hosts h ON h.aid=s.aid"):
+        if (r["cve"] or "").upper() in scan.get(r["ip"] or "", set()):
+            both += 1
+        else:
+            only_spot += 1
+    lobs = db.rows(c, """SELECT l.id, l.name, COUNT(*) n FROM spotlight_vulns s JOIN host_map hm ON hm.aid=s.aid JOIN lobs l ON l.id=hm.lob_id
+                         GROUP BY l.id ORDER BY n DESC""")
     return {**{k: (v or 0) if k != "fetched_at" else v for k, v in s.items()}, "in_scanner": both, "spotlight_only": only_spot,
             "lobs": lobs, "demo": config.DEMO}
 

@@ -3,11 +3,11 @@ import * as React from "react";
 import * as Popover from "@radix-ui/react-popover";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { FileSpreadsheet, SlidersHorizontal, Upload, X } from "lucide-react";
+import { FileSpreadsheet, SlidersHorizontal, Tag, Upload, X } from "lucide-react";
 import { api, apiUpload, downloadExcel } from "@/lib/api";
 import { fmtDt, fmtN } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import { Badge, Button, Card, Checkbox, Field, KV, Loading, Menu, SearchInput, Select, Sheet, SectionTitle } from "./ui";
+import { Badge, Button, Card, Checkbox, Field, Input, KV, Loading, Menu, Modal, SearchInput, Select, Sheet, SectionTitle } from "./ui";
 import { DataTable, SimpleTable, type Column } from "./data-table";
 import { useMeta } from "@/lib/hooks";
 import { ActualBadge, FeasibleBadge, OsCell, DupBadge, dupReasons, CoverageBadge, COVERAGE_HELP, HostLink, Live, Mono, VERIFICATION_HELP, VerifBadge, When, YN } from "./badges";
@@ -103,6 +103,9 @@ export function InventoryTable({ lobId, state, set, reset, versions, showLob, lo
 }) {
   const historical = !!state.version_id;
   const [item, setItem] = React.useState<any>(null);
+  const [selected, setSelected] = React.useState<Set<string>>(new Set());
+  const [tagOpen, setTagOpen] = React.useState(false);
+  const canTag = !!lobId && !historical;  // MSP tagging works inside one LOB, on the current inventory
   const cols = React.useMemo(() => inventoryColumns(!!showLob, historical), [showLob, historical]);
   const scopeLob = lobId || (state.lob ? +state.lob : 0);
   const { data: facets } = useQuery({
@@ -128,6 +131,7 @@ export function InventoryTable({ lobId, state, set, reset, versions, showLob, lo
   const clearAll = () => set(Object.fromEntries(Object.keys(PILL).map((k) => [k, undefined])));
   return (
     <>
+      {tagOpen && <MspTagDialog lobId={lobId} keys={[...selected]} onClose={(done) => { setTagOpen(false); if (done) setSelected(new Set()); }} />}
       <DataTable
         key={historical ? "h" + state.version_id : "cur"}
         endpoint={`/api/lobs/${lobId}/inventory`}
@@ -142,7 +146,10 @@ export function InventoryTable({ lobId, state, set, reset, versions, showLob, lo
         rowKey={(r: any) => `${r.lob_id || ""}|${r.item_key}`}
         onReset={reset}
         onRowClick={(r) => setItem(r)}
+        selected={canTag ? selected : undefined}
+        onSelectedChange={canTag ? setSelected : undefined}
         filters={<>
+          {canTag && selected.size > 0 && <Button variant="primary" onClick={() => setTagOpen(true)}><Tag /> Tag MSP ({fmtN(selected.size)})</Button>}
           <SearchInput className="w-64" value={state.q || ""} onChange={(v) => set({ q: v })} placeholder="IP, node name, remarks… (paste many)" />
           {!historical && (
             <div className="inline-flex rounded-lg border border-border-strong bg-surface p-0.5 shadow-card" role="group" aria-label="EDR status">
@@ -371,5 +378,52 @@ function ColumnSheetMenu({ lobId, state }: { lobId: number; state: Record<string
       ]} />
       <input ref={ref} type="file" accept=".xlsx,.xlsm" className="hidden" onChange={(e) => e.target.files?.[0] && upload(e.target.files[0])} />
     </>
+  );
+}
+
+/** Tag the selected nodes with an MSP (existing, or a new one), or remove the tag. Only nodes without an MSP from the upload take a
+ *  tag; the tag stays across later uploads while the uploaded row's MSP is blank (an MSP in the file always wins). */
+function MspTagDialog({ lobId, keys, onClose }: { lobId: number; keys: string[]; onClose: (done: boolean) => void }) {
+  const qc = useQueryClient();
+  const { data: m } = useMeta();
+  const msps = (m?.msps || []).filter((x) => x.lob_id === lobId);
+  const [msp, setMsp] = React.useState<string>("");
+  const [name, setName] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+  const go = async (clear: boolean) => {
+    setBusy(true);
+    try {
+      let by = "";
+      try { by = localStorage.getItem("uploader") || ""; } catch {}
+      const r = await api<any>(`/api/lobs/${lobId}/inventory/msp`, { method: "POST",
+        body: clear ? { keys, clear: true, tagged_by: by } : { keys, msp_id: msp && msp !== "new" ? +msp : undefined, msp_name: msp === "new" || !msp ? name : undefined, tagged_by: by } });
+      toast.success(r.message);
+      qc.invalidateQueries();
+      onClose(true);
+    } catch (e: any) { toast.error(e.message); } finally { setBusy(false); }
+  };
+  const ready = (msp && msp !== "new") || name.trim();
+  return (
+    <Modal open onOpenChange={(o) => !o && onClose(false)} title={<span className="flex items-center gap-2"><Tag className="size-4" /> Tag {fmtN(keys.length)} node(s) with an MSP</span>}
+      footer={<>
+        <Button onClick={() => go(true)} loading={busy}>Remove MSP tag</Button>
+        <Button onClick={() => onClose(false)}>Cancel</Button>
+        <Button variant="primary" disabled={!ready} loading={busy} onClick={() => go(false)}><Tag /> Tag</Button>
+      </>}>
+      <div className="space-y-3 text-[13px]">
+        <Field label="MSP">
+          <Select className="max-w-none" value={msp} onChange={setMsp} placeholder="Pick an MSP of this LOB"
+            options={[...msps.map((x) => ({ value: x.id, label: x.name })), { value: "new", label: "+ New MSP…" }]} />
+        </Field>
+        {(msp === "new" || (!msps.length && !msp)) && (
+          <Field label="New MSP name"><Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Wipro" autoFocus /></Field>
+        )}
+        <div className="rounded-lg bg-surface-2 px-3 py-2 text-[12px] text-fg-2">
+          Only nodes <b>without an MSP in the uploaded inventory</b> are tagged (nodes whose MSP comes from the file are skipped and keep it).
+          The tag stays when the inventory is uploaded again, as long as the file still leaves the MSP blank. Tip: filter <b>MSP = Unassigned MSP</b>,
+          tick the header box to select every matching node, then tag.
+        </div>
+      </div>
+    </Modal>
   );
 }

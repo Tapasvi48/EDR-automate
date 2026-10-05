@@ -62,6 +62,8 @@ DEFAULT_SETTINGS = {
     "falcon_member_cid": "",
     # Days of CrowdStrike detections fetched on each sync (Alerts API)
     "detections_days": "30",
+    # Informational detections (severity < 20): not fetched and not counted unless switched on (Detections page)
+    "detections_include_info": "0",
     # Red Hat Satellite (packages, errata / remediation, OpenSCAP MBSS compliance) - entered in Integrations
     "satellite_url": "",
     "satellite_user": "",

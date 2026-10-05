@@ -66,7 +66,7 @@ export default function Matrix() {
       </KpiGrid>
       <div className="mt-4">
         <Tabs value={tab} onChange={(v) => replaceAll(v === "rows" ? {} : { tab: v })} tabs={[
-          { id: "rows", label: "Rows", count: s.rules }, { id: "ips", label: "IPs (one per address)" }, { id: "sheets", label: "Sheets", count: s.workbooks?.length || 0 }]} />
+          { id: "rows", label: "Rows", count: s.rules }, { id: "ips", label: "Assets (private + public IP)" }, { id: "sheets", label: "Sheets", count: s.workbooks?.length || 0 }]} />
         {tab === "rows" && <RowsTab s={s} state={state} set={set} replaceAll={replaceAll} />}
         {tab === "ips" && <MatrixIpsPanel state={state} set={set} replaceAll={replaceAll} keep={{ tab: "ips" }} />}
         {tab === "sheets" && <SheetsTab replaceAll={replaceAll} />}

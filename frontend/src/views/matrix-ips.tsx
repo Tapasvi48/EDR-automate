@@ -13,6 +13,12 @@ const ROLE: Record<string, [string, string]> = {
   exposed: ["crit", "Reached from internet"], public: ["violet", "Public / NAT IP"], public_src: ["violet", "Source NAT IP"],
   outbound: ["warn", "Goes out to internet"], snat: ["crit", "NATed to a public IP"], internet_src: ["neutral", "Internet source"], internal: ["neutral", "Internal flow"],
 };
+// asset type: what the matrix says this address is (one row per asset: a public NAT IP is shown on its private IP's row)
+const AKIND: [string, string, string][] = [
+  ["private_public", "Private + public / NAT IP", "crit"], ["private_only", "Private IP only", "info"],
+  ["public_only", "Public IP only (ours)", "violet"], ["external", "Public IP, not ours", "neutral"],
+  ["subnet", "Subnet / range", "neutral"], ["name", "Host / object name", "neutral"],
+];
 const VIEWS: [string, string, string][] = [
   ["exposed", "Ours & internet exposed", "crit"], ["outbound", "Ours & talking to internet", "warn"], ["public", "Our public / NAT IPs", "violet"],
   ["not_inventory", "Exposed but not in inventory", "serious"], ["unknown", "To check (names, unconfirmed public IPs)", "neutral"], ["external", "External / partner", "neutral"],
@@ -24,8 +30,8 @@ export default function MatrixIps() {
   const [state, set, replaceAll] = useUrlState();
   return (
     <div>
-      <PageHeader title="Matrix IP register"
-        sub="Every IP, subnet and host name in the communication matrix: whether it is ours, what it does (reached from the internet, public / NAT IP, talks out to the internet), and whether inventory and EDR know it." />
+      <PageHeader title="Matrix asset register"
+        sub="One row per asset in the communication matrix: its private IP and public / NAT IP together, whether it is ours, what it does, and whether inventory and EDR know it." />
       <MatrixIpsPanel state={state} set={set} replaceAll={replaceAll} />
     </div>
   );
@@ -37,8 +43,14 @@ export function MatrixIpsPanel({ state, set, replaceAll, keep = {} }: { state: R
   const { data, error, refetch } = useQuery({ queryKey: ["comm-ips-counts"], queryFn: () => api<any>("/api/comm/ips", { params: { view: "all", size: "1" } }) });
   if (!data) return <Loading error={error} retry={() => refetch()} />;
   const c = data.counts;
+  const ipLink = (ip: string) => <Link key={ip} className="font-mono text-[12.5px] text-accent-fg hover:underline" href={`/ip-search/?q=${encodeURIComponent(ip)}`}>{ip}</Link>;
+  const ipList = (v: string) => v ? <span className="flex flex-col">{v.split(", ").map(ipLink)}</span> : <span className="text-muted">–</span>;
   const cols: Column[] = [
-    { key: "address", label: "Address", render: (r) => (
+    { key: "private_ip", label: "Private IP", render: (r) => r.kind === "ip" ? ipList(r.private_ip) : <span className="flex flex-col"><span className="font-medium">{r.address}</span>
+      <span className="text-[11px] text-muted">{r.kind === "subnet" ? `subnet · ${r.assets} known asset(s) inside` : "host / object name"}</span></span> },
+    { key: "public_ip", label: "Public / NAT IP", render: (r) => ipList(r.public_ip) },
+    { key: "asset_kind", label: "Asset type", render: (r) => { const k = AKIND.find(([id]) => id === r.asset_kind); return <Badge tone={(k?.[2] || "neutral") as any}>{k?.[1] || r.asset_kind}</Badge>; } },
+    { key: "address", label: "Address", hidden: true, render: (r) => (
       <span className="flex flex-col">
         {r.kind === "name" ? <span className="font-medium">{r.address}</span>
           : <Link className="font-mono text-[12.5px] text-accent-fg hover:underline" href={`/ip-search/?q=${encodeURIComponent(r.address)}`}>{r.address}</Link>}
@@ -63,6 +75,15 @@ export function MatrixIpsPanel({ state, set, replaceAll, keep = {} }: { state: R
       <KpiGrid className="mb-4 grid-cols-[repeat(auto-fill,minmax(165px,1fr))]">
         {VIEWS.slice(0, 5).map(([id, label, tone]) => <Kpi key={id} label={label} value={c[id]} tone={tone} active={view === id} onClick={() => replaceAll({ ...keep, view: id })} />)}
       </KpiGrid>
+      <div className="mb-4 flex flex-wrap items-center gap-1.5 text-[12.5px]">
+        <span className="mr-1 text-muted">Asset type</span>
+        {AKIND.map(([id, label]) => (
+          <button key={id} onClick={() => replaceAll({ ...keep, view: "all", asset_kind: state.asset_kind === id ? "" : id })}
+            className={"rounded-full border px-2.5 py-0.5 transition-colors " + (state.asset_kind === id ? "border-accent bg-accent-soft text-accent-fg" : "border-border hover:border-border-strong")}>
+            {label} <b className="tabular">{(c["kind_" + id] ?? 0).toLocaleString()}</b>
+          </button>
+        ))}
+      </div>
       <Card className="mb-4">
         <button className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-[12.5px] font-medium" onClick={() => setWhy(!why)}>
           <Info className="size-4 text-accent-fg" /> How addresses are classified <span className="ml-auto text-muted">{why ? "hide" : "show"}</span></button>
@@ -95,7 +116,8 @@ export function MatrixIpsPanel({ state, set, replaceAll, keep = {} }: { state: R
         rowKey={(r: any) => `${r.kind}|${r.address}`} onReset={() => replaceAll({ ...keep, view })} sortable={false} columns={cols}
         filters={<>
           <FilterSelect single label="Show" value={view} onChange={(v) => replaceAll({ ...keep, view: v || "exposed" })} options={VIEWS.map(([id, l]) => [id, l]) as [string, string][]} />
-          <SearchInput className="w-72" value={state.q || ""} onChange={(v) => set({ q: v })} placeholder="IP, subnet, name, application, owner, sheet…" />
+          <SearchInput className="w-72" value={state.q || ""} onChange={(v) => set({ q: v })} placeholder="Private / public IP, name, application, owner, sheet…" />
+          <FilterSelect label="Asset type" value={state.asset_kind} onChange={(v) => set({ asset_kind: v })} any="All" options={AKIND.map(([id, l]) => [id, l]) as [string, string][]} />
           <FilterSelect label="Kind" value={state.kind} onChange={(v) => set({ kind: v })} any="All" options={[["ip", "IPs"], ["subnet", "Subnets / ranges"], ["name", "Host names"]]} />
         </>} />
     </div>

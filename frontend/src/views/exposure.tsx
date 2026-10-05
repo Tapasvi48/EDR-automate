@@ -19,6 +19,7 @@ const RULES: [string, string, string][] = [
   ["matrix", "Communication matrix", "Three kinds of asset: (1) a public IP no rule NATs to a private IP (directly on the internet); (2) a private IP with its public / NAT IP, from an inbound destination-NAT rule or an outbound source-NAT rule (the public IP is shown on the private asset, not as an asset of its own); (3) a private IP the firewall lets in from or out to the internet with no NAT IP. Internet destinations, partner sources and VPN peers are never listed. Rows can be marked internet-facing by hand."],
   ["ip", "Public IP", "The asset's own IPv4 is globally routable and comes from an inventory, the NIAM dump or a VA scan. A global IPv6 address alone is not evidence (IPv6 needs no NAT, so most IPv6 addresses are global): IPv6 assets are exposed only through the communication matrix, an inventory Internet Facing / Public IP column, or Mark exposed."],
   ["edr", "CrowdStrike connection IP", "The agent's connection IP (the interface it reaches the CrowdStrike cloud from) is a public IPv4. CrowdStrike assets are listed under their connection IP; the local IP and the external (egress / NAT) IP are not exposure evidence."],
+  ["va", "VA public inventory", "The host is on the uploaded VA public inventory sheet. The asset is its private IP; when the sheet has none, the private IP the communication matrix NATs the public IP to; else the public IP. LOB / MSP / node type come from the LOB inventory, or from the sheet when no inventory lists the host. Differences with the matrix or the LOB inventory are shown as evidence (‘VA public inventory differs’)."],
   ["passive", "Passive scan", "Shodan InternetDB (Internet DB scan page) sees open ports on the asset's public IP or the public / NAT IP it sits behind."],
   ["manual", "Marked by hand", "The IP or its subnet is on the Mark exposed list, with a note saying where you know it from."],
 ];
@@ -55,7 +56,7 @@ export default function Exposure() {
       </KpiGrid>
       <div className="mt-3 flex flex-wrap items-center gap-1.5 text-[12.5px]">
         <span className="mr-1 text-muted">Exposed by</span>
-        {([["inventory", "Inventory", s.by_inventory], ["scan", "VA scan", s.by_scan], ["matrix", "Comm. matrix", s.by_matrix], ["passive", "Passive scan", s.by_passive],
+        {([["inventory", "Inventory", s.by_inventory], ["scan", "VA scan", s.by_scan], ["matrix", "Comm. matrix", s.by_matrix], ["va", "VA public inventory", s.by_va], ["passive", "Passive scan", s.by_passive],
           ["edr", "CrowdStrike", s.by_edr], ["manual", "Marked by hand", s.by_manual]] as [string, string, number][]).map(([k, l, n]) => (
           <button key={k} onClick={() => only({ exposure_src: k })}
             className={cn("rounded-full border px-2.5 py-0.5 transition-colors", state.exposure_src === k ? "border-accent bg-accent-soft text-accent-fg" : "border-border hover:border-border-strong")}>

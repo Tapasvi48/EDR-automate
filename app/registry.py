@@ -130,13 +130,20 @@ def _norm(h):
 
 
 _EXPOSURE_HINT = re.compile(r"public|nat|internet|expos|facing|dmz|zone|wan|vip|external|segment", re.I)
+_HINT_WORDS = ("public", "nat", "internet", "expos", "facing", "dmz", "zone", "wan", "vip", "external", "segment")
+
+
+def _has_hint(text):
+    """Same test as _EXPOSURE_HINT, as plain substring checks: the case-insensitive regex took ~20 s over 1 lakh inventory rows."""
+    low = text.lower()
+    return any(w in low for w in _HINT_WORDS)
 
 
 def inventory_exposure(extra):
     """(facing reason or None, [public / NAT IPs]) from an inventory row's extra columns."""
     facing, nat = None, []
     if isinstance(extra, str):  # raw JSON: most rows have no exposure-related column at all, so skip parsing them
-        if not extra or extra == "{}" or not _EXPOSURE_HINT.search(extra):
+        if not extra or extra == "{}" or not _has_hint(extra):
             return facing, nat
         extra = db.jloads(extra, {})
     for k, v in (extra or {}).items():
@@ -168,6 +175,9 @@ def code_rev():
     return h.hexdigest()[:16]
 
 
+VERSION = [0]  # bumped whenever asset_registry is rewritten (caches built from it, e.g. the matrix IP list, key on it)
+
+
 def refresh(c):
     reg = {}
 
@@ -183,7 +193,7 @@ def refresh(c):
         if n and n not in s["names"]:
             s["names"].append(n)
 
-    WHERE = {"inventory": "Inventory", "matrix": "Communication matrix", "scan": "VA scan", "ip": "Public IP", "indirect": "Indirect range",
+    WHERE = {"va": "VA public inventory", "inventory": "Inventory", "matrix": "Communication matrix", "scan": "VA scan", "ip": "Public IP", "indirect": "Indirect range",
              "manual": "Marked manually", "edr": "CrowdStrike", "passive": "Passive scan"}
 
     def reason(s, src, text, where=None):
@@ -274,7 +284,7 @@ def refresh(c):
             s["in_niam"] = 1 if s["niam_inv"] == "Yes" else 0
     # --- communication matrix, every sheet type: internet-facing rows expose what they point at. A row matches an asset by
     # its private / internal IP (or a subnet / range containing it), its public / NAT IP, or its host name.
-    from .addrparse import parse_addresses
+    from .commatrix import parse_addresses  # cached per cell text
     from .commatrix import PATTERNS, internet_without_nat, load_rules, matrix_owned, reclassify
     import bisect
     reclassify(c)  # rows uploaded under older inbound logic are judged again (manual marks kept)
@@ -318,6 +328,51 @@ def refresh(c):
                 if ip in direct:
                     mark_matrix(ip, rule)
                     reg[ip]["isp_direct"] = rule
+    # --- VA public inventory: every row is a publicly exposed host. The asset is its private IP; with none on the sheet, the
+    # private IP the matrix NATs the public IP to; else the public IP itself. LOB / MSP / node type come from the LOB inventory
+    # and, when no inventory lists the host, from the sheet. Differences with the matrix / inventory are listed as evidence.
+    from .commatrix import matrix_pairs
+    m_pub_of, m_priv_of = matrix_pairs(active_rules)
+    from .vapublic import _ips as va_ips
+    for v in db.rows(c, "SELECT * FROM va_public"):
+        pubs = [ip for ip in va_ips(v["public_ip"]) if is_public(ip)]
+        privs = [ip for ip in va_ips(v["private_ip"]) if not is_public(ip)]
+        # as many public as private IPs in one row (ip1;ip2 | ip3;ip4): paired in order, not every one with every one
+        pair_of = dict(zip(privs, pubs)) if len(privs) == len(pubs) > 1 else None
+        m_priv = sorted(set().union(*[m_priv_of.get(p, set()) for p in pubs])) if pubs else []
+        targets = privs or m_priv or pubs
+        notes = []
+        if not privs and m_priv:
+            notes.append(f"the VA sheet has no private IP; the communication matrix NATs {', '.join(pubs)} to {', '.join(m_priv)}")
+        elif privs and m_priv and not set(privs) & set(m_priv):
+            notes.append(f"the VA sheet says private {', '.join(privs)}, the communication matrix says {', '.join(m_priv)}")
+        m_pub = sorted(set().union(*[m_pub_of.get(p, set()) for p in privs])) if privs else []
+        if m_pub and pubs and not set(pubs) & set(m_pub):
+            notes.append(f"the VA sheet says public {', '.join(pubs)}, the communication matrix says {', '.join(m_pub)}")
+        how = " · ".join(x for x in (v["p2p"], v["path"], v["gateway"] and f"gateway {v['gateway']}", v["dmz"] and f"DMZ {v['dmz']}") if x)
+        for ip in targets:
+            s = reg.get(ip) or slot(ip, ip)
+            s["in_va_pub"] = 1
+            add_name(s, v["application"] or None)
+            if not s["lobs"] and v["lob"]:
+                s.setdefault("matrix_lob", v["lob"])
+            if not s["msps"] and v["msp"]:
+                s.setdefault("va_msp", v["msp"])
+            s["node_type"] = s["node_type"] or v["node_type"] or None
+            inv_lobs = {x.strip().lower() for x in s["lobs"].values() if x}
+            inv_msps = {x.strip().lower() for x in s["msps"].values() if x}
+            diff = list(notes)
+            if v["lob"] and inv_lobs and v["lob"].strip().lower() not in inv_lobs:
+                diff.append(f"LOB on the VA sheet '{v['lob']}', in the LOB inventory '{', '.join(sorted(set(s['lobs'].values())))}'")
+            if v["msp"] and inv_msps and v["msp"].strip().lower() not in inv_msps:
+                diff.append(f"MS Partner on the VA sheet '{v['msp']}', in the LOB inventory '{', '.join(sorted(set(s['msps'].values())))}'")
+            reason(s, "va", f"VA public inventory: public {', '.join(pubs) or '–'}" + (f" → {ip}" if ip not in pubs else " (no private IP)")
+                   + (f" · {how}" if how else ""), "VA public inventory")
+            if diff:
+                reason(s, "va", "VA public inventory differs: " + "; ".join(diff), "VA public inventory · differs")
+            for p in ([pair_of[ip]] if pair_of and ip in pair_of else pubs):
+                if p != ip:
+                    nat_pairs.append((ip, p, "va", "VA public inventory", "VA public inventory"))
     # values that are not a valid IP (typos, "NOT IN USE", Excel errors like #REF!) cannot match a rule: skip them
     v4, v6 = [], []
     for k, s in reg.items():
@@ -482,7 +537,9 @@ def refresh(c):
             reason(s, "nat", f"Public NAT IP of {', '.join(sorted(x for x in s['nat_of'] if x)[:5])}: listed on those assets")
         exposed = 1 if s["reasons"] and not cg and not wl and not front else 0
         srcs = [x for x, f in (("inventory", s["in_inventory"]), ("edr", s["in_edr"]), ("scan", s["in_scan"]), ("niam", s["in_niam"]),
-                               ("matrix", s.get("in_matrix"))) if f]
+                               ("matrix", s.get("in_matrix")), ("va", s.get("in_va_pub"))) if f]
+        if not s["msps"] and s.get("va_msp"):  # MS Partner from the VA public inventory, for hosts no inventory owns
+            s["msps"][0] = s["va_msp"]
         if not s["lobs"] and s.get("matrix_lob"):  # LOB named in the matrix row, for assets no inventory owns
             lid = lob_ids.get(s["matrix_lob"].strip().lower())
             s["lobs"][lid if lid is not None else 0] = s["matrix_lob"]
@@ -500,6 +557,7 @@ def refresh(c):
         rows = [r for r in rows if r[0] not in hidden]
     c.execute("DELETE FROM asset_registry")
     c.executemany(f"INSERT INTO asset_registry VALUES ({','.join('?' * 39)})", rows)
+    VERSION[0] += 1
 
 
 # ------------------------------------------------------------------ queries
@@ -531,7 +589,7 @@ def query(p):
         ms = db.multi(p, "msp")
         conds, v = [], []
         if "none" in ms:
-            conds.append("(r.in_inventory=1 AND r.msps IS NULL)")
+            conds.append("r.msps IS NULL")  # every asset without an MSP (also those no inventory lists: matrix, scans, CrowdStrike)
         ids = [int(x) for x in ms if x != "none"]
         if ids:
             s, v = db.or_like("r.msp_ids", ids, "%,{},%")
@@ -658,7 +716,8 @@ EXPORT = [("ip", "IP"), ("name", "Name"), ("sources_text", "Found In"), ("lobs",
           ("aid", "Agent ID"), ("edr_last_seen", "EDR Last Seen"), ("last_scan", "Last VA Scan"), ("crit", "Critical"), ("high", "High"),
           ("med", "Medium"), ("low", "Low"), ("ne_ids", "NIAM NE ID"), ("exposed_text", "Internet Exposed"),
           ("exposure_text", "Exposure Evidence"), ("public_ips", "Public / NAT IP"), ("nat_of", "Public IP Of")]
-SRC_LABEL = {"inventory": "Inventory", "edr": "CrowdStrike", "scan": "VA scan", "niam": "NIAM"}
+SRC_LABEL = {"inventory": "Inventory", "edr": "CrowdStrike", "scan": "VA scan", "niam": "NIAM", "matrix": "Communication matrix",
+             "va": "VA public inventory"}
 
 
 @router.get("/api/registry/export")
@@ -667,7 +726,7 @@ def registry_export(request: Request):
     with db.get_conn() as c:
         rows = _rows(c, p)
     for r in rows:
-        r["sources_text"] = ", ".join(SRC_LABEL[s] for s in (r["sources"] or "").split(",") if s)
+        r["sources_text"] = ", ".join(SRC_LABEL.get(s, s) for s in (r["sources"] or "").split(",") if s)
         r["exposed_text"] = "Yes" if r["exposed"] else "No"
         r["exposure_text"] = "; ".join(e["text"] for e in r["exposure"])
     return xlsx_response([("All assets", EXPORT, rows)], "internet_exposed" if p.get("exposed") == "1" else "all_assets")
@@ -701,7 +760,7 @@ def exposure_summary():
         s = db.one(c, """SELECT SUM(exposed) exposed, SUM(exposed AND exposure_src LIKE '%,inventory,%') by_inventory,
             SUM(exposed AND exposure_src LIKE '%,scan,%') by_scan,
             SUM(exposed AND exposure_src LIKE '%,ip,%') by_ip, SUM(exposed AND exposure_src LIKE '%,matrix,%') by_matrix, SUM(exposed AND exposure_src LIKE '%,manual,%') by_manual,
-            SUM(exposed AND exposure_src LIKE '%,edr,%') by_edr, SUM(exposed AND exposure_src LIKE '%,passive,%') by_passive,
+            SUM(exposed AND exposure_src LIKE '%,edr,%') by_edr, SUM(exposed AND exposure_src LIKE '%,passive,%') by_passive, SUM(exposed AND exposure_src LIKE '%,va,%') by_va,
             SUM(exposed AND edr_status='Not Installed') no_edr,
             SUM(exposed AND (crit + high) > 0) crit_high, SUM(exposed AND in_inventory=0) not_in_inventory,
             SUM(exposed AND in_inventory=1) in_inventory,
@@ -865,6 +924,7 @@ def registry_delete(data: dict = Body(...)):
                     removed += 1
             c.execute("INSERT OR REPLACE INTO registry_hidden VALUES (?,?,?,?,?,?)", (k, r["ip"], r["name"], data.get("note") or "", who, now))
             c.execute("DELETE FROM asset_registry WHERE asset_key=?", (k,))  # gone from the list (and every count) right away
+            VERSION[0] += 1
     from . import inventory
     inventory.refresh_async(f"Updating after deleting {len(keys):,} row(s)")
     return {"ok": True, "hidden": len(keys), "inventory_rows_removed": removed,

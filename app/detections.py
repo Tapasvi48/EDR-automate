@@ -5,7 +5,7 @@ day, and between those only the alerts created or updated since the previous syn
 import json
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Query, Request
+from fastapi import Body, APIRouter, Query, Request
 
 from . import db
 
@@ -57,6 +57,13 @@ def _ids(client, field, start, end, extra=""):
     return _ids(client, field, mid, end, extra) + _ids(client, field, start, mid, extra)
 
 
+INFO_SEV = ("Informational", "Info")
+
+
+def include_info():
+    return (db.get_settings().get("detections_include_info") or "0") == "1"
+
+
 def fetch(client, days=30):
     """Alerts of the last `days` days into the detections table. Returns a one-line summary.
     Once a day the whole window is re-read; the syncs in between only ask for alerts created or updated since the last
@@ -65,12 +72,15 @@ def fetch(client, days=30):
     since = now - timedelta(days=days)
     st = db.get_settings()
     last, last_full = st.get("detections_last_fetch"), st.get("detections_last_full")
-    full = not last or not last_full or last_full < _iso(now - timedelta(hours=24)) or st.get("detections_days_fetched") != str(days)
+    info = (st.get("detections_include_info") or "0") == "1"
+    full = (not last or not last_full or last_full < _iso(now - timedelta(hours=24)) or st.get("detections_days_fetched") != str(days)
+            or st.get("detections_info_fetched", "0") != ("1" if info else "0"))
+    sev = "" if info else "severity:>=20"  # informational (severity < 20 on the Alerts API's 0-100 scale) not fetched
     if full:
-        ids = _ids(client, "created_timestamp", since, None)
+        ids = _ids(client, "created_timestamp", since, None, extra=sev)
     else:
         start = datetime.strptime(last, ISO).replace(tzinfo=timezone.utc) - timedelta(minutes=15)
-        ids = _ids(client, "updated_timestamp", start, None, extra=f"created_timestamp:>'{_iso(since)}'")
+        ids = _ids(client, "updated_timestamp", start, None, extra="+".join(x for x in (f"created_timestamp:>'{_iso(since)}'", sev) if x))
     stamp, rows = db.now_iso(), []
     for i in range(0, len(ids), 1000):
         body = client._call(client.alerts.get_alerts_v2, "Detection details", composite_ids=ids[i:i + 1000])
@@ -80,7 +90,9 @@ def fetch(client, days=30):
             c.execute("DELETE FROM detections WHERE created_at > ?", (_iso(since),))
         c.executemany(f"INSERT OR REPLACE INTO detections({COLS}) VALUES ({','.join('?' * 18)})", rows)
         c.execute("DELETE FROM detections WHERE created_at < ?", (_iso(now - timedelta(days=180)),))  # keep 180 days at most
-        upd = {"detections_last_fetch": _iso(now), "detections_days_fetched": str(days)}
+        if not info:  # stored before informational was switched off
+            c.execute(f"DELETE FROM detections WHERE severity IN ({','.join('?' * len(INFO_SEV))})", INFO_SEV)
+        upd = {"detections_last_fetch": _iso(now), "detections_days_fetched": str(days), "detections_info_fetched": "1" if info else "0"}
         if full:
             upd["detections_last_full"] = _iso(now)
         c.executemany("INSERT OR REPLACE INTO settings(key, value) VALUES (?,?)", list(upd.items()))
@@ -108,7 +120,8 @@ def asset_detections(aids: str = "", hostnames: str = "", date_from: str = Query
         w.append(f"LOWER(hostname) IN ({','.join('?' * len(hn_l))})")
         params += hn_l
     with db.get_conn() as c:
-        rows = db.rows(c, f"""SELECT {COLS} FROM detections WHERE ({' OR '.join(w)}) AND substr(created_at,1,10) BETWEEN ? AND ?
+        info_sql = "" if include_info() else f" AND COALESCE(severity,'') NOT IN ({','.join(repr(x) for x in INFO_SEV)})"
+        rows = db.rows(c, f"""SELECT {COLS} FROM detections WHERE ({' OR '.join(w)}) AND substr(created_at,1,10) BETWEEN ? AND ?{info_sql}
                               ORDER BY created_at DESC LIMIT 1000""", params + [d_from, d_to])
         fetched = db.one(c, "SELECT MAX(fetched_at) at, COUNT(*) n FROM detections")
     counts = {}
@@ -134,6 +147,10 @@ def _where(p):
     if p.get("to"):
         w.append("substr(d.created_at,1,10) <= ?")
         params.append(p["to"])
+    # informational left out unless switched on, or asked for by the severity filter
+    if not include_info() and not any(x in INFO_SEV for x in (p.get("severity") or "").split("|")):
+        w.append(f"COALESCE(d.severity,'') NOT IN ({','.join('?' * len(INFO_SEV))})")
+        params += list(INFO_SEV)
     for key, col in (("severity", "d.severity"), ("status", "LOWER(COALESCE(d.status,'new'))"), ("tactic", "d.tactic")):
         if p.get(key):
             vals = [v.lower() if key == "status" else v for v in p[key].split("|")]
@@ -172,6 +189,19 @@ def detections_list(request: Request):
     return {"total": total, "rows": rows}
 
 
+@router.post("/api/detections/informational")
+def detections_informational(data: dict = Body(...)):
+    """Switch informational detections on / off. Off: stored informational detections are removed at once and the next syncs do
+    not fetch them; on: the next sync re-reads the window with them."""
+    on = bool(data.get("include"))
+    with db.get_conn() as c:
+        c.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('detections_include_info', ?)", ("1" if on else "0",))
+        removed = 0 if on else c.execute(f"DELETE FROM detections WHERE severity IN ({','.join('?' * len(INFO_SEV))})", INFO_SEV).rowcount
+    return {"ok": True, "include": on, "removed": removed,
+            "message": ("Informational detections will be fetched from the next sync" if on
+                        else f"Informational detections switched off · {removed:,} removed; the next syncs do not fetch them")}
+
+
 @router.get("/api/detections/summary")
 def detections_summary(request: Request):
     """Counts for the selected date range (filters other than the date do not apply, so the tiles stay a fixed frame)."""
@@ -195,7 +225,7 @@ def detections_summary(request: Request):
                              ORDER BY l.name""")
     st = db.get_settings()
     return {**{k: v or 0 for k, v in s.items()}, "tactics": tactics, "statuses": statuses, "top_hosts": top_hosts, "by_day": by_day,
-            "stored": stored, "lobs": lobs, "days": int(st.get("detections_days") or 30),
+            "stored": stored, "lobs": lobs, "days": int(st.get("detections_days") or 30), "include_info": include_info(),
             "last_full": st.get("detections_last_full"), "last_fetch": st.get("detections_last_fetch")}
 
 

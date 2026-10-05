@@ -159,6 +159,15 @@ class FalconClient:
                 time.sleep(2 ** attempt)
                 continue
             code = r.get("status_code", 0)
+            if code == 401 and attempt < 2:  # the service's OAuth token expired / was revoked mid-sync: log in again and retry
+                svc = getattr(fn, "__self__", None)
+                try:
+                    if svc is not None and hasattr(svc, "login"):
+                        log.warning("Falcon %s -> 401, logging in again", what)
+                        svc.login()
+                        continue
+                except Exception:  # noqa: BLE001 - fall through to the error below
+                    pass
             if code == 429 or code >= 500:
                 wait = 2 ** attempt
                 try:

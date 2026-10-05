@@ -13,7 +13,7 @@ import { TagWizard } from "@/components/tag-wizard";
 import { MappedUpload } from "@/components/mapped-upload";
 import { MatrixUpload } from "@/components/matrix-upload";
 
-type Kind = "inventory" | "tags" | "vulns" | "edr" | "niam" | "sod" | "comm" | "ndr";
+type Kind = "inventory" | "tags" | "vulns" | "edr" | "niam" | "sod" | "comm" | "ndr" | "vapub";
 type Open = null | { kind: Kind; lob?: { id: number; name: string } };
 
 export default function UploadCenter() {
@@ -59,6 +59,8 @@ export default function UploadCenter() {
       desc: "Standard template (IP, Node Name, MSP, Node Type, Domain, Live/Non Live, OS, EDR Feasible, EDR Installed, Remarks). Versioned per LOB; can be one MSP or one inventory type." },
     { k: "vulns", icon: <ShieldAlert className="size-5" />, title: "Vulnerability scan", needsLob: true,
       desc: "Nessus-format export (IP Address, Vulnerability Name, Severity, Port, Plugin ID, CVE, dates…). Tracks new / fixed findings and each host's last scan." },
+    { k: "vapub", icon: <ShieldAlert className="size-5" />, title: "VA public inventory", needsLob: false,
+      desc: "Publicly reachable hosts for the VA team (Public IP, Private IP, LOB, MS Partner, DMZ…). Checked against the LOB inventory and the communication matrix; every host is listed as internet exposed." },
     { k: "edr", icon: <FileClock className="size-5" />, title: "Old EDR inventory", needsLob: false,
       desc: "An older CrowdStrike host export. Agents no longer in the live console are kept as “Old EDR import” in EDR history and used for matching." },
     { k: "tags", icon: <Tags className="size-5" />, title: "Agent tags (AID + MSP)", needsLob: true,
@@ -114,6 +116,7 @@ export default function UploadCenter() {
       {open?.kind === "sod" && <MappedUpload kind="sod" open onOpenChange={(o) => !o && setOpen(null)} />}
       {open?.kind === "comm" && <MatrixUpload open onOpenChange={(o) => !o && setOpen(null)} />}
       {open?.kind === "ndr" && <MappedUpload kind="ndr" open onOpenChange={(o) => !o && setOpen(null)} />}
+      {open?.kind === "vapub" && <MappedUpload kind="vapub" open onOpenChange={(o) => !o && setOpen(null)} />}
     </div>
   );
 }

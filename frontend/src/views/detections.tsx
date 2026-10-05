@@ -56,7 +56,8 @@ export default function Detections() {
   ];
   return (
     <div>
-      <PageHeader title="Detections" sub="CrowdStrike detections (Alerts API) saved by each sync, linked to the agent, its LOB and whether it is internet exposed." />
+      <PageHeader title="Detections" sub="CrowdStrike detections (Alerts API) saved by each sync, linked to the agent, its LOB and whether it is internet exposed."
+        actions={<InfoToggle on={!!s.include_info} />} />
       {cs?.reason && !s.stored.n && <Callout tone="warn" className="mb-4"><b>No detections stored.</b> {cs.reason}</Callout>}
       {cs?.reason && s.stored.n > 0 && /skipped|fail|error/i.test(cs.reason) && <Callout tone="warn" className="mb-4">{cs.reason}</Callout>}
       <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -124,5 +125,24 @@ export default function Detections() {
         </>} />
       <DetectionSheet id={openId} onClose={() => setOpenId(null)} />
     </div>
+  );
+}
+
+/** Informational detections: off by default (not fetched, not counted). Switching off removes the stored ones at once. */
+function InfoToggle({ on }: { on: boolean }) {
+  const qc = useQueryClient();
+  const [busy, setBusy] = React.useState(false);
+  return (
+    <span title="Informational detections (CrowdStrike severity below 20) are not fetched and not counted unless this is on"
+      className={busy ? "pointer-events-none opacity-60" : ""}>
+      <Checkbox checked={on} label="Include informational" onChange={async (v) => {
+        setBusy(true);
+        try {
+          const r = await api<any>("/api/detections/informational", { method: "POST", body: { include: v } });
+          toast.success(r.message);
+          qc.invalidateQueries();
+        } catch (e: any) { toast.error(e.message); } finally { setBusy(false); }
+      }} />
+    </span>
   );
 }

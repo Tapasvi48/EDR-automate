@@ -899,6 +899,7 @@ def delete_msp(msp_id: int):
         if n:
             raise ValueError(f"{n} inventory nodes still belong to this MSP. Upload an inventory without them first.")
         c.execute("DELETE FROM agent_tags WHERE msp_id=?", (msp_id,))
+        c.execute("DELETE FROM inventory_msp_tags WHERE msp_id=?", (msp_id,))
         c.execute("DELETE FROM msps WHERE id=?", (msp_id,))
         inventory.refresh_soon(c)  # full re-join after LOB / MSP / tag changes
     return {"ok": True}
@@ -1230,6 +1231,69 @@ def inventory_edit(lob_id: int, item_key: str, data: dict = Body(...)):
         n = _apply_edits(c, [(lob_id, item_key, field, val)])
         row = db.one(c, "SELECT * FROM inventory_current WHERE lob_id=? AND item_key=?", (lob_id, item_key))
     return {"ok": True, "changed": n, "row": row}
+
+
+@app.post("/api/lobs/{lob_id}/inventory/msp")
+def inventory_tag_msp(lob_id: int, data: dict = Body(...)):
+    """Tag selected inventory nodes with an MSP (existing msp_id, or a new MSP by name), or clear the tag (clear: true).
+    Only nodes without an MSP from the upload (or already tagged by hand) take a tag; it stays across later uploads while the
+    uploaded row's MSP is blank. keys: row keys "lob_id|item_key" (or bare item keys of this LOB)."""
+    keys = []
+    for k in data.get("keys") or []:
+        lid, _, item = str(k).partition("|")  # table row key "lob_id|item_key" (item keys can contain "|" themselves)
+        if not (lid.isdigit() and item):
+            lid, item = str(lob_id), str(k)
+        if int(lid) == lob_id and item:
+            keys.append(item)
+    if not keys:
+        raise HTTPException(400, "Select at least one node")
+    who, now = data.get("tagged_by") or "", db.now_iso()
+    with db.get_conn() as c:
+        ver = (db.one(c, "SELECT current_version_id v FROM lobs WHERE id=?", (lob_id,)) or {}).get("v") or 0
+        tags = {r["item_key"]: r["msp_id"] for r in db.rows(c, "SELECT item_key, msp_id FROM inventory_msp_tags WHERE lob_id=?", (lob_id,))}
+        rows = {}
+        for i in range(0, len(keys), 900):  # "select all" can be lakhs of nodes: stay under SQLite's variable limit
+            part = keys[i:i + 900]
+            rows.update({r["item_key"]: r for r in db.rows(c, f"""SELECT item_key, msp FROM inventory_current WHERE lob_id=?
+                                                                 AND item_key IN ({','.join('?' * len(part))})""", (lob_id, *part))})
+        changes = []
+        if data.get("clear"):
+            names = {m["id"]: m["name"] for m in db.rows(c, "SELECT id, name FROM msps WHERE lob_id=?", (lob_id,))}
+            done = [k for k in keys if k in tags]
+            for k in done:
+                if k in rows and (rows[k]["msp"] or "") == names.get(tags[k], ""):
+                    changes.append((k, rows[k]["msp"] or "", ""))
+            c.executemany("DELETE FROM inventory_msp_tags WHERE lob_id=? AND item_key=?", [(lob_id, k) for k in done])
+            c.executemany("UPDATE inventory_current SET msp='', msp_id=NULL WHERE lob_id=? AND item_key=?", [(lob_id, k) for k, _, _ in changes])
+            msg = f"MSP tag removed from {len(done):,} node(s)"
+            skipped = len(keys) - len(done)
+        else:
+            if data.get("msp_id"):
+                m = db.one(c, "SELECT id, name FROM msps WHERE id=? AND lob_id=?", (int(data["msp_id"]), lob_id))
+                if not m:
+                    raise HTTPException(400, "That MSP is not in this LOB")
+            else:
+                name = (data.get("msp_name") or "").strip()
+                if not name:
+                    raise HTTPException(400, "Pick an MSP or type a new MSP name")
+                m = db.one(c, "SELECT id, name FROM msps WHERE lob_id=? AND name=? COLLATE NOCASE", (lob_id, name))
+                if not m:
+                    mid = c.execute("INSERT INTO msps(lob_id, name, created_at) VALUES (?,?,?)", (lob_id, name, now)).lastrowid
+                    m = {"id": mid, "name": name}
+            ok = [k for k in keys if k in rows and (not (rows[k]["msp"] or "").strip() or k in tags)]
+            skipped = len(keys) - len(ok)
+            c.executemany("INSERT OR REPLACE INTO inventory_msp_tags(lob_id, item_key, msp_id, tagged_by, tagged_at) VALUES (?,?,?,?,?)",
+                          [(lob_id, k, m["id"], who, now) for k in ok])
+            changes = [(k, rows[k]["msp"] or "", m["name"]) for k in ok if (rows[k]["msp"] or "") != m["name"]]
+            c.executemany("UPDATE inventory_current SET msp=?, msp_id=? WHERE lob_id=? AND item_key=?", [(m["name"], m["id"], lob_id, k) for k in ok])
+            msg = f"{len(ok):,} node(s) tagged with MSP {m['name']}"
+        c.executemany("""INSERT INTO inventory_changes(lob_id, version_id, item_key, change_type, field, old_value, new_value)
+                         VALUES (?,?,?,?,?,?,?)""", [(lob_id, ver, k, "edited", "msp", old, new) for k, old, new in changes])
+        if changes:
+            inventory.refresh_soon(c, lob_id, label="Applying MSP tags")
+    if skipped:
+        msg += f" · {skipped:,} skipped (their MSP comes from the uploaded inventory)" if not data.get("clear") else f" · {skipped:,} had no tag"
+    return {"ok": True, "message": msg, "changed": len(changes), "skipped": skipped}
 
 
 @app.get("/api/lobs/{lob_id}/inventory/column-sheet")
@@ -1638,7 +1702,9 @@ app.include_router(subnets.router)
 app.include_router(whois.router)
 app.include_router(falconmcp.router)
 app.include_router(ai_hunt.router)
-for _r in (fabric.router, kb.router, briefs.router, ioc.router, chat.router, cql.router, ontology.router, cqlhub.router, learn.router):
+from . import vapublic  # noqa: E402
+for _r in (fabric.router, kb.router, briefs.router, ioc.router, chat.router, cql.router, ontology.router, cqlhub.router, learn.router,
+           vapublic.router):
     app.include_router(_r)
 
 FRONTEND = config.BASE_DIR / "frontend" / "out"

@@ -72,13 +72,13 @@ function Editor({ t, open, onOpenChange }: { t: any; open: boolean; onOpenChange
 }
 
 const GROUPS: [string, string[]][] = [
-  ["Inventory & assets", ["inventory", "niam", "old_edr", "agent_tags", "comm_matrix"]],
+  ["Inventory & assets", ["inventory", "niam", "old_edr", "agent_tags", "comm_matrix", "va_public"]],
   ["Vulnerability", ["vulnerability", "sod"]],
 ];
 const ICONS: Record<string, React.ElementType> = { inventory: Building2, niam: Radio, old_edr: FileClock, agent_tags: Tags, comm_matrix: Waypoints,
-  vulnerability: ShieldAlert, sod: BadgeCheck };
+  vulnerability: ShieldAlert, sod: BadgeCheck, va_public: ShieldAlert };
 const UPLOAD_AT: Record<string, string> = { inventory: "/lobs/", niam: "/upload/", old_edr: "/health/", agent_tags: "/upload/",
-  comm_matrix: "/matrix/", vulnerability: "/upload/", sod: "/exceptions/" };
+  comm_matrix: "/matrix/", va_public: "/vulnerabilities/?section=vapub", vulnerability: "/upload/", sod: "/exceptions/" };
 
 function FileTemplates() {
   const { data } = useQuery({ queryKey: ["file-templates"], queryFn: () => api<any>("/api/file-templates") });

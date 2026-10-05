@@ -590,8 +590,13 @@ def coverage_status(feasible, edr_state):
 
 
 def sync_msps(c, lob_id=None):
-    """Create MSP records for MSP names found in inventory and link rows to them."""
+    """Create MSP records for MSP names found in inventory and link rows to them. Nodes the upload left without an MSP take
+    the one tagged by hand (inventory_msp_tags)."""
     where, params = ("AND lob_id=?", (lob_id,)) if lob_id else ("", ())
+    c.execute(f"""UPDATE inventory_current SET msp=(SELECT m.name FROM inventory_msp_tags t JOIN msps m ON m.id=t.msp_id
+                  WHERE t.lob_id=inventory_current.lob_id AND t.item_key=inventory_current.item_key)
+                  WHERE COALESCE(TRIM(msp),'')='' AND EXISTS (SELECT 1 FROM inventory_msp_tags t JOIN msps m ON m.id=t.msp_id
+                  WHERE t.lob_id=inventory_current.lob_id AND t.item_key=inventory_current.item_key) {where}""", params)
     for r in db.rows(c, f"SELECT DISTINCT lob_id, TRIM(msp) msp FROM inventory_current WHERE COALESCE(TRIM(msp),'')<>'' {where}", params):
         c.execute("INSERT OR IGNORE INTO msps(lob_id, name, created_at) VALUES (?,?,?)", (r["lob_id"], r["msp"], db.now_iso()))
     c.execute(f"""UPDATE inventory_current SET msp_id=(SELECT m.id FROM msps m WHERE m.lob_id=inventory_current.lob_id

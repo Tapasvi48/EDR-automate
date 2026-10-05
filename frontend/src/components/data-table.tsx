@@ -159,8 +159,10 @@ export function DataTable<T extends Record<string, any>>(p: Props<T>) {
         <span className="text-fg-2">
           <b className="tabular text-fg">{q.data ? fmtN(total) : "–"}</b> {p.noun || "rows"}
         </span>
-        {p.onSelectedChange && rows.length > 0 && rows.every((r) => p.selected?.has(rk(r))) && total > rows.length && (p.selected?.size ?? 0) < total && (
-          <button className="text-[12px] text-accent-fg hover:underline" onClick={selectAllMatching}>Select all {fmtN(total)} matching</button>
+        {p.onSelectedChange && total > 0 && (p.selected?.size ?? 0) < total && (
+          <Button size="sm" variant="soft" onClick={selectAllMatching} title="Select every row that matches the current filters, on all pages">
+            Select all {fmtN(total)}{total > rows.length ? " matching" : ""}
+          </Button>
         )}
         {p.onSelectedChange && (p.selected?.size ?? 0) > 0 && (
           <span className="text-[12px] text-fg-2">{fmtN(p.selected!.size)} selected · <button className="text-accent-fg hover:underline" onClick={() => p.onSelectedChange?.(new Set())}>clear</button></span>
@@ -232,7 +234,7 @@ export function DataTable<T extends Record<string, any>>(p: Props<T>) {
               {p.renderExpanded && <th className="sticky top-0 z-10 w-8 border-b border-border bg-surface-2" />}
               {p.onSelectedChange && (
                 <th className="sticky top-0 z-10 w-9 border-b border-border bg-surface-2 px-3">
-                  <input type="checkbox" className="accent-[var(--accent)]" title="Select this page"
+                  <input type="checkbox" className="accent-[var(--accent)]" title="Select the rows on this page (use “Select all” above for every matching row)"
                     checked={rows.length > 0 && rows.every((r) => p.selected?.has(rk(r)))}
                     onChange={(e) => {
                       const n = new Set(p.selected);

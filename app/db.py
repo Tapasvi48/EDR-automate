@@ -205,6 +205,24 @@ CREATE TABLE IF NOT EXISTS agent_tags (
     PRIMARY KEY (aid, lob_id)
 );
 CREATE INDEX IF NOT EXISTS ix_tags_lob ON agent_tags(lob_id, msp_id);
+-- VA public inventory: the sheet of publicly reachable hosts given to the VA team (full snapshot per upload)
+CREATE TABLE IF NOT EXISTS va_public (
+    id INTEGER PRIMARY KEY, upload_id INTEGER, row_no INTEGER, lob TEXT, node_type TEXT, domain TEXT, application TEXT,
+    public_ip TEXT, subnet TEXT, private_ip TEXT, p2p TEXT, path TEXT, gateway TEXT, dmz TEXT, owner TEXT, msp TEXT, spoc TEXT, niam TEXT
+);
+CREATE TABLE IF NOT EXISTS va_public_uploads (
+    id INTEGER PRIMARY KEY, filename TEXT, note TEXT, uploaded_by TEXT, uploaded_at TEXT, rows INTEGER, mapping TEXT, warnings TEXT
+);
+-- MSP given by hand to inventory nodes the upload left without one. Kept across uploads: applied while the uploaded row's
+-- MSP is blank (an MSP in the file always wins).
+CREATE TABLE IF NOT EXISTS inventory_msp_tags (
+    lob_id INTEGER NOT NULL,
+    item_key TEXT NOT NULL,
+    msp_id INTEGER NOT NULL,
+    tagged_by TEXT,
+    tagged_at TEXT,
+    PRIMARY KEY (lob_id, item_key)
+);
 
 -- Resolved host -> LOB / MSP attribution (inventory match or tag), rebuilt after sync / upload
 CREATE TABLE IF NOT EXISTS host_map (
@@ -934,6 +952,26 @@ def _init_db():
 
 
 ALL_ROWS = 300_000  # "__all=1": the API layer asks for every row (field filters on any column are applied after)
+
+
+_MEMO, _MEMO_LOCK = {}, threading.Lock()
+
+
+def memo(name, key, fn):
+    """fn() cached under `name` for as long as `key` (a signature of the data it reads) stays the same. Unlike the API response
+    cache (which any write anywhere clears) a heavy result survives writes that do not touch its own data (syncs, settings…)."""
+    hit = _MEMO.get(name)
+    if hit is not None and hit[0] == key:
+        return hit[1]
+    val = fn()
+    with _MEMO_LOCK:
+        _MEMO[name] = (key, val)
+    return val
+
+
+def sig(c, *queries):
+    """A cheap signature of some tables: the rows of a few COUNT / MAX queries."""
+    return tuple(tuple(c.execute(q).fetchone()) for q in queries)
 
 
 def page_args(p, default=50, cap=1000):

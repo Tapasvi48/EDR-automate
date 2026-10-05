@@ -14,7 +14,17 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Body, HTTPException, Request
 
 from . import db, inventory
-from .addrparse import parse_addresses, ports_allow
+from functools import lru_cache
+
+from .addrparse import parse_addresses as _parse_addresses, ports_allow
+
+
+@lru_cache(maxsize=200_000)
+def parse_addresses(text):
+    """addrparse.parse_addresses, cached per cell text: the same rule cells are parsed by the exposure rebuild, the matrix
+    asset list, ownership and NAT pairing. Returns tuples (read-only)."""
+    anyv, nets, names = _parse_addresses(text)
+    return anyv, tuple(nets), tuple(names)
 from .exporter import xlsx_response
 
 router = APIRouter()
@@ -296,6 +306,10 @@ def is_inbound_internet(r):
     d_any, d_nets = endpoints(r["dst"])
     if d_any and not parse_addresses(r.get("dst_nat") or "")[1]:  # destination Any: not one of our hosts
         return False
+    s_any, s_nets = endpoints(r["src"])
+    if (any(is_public(str(n.network_address)) for n in parse_addresses(r.get("dst_nat") or "")[1])
+            and any(_is_private(n) for n in d_nets) and not any(_is_private(n) for n in s_nets)):
+        return True  # a public NAT IP in front of our private destination, reached from outside: a published service
     if re.match(r"^\s*in", r["direction"] or "", re.I) and (INTERNET_ZONE.search(r["src_zone"] or "") or r["isp"]):
         return True
     if INTERNET_ZONE.search(r["src_zone"] or "") or r["isp"]:
@@ -309,18 +323,47 @@ def is_inbound_internet(r):
 RULE_TYPES = ("rules", "zones", "fwpolicy")  # sheet types whose rows are judged one by one (zones / ISP / source)
 
 
+def fix_nat_side(r):
+    """A NAT IP in the source-NAT column on a row whose source is NOT ours (a public IP / Any) and whose destination is our
+    private IP is the destination's public NAT (inbound DNAT), not a source NAT: a real source NAT always has a private
+    source. Moves it to dst_nat in place; True when moved."""
+    from .registry import is_public
+    s_any, s_nets, _ = parse_addresses(r.get("src") or "")
+    if r.get("dst_nat") or any(_is_private(n) for n in s_nets):
+        return False
+    nat = [n for n in parse_addresses(r.get("src_nat") or "")[1] if n.num_addresses == 1 and is_public(str(n.network_address))]
+    if not nat or not any(_is_private(n) for n in parse_addresses(r.get("dst") or "")[1]):
+        return False
+    r["dst_nat"], r["src_nat"] = r["src_nat"], ""
+    return True
+
+
 def reclassify(c):
     """Re-judge stored firewall-rule rows with the current is_inbound_internet (rows uploaded under older logic), keeping
     manual marks. Every consumer (exposure, data fabric, ontology, threats, Asset 360) reads inbound_internet."""
+    moved = []
+    for r in db.rows(c, """SELECT id, src, src_nat, dst, dst_nat, direction, sheet_type FROM comm_rules
+                          WHERE COALESCE(src_nat,'')<>'' AND COALESCE(dst_nat,'')=''"""):
+        if fix_nat_side(r):
+            pat = PATTERNS.get(r["sheet_type"] or "")
+            d = "Inbound" if pat and r["direction"] == pat[5].get("direction") == "Outbound" else r["direction"]  # sheet default only
+            moved.append((r["dst_nat"], d, r["id"]))
+    if moved:
+        c.executemany("UPDATE comm_rules SET dst_nat=?, src_nat='', direction=? WHERE id=?", moved)
     upd = []
+    ids = {m[-1] for m in moved}
     for r in db.rows(c, f"""SELECT * FROM comm_rules WHERE COALESCE(sheet_type,'rules') IN ({','.join('?' * len(RULE_TYPES))})""", RULE_TYPES):
         v = 1 if is_inbound_internet(r) else 0
         if v != r["inbound_auto"]:
             upd.append((v, r["id"]))
-    if upd:
+    if ids:  # rows whose NAT moved to the destination are published services, whatever their sheet type
+        for r in db.rows(c, f"SELECT * FROM comm_rules WHERE id IN ({','.join('?' * len(ids))})", list(ids)):
+            if (r["sheet_type"] or "rules") not in RULE_TYPES:
+                upd.append((1 if is_inbound_internet(r) else 0, r["id"]))
+    if upd or moved:
         c.executemany("UPDATE comm_rules SET inbound_auto=? WHERE id=?", upd)
         apply_overrides(c)
-    return len(upd)
+    return len(upd) + len(moved)
 
 
 def matrix_owned(rules):
@@ -384,10 +427,12 @@ def build(parsed, mapping, stype="rules", workbook="", sheet=""):
     tag = (sheet or "")[:12]
     pat = PATTERNS.get(stype)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    def cell(r, h):  # rows can be shorter than the header row (trailing empty cells)
+        i = idx.get(h)
+        return str(r[i] if i is not None and i < len(r) and r[i] is not None else "").strip()
     for n, r in enumerate(parsed["rows"], start=1):
-        v = {k: (r[idx[mapping[k]]] if mapping.get(k) in idx else "").strip() for k in KEYS}
-        notes = [f"{NOTE_LABELS.get(k, k)}: {str(r[idx[h]]).strip()}" for k, h in mapping.items()
-                 if k.startswith("x_") and h in idx and str(r[idx[h]]).strip()]
+        v = {k: cell(r, mapping.get(k)) for k in KEYS}
+        notes = [f"{NOTE_LABELS.get(k, k)}: {cell(r, h)}" for k, h in mapping.items() if k.startswith("x_") and cell(r, h)]
         if notes:  # columns with no field of their own (Logging, VPN Peer, Route Next Hop) are kept in the remarks
             v["remarks"] = " · ".join([v["remarks"], *notes] if v["remarks"] else notes)
         if stype == "fwpolicy" and v["src_nat"]:  # NAT Translated IP: which side it belongs to depends on the rule's direction
@@ -411,6 +456,9 @@ def build(parsed, mapping, stype="rules", workbook="", sheet=""):
                 v["src"] = "Any"
             if stype == "mx14" and not (v["valid_till"] and (db.parse_ts(v["valid_till"]) or v["valid_till"])[:10] < today):
                 v["valid_till"] = "1970-01-01"
+        nat_moved = fix_nat_side(v)
+        if nat_moved and pat and v["direction"] == pat[5].get("direction") == "Outbound":  # the sheet's default, not the row's
+            v["direction"] = "Inbound"
         d_any, d_nets, d_names = parse_addresses(v["dst"])
         p_any, p_nets, _ = parse_addresses(v["dst_nat"])
         s_any, s_nets, s_names = parse_addresses(v["src"])
@@ -428,7 +476,7 @@ def build(parsed, mapping, stype="rules", workbook="", sheet=""):
         v["valid_till"] = (db.parse_ts(v["valid_till"]) or v["valid_till"])[:10]
         v["protocol"] = v["protocol"].lower()
         if pat:
-            v["inbound_internet"] = pat[3] if pat[3] is not None else (1 if is_inbound_internet(v) else 0)
+            v["inbound_internet"] = pat[3] if pat[3] is not None and not nat_moved else (1 if is_inbound_internet(v) else 0)
             if stype == "sod":  # a public dest_nat_ip (or a public destination_ip on a row without nat_ip): published to the internet;
                 from .registry import is_public  # on a source-NAT row the destination is the far end, not ours
                 pub = lambda nets: any(is_public(str(x.network_address)) for x in nets)
@@ -856,14 +904,44 @@ def _is_private(net):
     return not is_public(str(net.network_address))
 
 
+def matrix_pairs(rules):
+    """(pub_of, priv_of): private IP -> its public / NAT IPs and back, from every NAT pair of the matrix rows (destination <->
+    destination NAT, source <-> source NAT, same row)."""
+    pub_of, priv_of = {}, {}
+    for r in rules:
+        for a, b in (("dst", "dst_nat"), ("src", "src_nat")):
+            na = [n for n in parse_addresses(r[a])[1] if n.num_addresses == 1]
+            nb = [n for n in parse_addresses(r[b])[1] if n.num_addresses == 1]
+            for x in na:
+                for y in nb:
+                    if _is_private(x) and not _is_private(y):
+                        priv, pub = str(x.network_address), str(y.network_address)
+                    elif _is_private(y) and not _is_private(x):
+                        priv, pub = str(y.network_address), str(x.network_address)
+                    else:
+                        continue
+                    pub_of.setdefault(priv, set()).add(pub)
+                    priv_of.setdefault(pub, set()).add(priv)
+    return pub_of, priv_of
+
+
 def matrix_ips(c):
-    key = (db.GEN[0],)  # any change (rules, inventory, ranges, enterprise marks) rebuilds the list
+    # rebuilt only when what it is made of changes (the matrix rows, the asset registry, enterprise marks, your ranges / ASNs),
+    # not on every write anywhere: at 1 lakh assets it takes seconds, and syncs / background jobs write all the time
+    from .registry import VERSION as REG_VERSION
+    from .surface import ASNS_KEY, RANGES_KEY
+    key = (REG_VERSION[0],
+           tuple(c.execute("""SELECT COUNT(*), COALESCE(MAX(id),0), COALESCE(SUM(inbound_internet),0),
+                              COALESCE(SUM(LENGTH(rule_id)),0) FROM comm_rules""").fetchone()),
+           tuple(c.execute("SELECT COUNT(*), COALESCE(SUM(LENGTH(ip) + LENGTH(class)),0) FROM ip_class").fetchone()),
+           c.execute("SELECT GROUP_CONCAT(value, '|') FROM settings WHERE key IN (?, ?)", (RANGES_KEY, ASNS_KEY)).fetchone()[0],
+           tuple(c.execute("SELECT COUNT(*), MAX(fetched_at) FROM asn_prefixes").fetchone()))
     if _IPS_CACHE.get("key") == key:
         return _IPS_CACHE["rows"]
     from .registry import is_public
     import bisect
-    reg = {r["ip"]: r for r in db.rows(c, """SELECT ip, name, lobs, in_inventory, in_edr, in_scan, in_niam, edr_status, exposed, nat_of
-                                              FROM asset_registry WHERE ip IS NOT NULL""")}
+    reg = {r["ip"]: r for r in db.rows(c, """SELECT ip, name, lobs, in_inventory, in_edr, in_scan, in_niam, edr_status, exposed, nat_of,
+                                              public_ips FROM asset_registry WHERE ip IS NOT NULL""")}
     names = {}
     for ip, r in reg.items():
         for n in (r["name"] or "").split(", "):
@@ -871,7 +949,7 @@ def matrix_ips(c):
                 names.setdefault(db.norm_hostname(n), []).append(ip)
     def _num(ip):  # inventory IP cells can hold typos / text ("NOT IN USE", #REF!): those cannot sit in a subnet
         try:
-            return int(ipaddress.IPv4Address(ip))
+            return db.ip_to_num(ip)
         except ValueError:
             return None
     v4 = sorted((n, ip) for ip in reg if ":" not in ip for n in [_num(ip)] if n is not None)
@@ -882,6 +960,13 @@ def matrix_ips(c):
     # public ranges or your ASNs' advertised prefixes, when you marked it enterprise, or when inventory / VA / NIAM has it.
     natted, direct = matrix_owned(rules)
     our_public = natted | direct
+    # private IP <-> its public / NAT IPs: the matrix NAT pairs, plus inventory NAT columns
+    pub_of, priv_of = matrix_pairs(rules)
+    for ip, rr in reg.items():
+        for p in (rr.get("public_ips") or "").split(", "):
+            if p and p != ip and is_public(p) and not is_public(ip):
+                pub_of.setdefault(ip, set()).add(p)
+                priv_of.setdefault(p, set()).add(ip)
     from .surface import ASNS_KEY, RANGES_KEY, _setting_list
     from .registry import _nets
     our_nets = [n for e in _setting_list(c, RANGES_KEY) for n in _nets(e.get("value"))]
@@ -934,6 +1019,16 @@ def matrix_ips(c):
                         ent[k]["roles"].add("exposed")
             for nm in nms:
                 add("name:" + nm, "name", role, r)
+    for pub in [k for k, e in ent.items() if e["kind"] == "ip" and k in priv_of and marks.get(k) != "non-enterprise"]:
+        privs = [p for p in priv_of[pub] if p in ent]
+        if not privs:
+            continue
+        e = ent.pop(pub)
+        for p in privs:
+            t = ent[p]
+            t["roles"] |= {"public" if r in ("public", "exposed") else r for r in e["roles"]} - {"internal", "internet_src", "outbound"}
+            for f in ("rules", "sheets", "apps", "owners", "ports"):
+                t[f] |= e[f]
     out = []
     for k, e in ent.items():
         n = e["net"]
@@ -977,7 +1072,17 @@ def matrix_ips(c):
         roles = e["roles"]
         cat = ("exposed" if ours and roles & {"exposed", "public", "snat", "public_src"} else "outbound" if ours and "outbound" in roles
                else "unknown" if not ours and (e["kind"] == "name" or why.startswith("public IP in our rules")) else "external" if not ours else "internal")
-        out.append({"address": e["address"][5:] if e["kind"] == "name" else e["address"], "kind": e["kind"], "ours": ours, "why": why,
+        addr = e["address"][5:] if e["kind"] == "name" else e["address"]
+        if e["kind"] == "ip" and _is_private(n):
+            private_ip, public_ip = addr, ", ".join(sorted(pub_of.get(addr, ())))
+            akind = "private_public" if public_ip else "private_only"
+        elif e["kind"] == "ip":
+            private_ip, public_ip = ", ".join(sorted(priv_of.get(addr, ()))), addr
+            akind = "public_only" if ours else "external"
+        else:
+            private_ip, public_ip, akind = addr, "", e["kind"]
+        out.append({"address": addr, "private_ip": private_ip, "public_ip": public_ip, "asset_kind": akind,
+                    "asset_kind_text": ASSET_KIND.get(akind, akind), "kind": e["kind"], "ours": ours, "why": why,
                     "category": cat, "roles": sorted(roles), "rules": len(e["rules"]), "rule_ids": ", ".join(sorted(e["rules"])[:6]),
                     "sheets": ", ".join(sorted(e["sheets"])), "applications": ", ".join(sorted(e["apps"]))[:200],
                     "owners": ", ".join(sorted(e["owners"]))[:200], "ports": ", ".join(sorted(e["ports"]))[:120], **m,
@@ -985,6 +1090,10 @@ def matrix_ips(c):
     out.sort(key=lambda x: ({"exposed": 0, "outbound": 1, "unknown": 2, "internal": 3, "external": 4}[x["category"]], x["kind"] != "ip", x["num"]))
     _IPS_CACHE.update(key=key, rows=out)
     return out
+
+
+ASSET_KIND = {"private_public": "Private + public / NAT IP", "private_only": "Private IP only", "public_only": "Public IP only (ours, no private IP)",
+              "external": "Public IP, not ours", "subnet": "Subnet / range", "name": "Host / object name"}
 
 
 def _ips_filter(p, rows):
@@ -1003,9 +1112,11 @@ def _ips_filter(p, rows):
         rows = [r for r in rows if r["category"] == "unknown"]
     q = (p.get("q") or "").strip().lower()
     if q:
-        rows = [r for r in rows if q in f"{r['address']} {r['name'] or ''} {r['applications']} {r['owners']} {r['sheets']} {r['rule_ids']} {r['lobs'] or ''}".lower()]
+        rows = [r for r in rows if q in f"{r['address']} {r['private_ip']} {r['public_ip']} {r['name'] or ''} {r['applications']} {r['owners']} {r['sheets']} {r['rule_ids']} {r['lobs'] or ''}".lower()]
     if p.get("kind"):
         rows = [r for r in rows if r["kind"] in db.multi(p, "kind")]
+    if p.get("asset_kind"):
+        rows = [r for r in rows if r["asset_kind"] in db.multi(p, "asset_kind")]
     return rows
 
 
@@ -1020,11 +1131,12 @@ def comm_ips(request: Request):
     counts = {"exposed": cnt(lambda r: r["category"] == "exposed"), "outbound": cnt(lambda r: r["category"] == "outbound" or ("outbound" in r["roles"] and r["ours"])),
               "public": cnt(lambda r: {"public", "public_src"} & set(r["roles"])),
               "not_inventory": cnt(lambda r: r["ours"] and r["category"] in ("exposed", "outbound") and not r["in_inventory"]),
-              "external": cnt(lambda r: r["category"] == "external"), "unknown": cnt(lambda r: r["category"] == "unknown"), "all": len(allr)}
+              "external": cnt(lambda r: r["category"] == "external"), "unknown": cnt(lambda r: r["category"] == "unknown"), "all": len(allr),
+              **{"kind_" + k: cnt(lambda r, k=k: r["asset_kind"] == k) for k in ASSET_KIND}}
     return {"total": len(rows), "rows": rows[(page - 1) * size: page * size], "counts": counts}
 
 
-IPS_EXPORT = [("address", "Address"), ("kind", "Kind"), ("category", "Category"), ("ours_text", "Ours"), ("why", "Why ours"), ("roles_text", "Roles"),
+IPS_EXPORT = [("private_ip", "Private IP"), ("public_ip", "Public / NAT IP"), ("asset_kind_text", "Asset type"), ("address", "Address"), ("kind", "Kind"), ("category", "Category"), ("ours_text", "Ours"), ("why", "Why ours"), ("roles_text", "Roles"),
               ("name", "Matched asset"), ("lobs", "LOB"), ("inv_text", "In inventory"), ("edr_text", "EDR"), ("assets", "Known assets inside"),
               ("applications", "Application"), ("owners", "Owner"), ("ports", "Ports"), ("rules", "Rows"), ("rule_ids", "Rule / row IDs"), ("sheets", "Workbook › sheet")]
 
@@ -1038,7 +1150,7 @@ def comm_ips_export(request: Request):
         r["roles_text"] = ", ".join(r["roles"])
         r["inv_text"] = ("Yes" if r["in_inventory"] else "No") if r["kind"] != "subnet" else f"{r['in_inventory']} of {r['assets']} known"
         r["edr_text"] = r["edr_status"] or (f"{r['in_edr']} with EDR" if r["kind"] == "subnet" else "")
-    return xlsx_response([("Matrix IPs", IPS_EXPORT, rows)], "matrix_ip_register")
+    return xlsx_response([("Matrix assets", IPS_EXPORT, rows)], "matrix_asset_register")
 
 
 

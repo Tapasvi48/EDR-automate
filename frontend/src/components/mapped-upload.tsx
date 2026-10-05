@@ -11,7 +11,7 @@ import { Button, Callout, Field, Input, Modal, Select, Spinner } from "./ui";
 import { SimpleTable } from "./data-table";
 import { Mono, SeverityBadge } from "./badges";
 
-type Kind = "vulns" | "edr" | "niam" | "sod" | "comm" | "ndr";
+type Kind = "vulns" | "edr" | "niam" | "sod" | "comm" | "ndr" | "vapub";
 const TEXT: Record<Kind, { title: string; drop: string; help: React.ReactNode; commit: string }> = {
   vulns: {
     title: "Upload vulnerability scan",
@@ -43,6 +43,12 @@ const TEXT: Record<Kind, { title: string; drop: string; help: React.ReactNode; c
     help: <>The <b>complete</b> matrix (it replaces the current one). Needed: Rule ID, Source IP / Subnet and Destination IP / Subnet (IP, CIDR, range or list); Direction, zones, ISP link, firewall, destination NAT (public) IP, protocol, ports and action are used when present. Allow rules from Internet / ISP mark their destinations <b>internet-exposed</b> on those ports.</>,
     commit: "Load matrix",
   },
+  vapub: {
+    title: "Upload VA public inventory",
+    drop: "Drop the VA public inventory sheet here",
+    help: <>The sheet of publicly reachable hosts: <b>LOB, Node Type, Domain, Application, Public IP, Subnet IP belongs to, Private IP, P2P or Public, Firewall or ISP, Firewall/Gateway IP, DMZ (Yes / No), Bharti Owner Details, MS Partner, MS Partner SPOC, NIAM Integration</b>. It replaces the previous sheet. Every row is checked against the LOB inventory (private IP, or public IP when there is none) and the communication matrix; differences show under Vulnerabilities › VA public inventory and on Internet exposed, where every row is listed as publicly exposed.</>,
+    commit: "Load VA public inventory",
+  },
   ndr: {
     title: "Upload Seceon NDR alerts",
     drop: "Drop a Seceon aiXDR / OTM alert export here",
@@ -50,8 +56,8 @@ const TEXT: Record<Kind, { title: string; drop: string; help: React.ReactNode; c
     commit: "Load alerts",
   },
 };
-const BASE: Record<Kind, string> = { vulns: "/api/vulns", edr: "/api/edr-import", niam: "/api/niam", sod: "/api/sod", comm: "/api/comm", ndr: "/api/ndr" };
-const GENERIC = (k: Kind) => k === "sod" || k === "comm" || k === "ndr";
+const BASE: Record<Kind, string> = { vulns: "/api/vulns", edr: "/api/edr-import", niam: "/api/niam", sod: "/api/sod", comm: "/api/comm", ndr: "/api/ndr", vapub: "/api/vapub" };
+const GENERIC = (k: Kind) => k === "sod" || k === "comm" || k === "ndr" || k === "vapub";
 
 export function MappedUpload({ kind, open, onOpenChange, lobId }: { kind: Kind; open: boolean; onOpenChange: (v: boolean) => void; lobId?: number }) {
   const qc = useQueryClient();
@@ -147,7 +153,7 @@ export function MappedUpload({ kind, open, onOpenChange, lobId }: { kind: Kind; 
                 <Select className="max-w-none" value={lob} onChange={(v) => { setLob(v); setPreview(null); }} placeholder="Choose a LOB…" options={(meta?.lobs || []).map((l) => ({ value: l.id, label: l.name }))} />
               </Field>
             )}
-            <Field label="Note (optional)"><Input value={note} onChange={(e) => setNote(e.target.value)} placeholder={kind === "vulns" ? "e.g. Monthly Nessus scan – Sep" : kind === "niam" ? "e.g. NIAM export 25 Sep" : kind === "sod" ? "e.g. SOD register Q3" : kind === "comm" ? "e.g. Matrix after CR-2026-1102" : kind === "ndr" ? "e.g. Seceon alerts week 39" : "e.g. Export from 2025 console"} /></Field>
+            <Field label="Note (optional)"><Input value={note} onChange={(e) => setNote(e.target.value)} placeholder={kind === "vulns" ? "e.g. Monthly Nessus scan – Sep" : kind === "niam" ? "e.g. NIAM export 25 Sep" : kind === "sod" ? "e.g. SOD register Q3" : kind === "comm" ? "e.g. Matrix after CR-2026-1102" : kind === "ndr" ? "e.g. Seceon alerts week 39" : kind === "vapub" ? "e.g. VA public inventory Oct" : "e.g. Export from 2025 console"} /></Field>
           </div>
           {!parsed ? (
             <div onClick={() => fileRef.current?.click()} onDragOver={(e) => { e.preventDefault(); setDrag(true); }} onDragLeave={() => setDrag(false)}
