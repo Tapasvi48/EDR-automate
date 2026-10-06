@@ -3,7 +3,7 @@ import * as React from "react";
 import Link from "next/link";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Activity, AlertTriangle, Database, FileText, Gauge, Radio, RefreshCw, Server, Settings2, ShieldAlert, Siren, Unplug } from "lucide-react";
+import { Activity, AlertTriangle, Check, ChevronDown, Code2, Copy, Database, FileText, Gauge, Radio, RefreshCw, Server, Settings2, ShieldAlert, Siren, Unplug } from "lucide-react";
 import { api } from "@/lib/api";
 import { useUrlState } from "@/lib/hooks";
 import { fmtDt, fmtN, fmtRel } from "@/lib/format";
@@ -303,6 +303,7 @@ function SyncTab({ st, sync }: { st: any; sync: (full?: boolean) => void }) {
     <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_380px]">
       <div className="space-y-4">
         <SyncProgress status={st} />
+        <QueryPlan running={st.running} />
         <Card>
           <CardHeader title="Sync history" />
           <SimpleTable rows={st.runs} maxHeight="40vh" columns={[{ key: "started_at", label: "Started", render: (r: any) => fmtDt(r.started_at) },
@@ -321,7 +322,7 @@ function SyncTab({ st, sync }: { st: any; sync: (full?: boolean) => void }) {
           </div>
         </Card>
         <Card className="p-4 text-[12.5px]">
-          <div className="mb-2 font-semibold">What each sync reads</div>
+          <div className="mb-2 font-semibold">How often each step reads Splunk</div>
           <ul className="space-y-1 text-fg-2">
             {st.schedule.map((x: any) => <li key={x.key} className="flex justify-between gap-2"><span>{x.label}</span><span className="text-muted">{x.every_minutes ? `once every ${x.every_minutes / 60} h` : "every sync"}</span></li>)}
           </ul>
@@ -330,6 +331,76 @@ function SyncTab({ st, sync }: { st: any; sync: (full?: boolean) => void }) {
             <Button onClick={() => sync(true)} disabled={st.running}>Full refresh</Button></div>
         </Card>
       </div>
+    </div>
+  );
+}
+
+/** The exact Splunk searches the next sync (or a full refresh) runs, step by step, with time range and whether the step is due. */
+function QueryPlan({ running }: { running: boolean }) {
+  const [full, setFull] = React.useState(false);
+  const [open, setOpen] = React.useState<Record<string, boolean>>({});
+  const { data } = useQuery({ queryKey: ["splunk-plan", full, running], queryFn: () => api<any>(`/api/splunk/sync/plan?full=${full}`) });
+  const allOpen = data?.steps?.every((x: any) => open[x.key]);
+  return (
+    <Card>
+      <CardHeader title={<span className="flex items-center gap-2"><Code2 className="size-4 text-accent" /> Queries this sync runs</span>}
+        hint={data ? `Splunk ${data.endpoint}${data.simulated ? " · sample data: simulated, nothing is sent" : data.url ? ` · ${data.url}` : ""}` : undefined}
+        right={<div className="ml-auto flex items-center gap-2">
+          <div className="flex rounded-lg border border-border p-0.5 text-[12px]">
+            {[[false, "Next sync"], [true, "Full refresh"]].map(([v, l]) => (
+              <button key={String(v)} onClick={() => setFull(v as boolean)}
+                className={cn("rounded-md px-2.5 py-1 font-medium transition", full === v ? "bg-accent text-white" : "text-fg-2 hover:text-fg")}>{l as string}</button>))}
+          </div>
+          <Button size="sm" onClick={() => setOpen(allOpen ? {} : Object.fromEntries((data?.steps || []).map((x: any) => [x.key, true])))}>{allOpen ? "Collapse all" : "Expand all"}</Button>
+        </div>} />
+      {!data ? <Loading /> : (
+        <div className="divide-y divide-border">
+          {data.steps.map((x: any, i: number) => (
+            <div key={x.key} className={cn(!x.due && "opacity-60")}>
+              <button onClick={() => setOpen((o) => ({ ...o, [x.key]: !o[x.key] }))} className="flex w-full items-center gap-3 px-4 py-2.5 text-left hover:bg-surface-2">
+                <span className="grid size-6 shrink-0 place-items-center rounded-full bg-surface-2 text-[11px] font-semibold text-fg-2">{i + 1}</span>
+                <span className="min-w-0 flex-1">
+                  <span className="block text-[13px] font-medium">{x.label}</span>
+                  <span className="block text-[11.5px] text-muted">
+                    {x.each_sync ? "every sync" : `once every ${x.every_minutes / 60} h`}
+                    {x.last_ok && <> · last ok {fmtRel(x.last_ok)}</>}
+                    {x.optional && <> · optional (skipped if the token may not read it)</>}
+                  </span>
+                </span>
+                <Badge tone={x.due ? "info" : "neutral"}>{x.due ? "will run" : "skipped — fresh"}</Badge>
+                <span className="w-16 text-right text-[11.5px] text-muted">{x.queries.length ? `${x.queries.length} search${x.queries.length > 1 ? "es" : ""}` : "local"}</span>
+                <ChevronDown className={cn("size-4 text-muted transition", open[x.key] && "rotate-180")} />
+              </button>
+              {open[x.key] && (
+                <div className="space-y-2 px-4 pb-3 sm:pl-[52px]">
+                  {x.note && <p className="text-[12px] text-fg-2">{x.note}</p>}
+                  {x.queries.map((q: any) => <QueryBlock key={q.name} q={q} />)}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {data && <p className="border-t border-border px-4 py-2 text-[11.5px] text-muted">Index filter from Integrations → Splunk: <code className="text-fg-2">{data.index_filter}</code>.
+        Searches use the export endpoint, so results stream and large result sets never sit in memory.</p>}
+    </Card>
+  );
+}
+
+function QueryBlock({ q }: { q: any }) {
+  const [copied, setCopied] = React.useState(false);
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(q.query); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { toast.error("Copy failed"); }
+  };
+  return (
+    <div className="rounded-xl border border-border bg-surface-2/60">
+      <div className="flex items-center gap-2 border-b border-border px-3 py-1.5 text-[11.5px]">
+        <span className="font-medium text-fg-2">{q.name}</span>
+        {q.fallback && <Badge tone="neutral">fallback</Badge>}
+        <span className="ml-auto text-muted">earliest <code className="text-fg-2">{q.earliest}</code> · latest <code className="text-fg-2">{q.latest}</code></span>
+        <button onClick={copy} title="Copy SPL" className="rounded p-1 text-muted hover:bg-surface hover:text-fg">{copied ? <Check className="size-3.5 text-good" /> : <Copy className="size-3.5" />}</button>
+      </div>
+      <pre className="overflow-x-auto whitespace-pre-wrap break-all px-3 py-2 font-mono text-[12px] leading-relaxed text-fg">{q.query}</pre>
     </div>
   );
 }

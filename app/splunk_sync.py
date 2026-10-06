@@ -128,6 +128,66 @@ def _idx(c):
     return i if "index" in i else f"index={i}"
 
 
+# ------------------------------------------------------------------ the searches each step runs (shown in Sync → Queries)
+def _eps_window(c, full):
+    with db.get_conn() as d:
+        ensure(d)
+        last = d.execute("SELECT MAX(hour) FROM splunk_eps").fetchone()[0]
+    start = now().replace(minute=0, second=0, microsecond=0) - timedelta(days=7)
+    if last and not full:
+        start = max(start, datetime.strptime(last, ISO).replace(tzinfo=timezone.utc) - timedelta(hours=1))
+    return start, now().replace(minute=0, second=0, microsecond=0)
+
+
+def _notable_window(c, full):
+    last = c["last"].get("notables_at")
+    redo = full or not c["last"].get("notables_full") or c["last"]["notables_full"] < iso(now() - timedelta(days=1))
+    earliest = iso(now() - timedelta(days=7)) if (redo or not last) else iso(datetime.strptime(last, ISO).replace(tzinfo=timezone.utc) - timedelta(minutes=15))
+    return earliest, redo
+
+
+def queries(key, c, full=False):
+    """The Splunk searches of one step: [{name, query, earliest, latest}]. The steps run exactly these."""
+    ix = _idx(c)
+    if key == "connect":
+        return [{"name": "server info", "query": "| rest /services/server/info splunk_server=local | fields serverName version", "earliest": "-1m", "latest": "now"}]
+    if key == "hosts":
+        return [{"name": "hosts 24 h", "query": f"| tstats latest(_time) AS last earliest(_time) AS first count WHERE {ix} BY host",
+                 "earliest": "-24h", "latest": "now"}]
+    if key == "inventory":
+        return [{"name": "host × index × sourcetype, 7 days",
+                 "query": f"| tstats latest(_time) AS last earliest(_time) AS first count WHERE {ix} BY host index sourcetype", "earliest": "-7d", "latest": "now"}]
+    if key == "eps":
+        start, end = _eps_window(c, full)
+        return [{"name": "hourly events per index", "query": f"| tstats count WHERE {ix} BY _time span=1h index", "earliest": iso(start), "latest": iso(end)}]
+    if key == "notables":
+        earliest, _ = _notable_window(c, full)
+        return [{"name": "ES notables (notable macro)",
+                 "query": "`notable` | eval t=strftime(_time, \"%Y-%m-%dT%H:%M:%SZ\") | fields event_id t rule_name urgency security_domain src dest user host "
+                          "status_label owner", "earliest": earliest, "latest": "now"},
+                {"name": "fallback when ES is not installed", "query": f"search index={c['notable_index']} | eval t=strftime(_time, \"%Y-%m-%dT%H:%M:%SZ\")",
+                 "earliest": earliest, "latest": "now", "fallback": True}]
+    if key == "indexes":
+        return [{"name": "index list", "query": "| rest /services/data/indexes count=0 | fields title currentDBSizeMB totalEventCount maxTime minTime "
+                                                "frozenTimePeriodInSecs disabled", "earliest": "-1m", "latest": "now"}]
+    if key == "forwarders":
+        return [{"name": "forwarder connections", "query": "index=_internal sourcetype=splunkd group=tcpin_connections | stats latest(_time) AS last "
+                 "latest(version) AS version latest(os) AS os latest(fwdType) AS fwdType BY hostname sourceIp", "earliest": "-24h", "latest": "now"}]
+    if key == "license":
+        days = 30 if full or not c["last"].get("license_at") else 3
+        return [{"name": f"license GB per index per day ({days} d)", "query": "index=_internal source=*license_usage.log* type=Usage | bin _time span=1d "
+                 "| stats sum(b) AS b BY _time idx | eval day=strftime(_time, \"%Y-%m-%d\")", "earliest": f"-{days}d@d", "latest": "@d"}]
+    return []  # coverage: local join, no Splunk search
+
+
+LOCAL_NOTE = {"coverage": "No Splunk search — joins the stored Splunk hosts to the asset registry (IP, host name, FQDN, CrowdStrike connection IP)."}
+
+
+def _run(c, key, full, n=0):
+    q = queries(key, c, full)[n]
+    return spl(c, q["query"], q["earliest"], q["latest"])
+
+
 # ------------------------------------------------------------------ sample data (demo)
 DEMO_SOURCES = [("wineventlog", "WinEventLog:Security", 0.55), ("wineventlog", "WinEventLog:System", 0.2), ("linux_secure", "linux_secure", 0.45),
                 ("os", "syslog", 0.3), ("firewall", "pan:traffic", 0.05), ("crowdstrike", "CrowdStrike:Event:Streams:JSON", 0.35),
@@ -170,7 +230,7 @@ def demo_hosts(window_h):
 def step_connect(c, full, prog):
     if config.DEMO and not configured():
         return "Sample data: simulated Splunk Enterprise 9.3 with Enterprise Security"
-    res = list(spl(c, "| rest /services/server/info splunk_server=local | fields serverName version", "-1m"))
+    res = list(_run(c, "connect", full))
     info = res[0] if res else {}
     return f"Connected to {info.get('serverName', 'Splunk')} {info.get('version', '')}".strip()
 
@@ -183,9 +243,8 @@ def step_hosts(c, full, prog):
         rows = [(h["host"], db.norm_hostname(h["host"]), iso(h["first"]), iso(h["last"]), h["count"]) for h in demo_hosts(24)
                 if h["last"] > now() - timedelta(hours=24)]
     else:
-        q = f"| tstats latest(_time) AS last earliest(_time) AS first count WHERE {_idx(c)} BY host"
         rows = []
-        for i, r in enumerate(spl(c, q, "-24h")):
+        for i, r in enumerate(_run(c, "hosts", full)):
             rows.append((r.get("host"), db.norm_hostname(r.get("host")), _ts(r.get("first")), _ts(r.get("last")), int(float(r.get("count") or 0))))
             if i % 20000 == 0:
                 prog(f"{i:,} hosts read")
@@ -212,8 +271,7 @@ def step_inventory(c, full, prog):
                 s[1].add(h["host"])
                 s[2], s[3] = min(s[2], iso(h["first"])), max(s[3], iso(h["last"]))
     else:
-        q = f"| tstats latest(_time) AS last earliest(_time) AS first count WHERE {_idx(c)} BY host index sourcetype"
-        for i, r in enumerate(spl(c, q, "-7d")):
+        for i, r in enumerate(_run(c, "inventory", full)):
             host, idx, st, n = r.get("host"), r.get("index"), r.get("sourcetype"), int(float(r.get("count") or 0))
             first, last = _ts(r.get("first")), _ts(r.get("last"))
             h = per_host.setdefault(host, [first, last, 0, set(), set()])
@@ -243,13 +301,7 @@ def step_inventory(c, full, prog):
 
 def step_eps(c, full, prog):
     """Hourly events per index, from the newest stored hour on (14 days kept)."""
-    with db.get_conn() as d:
-        ensure(d)
-        last = d.execute("SELECT MAX(hour) FROM splunk_eps").fetchone()[0]
-    start = now().replace(minute=0, second=0, microsecond=0) - timedelta(days=7)
-    if last and not full:
-        start = max(start, datetime.strptime(last, ISO).replace(tzinfo=timezone.utc) - timedelta(hours=1))
-    end = now().replace(minute=0, second=0, microsecond=0)
+    start, end = _eps_window(c, full)
     rows = []
     if config.DEMO and not configured():
         h = start
@@ -260,8 +312,7 @@ def step_eps(c, full, prog):
                 rows.append((idx, iso(h), int(base * 3600 * max(0.15, diurnal) * spike * _rng(idx, h.day).uniform(0.9, 1.1))))
             h += timedelta(hours=1)
     else:
-        q = f"| tstats count WHERE {_idx(c)} BY _time span=1h index"
-        for r in spl(c, q, iso(start), iso(end)):
+        for r in _run(c, "eps", full):
             rows.append((r.get("index"), _ts(r.get("_time")) or r.get("_time"), int(float(r.get("count") or 0))))
     with db.get_conn() as d:
         d.executemany("INSERT OR REPLACE INTO splunk_eps(idx, hour, events) VALUES (?,?,?)", rows)
@@ -279,9 +330,7 @@ DEMO_RULES = [("Brute Force Access Behavior Detected", "high", "access"), ("Exce
 
 def step_notables(c, full, prog):
     """ES notables since the last fetch; once a day the last 7 days again, so status / owner changes made in ES are picked up."""
-    last = c["last"].get("notables_at")
-    redo = full or not c["last"].get("notables_full") or c["last"]["notables_full"] < iso(now() - timedelta(days=1))
-    earliest = iso(now() - timedelta(days=7)) if (redo or not last) else iso(datetime.strptime(last, ISO).replace(tzinfo=timezone.utc) - timedelta(minutes=15))
+    earliest, redo = _notable_window(c, full)
     rows, t = [], iso(now())
     if config.DEMO and not configured():
         hosts = [h["host"] for h in demo_hosts(24)][:400]
@@ -298,16 +347,14 @@ def step_notables(c, full, prog):
                          host, r.choice(["svc_backup", "j.smith", "administrator", "", ""]), host, status,
                          r.choice(["Priya Sharma", "Arjun Mehta", "unassigned"]) if status != "New" else "unassigned"))
     else:
-        q = ("`notable` | eval t=strftime(_time, \"%Y-%m-%dT%H:%M:%SZ\") | fields event_id t rule_name urgency security_domain src dest user host "
-             "status_label owner")
         try:
-            it = spl(c, q, earliest)
+            it = _run(c, "notables", full)
             first = next(it, None)
             res = ([first] if first else []) + list(it)
         except ValueError as e:  # no `notable` macro (no ES): plain index
             if "notable" not in str(e).lower():
                 raise
-            res = list(spl(c, f"search index={c['notable_index']} | eval t=strftime(_time, \"%Y-%m-%dT%H:%M:%SZ\")", earliest))
+            res = list(_run(c, "notables", full, 1))
         for r in res:
             eid = r.get("event_id") or hashlib.md5(json.dumps(r, sort_keys=True).encode()).hexdigest()
             rows.append((eid, r.get("t"), r.get("rule_name") or r.get("search_name"), str(r.get("urgency") or "").lower(), r.get("security_domain"),
@@ -335,8 +382,7 @@ def step_indexes(c, full, prog):
         res.append({"title": "legacy_app", "currentDBSizeMB": 1200, "totalEventCount": 9_100_000, "maxTime": iso(now() - timedelta(days=9)),
                     "minTime": iso(now() - timedelta(days=300)), "frozenTimePeriodInSecs": 86400 * 180, "disabled": "0"})
     else:
-        res = list(spl(c, "| rest /services/data/indexes count=0 | fields title currentDBSizeMB totalEventCount maxTime minTime "
-                          "frozenTimePeriodInSecs disabled", "-1m"))
+        res = list(_run(c, "indexes", full))
     rows = [(r.get("title"), float(r.get("currentDBSizeMB") or 0), int(float(r.get("totalEventCount") or 0)), r.get("maxTime"), r.get("minTime"),
              round(float(r.get("frozenTimePeriodInSecs") or 0) / 86400, 1), 1 if str(r.get("disabled")) in ("1", "true") else 0, t)
             for r in res if r.get("title") and not str(r.get("title")).startswith("_")]
@@ -356,8 +402,7 @@ def step_forwarders(c, full, prog):
                 res.append({"hostname": h["host"], "sourceIp": "", "version": r.choice(["9.3.1", "9.2.2", "9.1.4", "8.2.12"]),
                             "os": r.choice(["Windows", "Linux"]), "fwdType": "uf", "last": h["last"].timestamp()})
     else:
-        res = list(spl(c, "index=_internal sourcetype=splunkd group=tcpin_connections | stats latest(_time) AS last latest(version) AS version "
-                          "latest(os) AS os latest(fwdType) AS fwdType BY hostname sourceIp", "-24h"))
+        res = list(_run(c, "forwarders", full))
     rows = [(r.get("hostname"), r.get("sourceIp") or "", r.get("version"), r.get("os"), r.get("fwdType"), _ts(r.get("last"))) for r in res if r.get("hostname")]
     with db.get_conn() as d:
         ensure(d)
@@ -375,9 +420,7 @@ def step_license(c, full, prog):
             for idx, eps in DEMO_EPS.items():
                 rows.append((day, idx, round(eps * 86400 * 450 / 1e9 * _rng(idx, day).uniform(0.85, 1.15), 2)))
     else:
-        q = ("index=_internal source=*license_usage.log* type=Usage | bin _time span=1d | stats sum(b) AS b BY _time idx "
-             "| eval day=strftime(_time, \"%Y-%m-%d\")")
-        for r in spl(c, q, f"-{days}d@d", "@d"):
+        for r in _run(c, "license", full):
             rows.append((r.get("day"), r.get("idx"), round(float(r.get("b") or 0) / 1024 ** 3, 3)))
     with db.get_conn() as d:
         ensure(d)
@@ -464,7 +507,7 @@ def _worker(full, trigger):
             _set(key, status="skipped", detail=f"fresh (last {c['last'].get(key + '_ok', '')[:16].replace('T', ' ')}); every {interval // 60} h")
             continue
         t0 = time.time()
-        _set(key, status="running", started=iso(now()))
+        _set(key, status="running", started=iso(now()), queries=[q["query"] for q in queries(key, c, full) if not q.get("fallback")])
         try:
             detail = FNS[key](c, full, lambda m, k=key: _set(k, detail=m))
             _set(key, status="done", detail=detail, seconds=round(time.time() - t0, 1))
@@ -732,6 +775,22 @@ def splunk_sync_status():
         runs = db.rows(d, "SELECT id, started_at, finished_at, status, full, message FROM splunk_runs ORDER BY id DESC LIMIT 15")
     return {**STATUS, "configured": configured(), "demo": config.DEMO, "minutes": c["minutes"], "silent_hours": c["silent_hours"],
             "last": c["last"], "runs": runs, "schedule": [{"key": k, "label": l, "every_minutes": i} for k, l, i in STEPS]}
+
+
+@router.get("/api/splunk/sync/plan")
+def splunk_sync_plan(full: bool = False):
+    """What the next sync will run: every step, whether it is due, and the exact Splunk searches with their time range."""
+    c = cfg()
+    out = []
+    for key, label, interval in STEPS:
+        due = _due(key, interval, c["last"], full)
+        if key == "coverage":
+            due = full or due
+        out.append({"key": key, "label": label, "every_minutes": interval or c["minutes"], "each_sync": not interval, "due": due,
+                    "last_ok": c["last"].get(f"{key}_ok"), "optional": key in OPTIONAL, "note": LOCAL_NOTE.get(key),
+                    "queries": queries(key, c, full)})
+    return {"full": full, "index_filter": _idx(c), "url": c["url"] or None, "simulated": config.DEMO and not configured(),
+            "endpoint": "/services/search/v2/jobs/export (output_mode=json, streamed)", "steps": out}
 
 
 @router.post("/api/splunk/sync")
