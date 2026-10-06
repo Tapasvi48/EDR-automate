@@ -161,6 +161,9 @@ TEMPLATES = {
                     lambda p, d: {"filter": f"value:*'*{_fql(p['text'])}*'" if p.get("text") else None, "limit": 100},
                     ["type", "value", "action", "severity", "description", "created_on"], ["list our custom IOCs"]),
     # answered from the data fabric (the console's own joined data) — no CrowdStrike call
+    "no_logs": ("Assets not sending logs to Splunk", "assets with a CrowdStrike agent that send no logs to Splunk (SIEM logging gaps), optionally one LOB",
+                {"lob": ("lob", False)}, "fabric:no_logs", lambda p, d: {"lob": p.get("lob")},
+                ["ip", "name", "lobs", "edr_status", "exposed", "last_log"], ["which assets are not sending logs to splunk", "siem logging gaps in Payments"]),
     "exposed_assets": ("Internet-exposed assets", "every internet-exposed asset (any EDR state): public IPs, private IPs behind NAT, ISP-direct; "
                        "optionally one LOB, with / without EDR, or one address type",
                        {"lob": ("lob", False), "edr": ("edrfilter", False), "ip_kind": ("ipkind", False)}, "fabric:exposed_assets",
@@ -335,6 +338,8 @@ TACTIC_WORDS = {"credential dump": "Credential Access", "lsass": "Credential Acc
 
 
 FABRIC_WORDS = [
+    ("no_logs", ("not sending logs", "no logs", "not logging", "logging gap", "siem gap", "siem coverage", "missing logs", "stopped logging",
+                 "not in splunk", "silent host")),
     ("asset_timeline", ("timeline", "history of", "what happened on", "what happened to")),
     ("asset_owner", ("who owns", "owner of", "which lob is", "belongs to", "who is responsible")),
     ("exposed_no_edr", ("exposed without edr", "exposed and no edr", "exposed with no edr", "exposed assets without", "exposed hosts without", "internet exposed without")),
@@ -643,7 +648,7 @@ def facts(tid, rows):
             "hunt_process": ["ComputerName"], "hunt_cmdline": ["ComputerName", "UserName"], "vulns_critical": ["cve.id", "host_info.hostname"],
             "vulns_cve": ["host_info.hostname"], "hosts_offline": ["platform_name"], "hosts_rfm": ["os_version"], "hunt_network_ip": ["ComputerName"],
             "hunt_dns": ["ComputerName"], "hunt_port": ["ComputerName"], "exposed_no_edr": ["lobs", "edr_status"], "coverage_gaps": ["lobs", "node_type", "os"],
-            "kev_exposed": ["cve", "hostname"], "exposed_assets": ["address_type", "edr_status", "lobs"], "riskiest_assets": ["lob", "level"], "asset_timeline": ["kind"]}.get(tid, [])
+            "kev_exposed": ["cve", "hostname"], "exposed_assets": ["address_type", "edr_status", "lobs"], "no_logs": ["lobs", "edr_status"], "riskiest_assets": ["lob", "level"], "asset_timeline": ["kind"]}.get(tid, [])
     for k in keys:
         cnt = {}
         for r in rows:
@@ -748,7 +753,7 @@ EVAL = [
     ("is 45.83.64.1 malicious", "intel_indicator"), ("is the domain badupdate.xyz known bad", "intel_indicator"),
     ("tell me about scattered spider", "intel_actor"), ("show our custom iocs", "custom_iocs"),
     ("any ransomware alerts this week", "detections_tactic"), ("top analysts by alerts handled", "detection_counts"),
-    ("which internet exposed assets have no EDR", "exposed_no_edr"), ("show internet exposed hosts", "exposed_assets"),
+    ("which internet exposed assets have no EDR", "exposed_no_edr"), ("which assets are not sending logs to splunk", "no_logs"), ("show internet exposed hosts", "exposed_assets"),
     ("list all internet facing assets in payments", "exposed_assets"), ("exposed public IPs directly on the ISP link", "exposed_assets"), ("servers missing crowdstrike in payments", "coverage_gaps"),
     ("known exploited vulnerabilities on exposed hosts", "kev_exposed"), ("top 10 riskiest assets", "riskiest_assets"),
     ("security posture per LOB", "lob_posture"), ("who owns 10.20.0.95", "asset_owner"), ("timeline of PAY-SER-085 for the last month", "asset_timeline"),

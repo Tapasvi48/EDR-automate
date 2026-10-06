@@ -70,6 +70,7 @@ export function MappedUpload({ kind, open, onOpenChange, lobId }: { kind: Kind; 
   const [done, setDone] = React.useState<any>(null);
   const [busy, setBusy] = React.useState(false);
   const [drag, setDrag] = React.useState(false);
+  const [progress, setProgress] = React.useState<string | null>(null);
   const [note, setNote] = React.useState("");
   const fileRef = React.useRef<HTMLInputElement>(null);
   const base = BASE[kind];
@@ -94,13 +95,30 @@ export function MappedUpload({ kind, open, onOpenChange, lobId }: { kind: Kind; 
     setPreview(null);
   });
   const body = () => ({ token: parsed.token, sheet: parsed.sheet, header_row: parsed.header_row, mapping, note });
+  /** Big scans run as a background job: poll it, showing how far it got, until it is ready / done. */
+  const pollJob = async (job: string, until: string[]) => {
+    for (;;) {
+      const j = await api<any>(`/api/vulns/jobs/${job}`);
+      if (j.status === "error") { setProgress(null); throw new Error(j.error || "Import failed"); }
+      if (until.includes(j.status)) { setProgress(null); return j; }
+      setProgress(j.status === "staging" ? `Reading the file · ${fmtN(j.read || 0)} rows${j.rate ? ` (${fmtN(j.rate)}/s)` : ""}${j.step ? ` · ${j.step}` : ""}`
+        : `Importing · ${j.step || "starting"}`);
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  };
   const doPreview = () => run(async () => {
-    setPreview(await api(kind === "vulns" ? `/api/lobs/${lob}/vulns/preview` : `${base}/preview`, { method: "POST", body: body() }));
+    const r = await api<any>(kind === "vulns" ? `/api/lobs/${lob}/vulns/preview` : `${base}/preview`, { method: "POST", body: body() });
+    if (kind === "vulns" && r.job && r.rows === undefined) {
+      const j = await pollJob(r.job, ["ready"]);
+      setPreview({ ...j.preview, job: r.job });
+    } else setPreview(r);
   });
   const doCommit = () => run(async () => {
     let uploadedBy = "";
     try { uploadedBy = localStorage.getItem("uploader") || ""; } catch {}
-    const r = await api<any>(kind === "vulns" ? `/api/lobs/${lob}/vulns/commit` : `${base}/commit`, { method: "POST", body: { ...body(), uploaded_by: uploadedBy } });
+    let r = await api<any>(kind === "vulns" ? `/api/lobs/${lob}/vulns/commit` : `${base}/commit`,
+      { method: "POST", body: { ...body(), uploaded_by: uploadedBy, job: kind === "vulns" ? preview?.job : undefined } });
+    if (kind === "vulns" && r.job && r.rows === undefined) r = (await pollJob(r.job, ["done"])).result;
     setDone(r);
     qc.invalidateQueries();
     toast.success(kind === "vulns" ? `Scan imported · ${fmtN(r.new)} new, ${fmtN(r.fixed)} fixed` : kind === "niam" ? `NIAM dump imported · ${fmtN(r.rows)} nodes` : GENERIC(kind) ? r.message : `${fmtN(r.added)} old agents imported`);
@@ -119,6 +137,7 @@ export function MappedUpload({ kind, open, onOpenChange, lobId }: { kind: Kind; 
     <Modal open={open} onOpenChange={onOpenChange} wide title={<span className="flex items-center gap-2">{kind === "vulns" || kind === "sod" ? <ShieldAlert className="size-4" /> : kind === "niam" ? <Radio className="size-4" /> : <FileSpreadsheet className="size-4" />}{t.title}</span>}
       footer={done ? <Button variant="primary" onClick={() => onOpenChange(false)}>Close</Button> : <>
         <Button onClick={() => onOpenChange(false)}>Cancel</Button>
+        {progress && <span className="mr-auto flex items-center gap-2 text-[12px] text-fg-2"><span className="size-2 animate-pulse rounded-full bg-accent" />{progress}</span>}
         {parsed && !preview && <Button variant="primary" loading={busy} disabled={!ok} onClick={doPreview}>Check</Button>}
         {preview && <Button variant="primary" loading={busy} onClick={doCommit}><Check /> {t.commit}</Button>}
       </>}>

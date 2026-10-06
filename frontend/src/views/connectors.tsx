@@ -152,8 +152,10 @@ function SplunkCard() {
         <Badge tone={cfg.url || cfg.demo ? "good" : "warn"}>{cfg.demo ? "Simulated (sample data)" : cfg.url ? "Configured" : "Not connected"}</Badge>
       </div>
       <p className="px-4 pt-1 text-[12.5px] text-fg-2">
-        Asset 360 asks Splunk, live, whether the host logged in the last N days and to which index / sourcetype - a silent host is a blind spot during an incident.
-        It runs one metadata search per view: <code className="text-[11.5px]">| tstats latest(_time) count WHERE (index filter) (host=&lt;name&gt; OR host=&lt;ip&gt;) BY host index sourcetype</code>.
+        The <Link className="text-accent-fg hover:underline" href="/splunk/">Splunk section</Link> syncs hosts and their last event, log sources, EPS, ES notables,
+        indexes, forwarders and license usage on a schedule (incremental: each sync reads only what changed) and matches every Splunk host to an asset —
+        logging coverage per LOB, EDR-but-no-logs, silent hosts. Asset 360 reads the synced data, or asks Splunk live when nothing is synced yet.
+        Optional: read access to <code className="text-[11.5px]">_internal</code> for forwarders and license usage.
       </p>
       <div className="grid gap-3 px-4 py-3 md:grid-cols-2 xl:grid-cols-5">
         <Field label="Splunk REST URL"><Input value={f.url} onChange={(e) => setF({ ...f, url: e.target.value })} placeholder="https://splunk-sh.example.com:8089" /></Field>

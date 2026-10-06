@@ -103,7 +103,10 @@ export function InventoryTable({ lobId, state, set, reset, versions, showLob, lo
 }) {
   const historical = !!state.version_id;
   const [item, setItem] = React.useState<any>(null);
-  const [selected, setSelected] = React.useState<Set<string>>(new Set());
+  const [selected, setSelectedRaw] = React.useState<Set<string>>(new Set());
+  const [allMatch, setAllMatch] = React.useState<{ filter: Record<string, string>; total: number } | null>(null);
+  const setSelected = (s: Set<string>) => { setSelectedRaw(s); setAllMatch(null); };
+  const nSel = allMatch ? allMatch.total : selected.size;
   const [tagOpen, setTagOpen] = React.useState(false);
   const canTag = !!lobId && !historical;  // MSP tagging works inside one LOB, on the current inventory
   const cols = React.useMemo(() => inventoryColumns(!!showLob, historical), [showLob, historical]);
@@ -131,7 +134,8 @@ export function InventoryTable({ lobId, state, set, reset, versions, showLob, lo
   const clearAll = () => set(Object.fromEntries(Object.keys(PILL).map((k) => [k, undefined])));
   return (
     <>
-      {tagOpen && <MspTagDialog lobId={lobId} keys={[...selected]} onClose={(done) => { setTagOpen(false); if (done) setSelected(new Set()); }} />}
+      {tagOpen && <MspTagDialog lobId={lobId} keys={allMatch ? [] : [...selected]} filter={allMatch?.filter} count={nSel}
+        onClose={(done) => { setTagOpen(false); if (done) setSelected(new Set()); }} />}
       <DataTable
         key={historical ? "h" + state.version_id : "cur"}
         endpoint={`/api/lobs/${lobId}/inventory`}
@@ -148,8 +152,10 @@ export function InventoryTable({ lobId, state, set, reset, versions, showLob, lo
         onRowClick={(r) => setItem(r)}
         selected={canTag ? selected : undefined}
         onSelectedChange={canTag ? setSelected : undefined}
+        onSelectAllMatching={canTag ? (filter, total) => { setSelectedRaw(new Set()); setAllMatch({ filter, total }); } : undefined}
+        selectedCount={canTag && allMatch ? allMatch.total : undefined}
         filters={<>
-          {canTag && selected.size > 0 && <Button variant="primary" onClick={() => setTagOpen(true)}><Tag /> Tag MSP ({fmtN(selected.size)})</Button>}
+          {canTag && nSel > 0 && <Button variant="primary" onClick={() => setTagOpen(true)}><Tag /> Tag MSP ({fmtN(nSel)}{allMatch ? " matching" : ""})</Button>}
           <SearchInput className="w-64" value={state.q || ""} onChange={(v) => set({ q: v })} placeholder="IP, node name, remarks… (paste many)" />
           {!historical && (
             <div className="inline-flex rounded-lg border border-border-strong bg-surface p-0.5 shadow-card" role="group" aria-label="EDR status">
@@ -383,7 +389,7 @@ function ColumnSheetMenu({ lobId, state }: { lobId: number; state: Record<string
 
 /** Tag the selected nodes with an MSP (existing, or a new one), or remove the tag. Only nodes without an MSP from the upload take a
  *  tag; the tag stays across later uploads while the uploaded row's MSP is blank (an MSP in the file always wins). */
-function MspTagDialog({ lobId, keys, onClose }: { lobId: number; keys: string[]; onClose: (done: boolean) => void }) {
+function MspTagDialog({ lobId, keys, filter, count, onClose }: { lobId: number; keys: string[]; filter?: Record<string, string>; count: number; onClose: (done: boolean) => void }) {
   const qc = useQueryClient();
   const { data: m } = useMeta();
   const msps = (m?.msps || []).filter((x) => x.lob_id === lobId);
@@ -396,7 +402,7 @@ function MspTagDialog({ lobId, keys, onClose }: { lobId: number; keys: string[];
       let by = "";
       try { by = localStorage.getItem("uploader") || ""; } catch {}
       const r = await api<any>(`/api/lobs/${lobId}/inventory/msp`, { method: "POST",
-        body: clear ? { keys, clear: true, tagged_by: by } : { keys, msp_id: msp && msp !== "new" ? +msp : undefined, msp_name: msp === "new" || !msp ? name : undefined, tagged_by: by } });
+        body: clear ? { keys, filter, clear: true, tagged_by: by } : { keys, filter, msp_id: msp && msp !== "new" ? +msp : undefined, msp_name: msp === "new" || !msp ? name : undefined, tagged_by: by } });
       toast.success(r.message);
       qc.invalidateQueries();
       onClose(true);
@@ -404,7 +410,7 @@ function MspTagDialog({ lobId, keys, onClose }: { lobId: number; keys: string[];
   };
   const ready = (msp && msp !== "new") || name.trim();
   return (
-    <Modal open onOpenChange={(o) => !o && onClose(false)} title={<span className="flex items-center gap-2"><Tag className="size-4" /> Tag {fmtN(keys.length)} node(s) with an MSP</span>}
+    <Modal open onOpenChange={(o) => !o && onClose(false)} title={<span className="flex items-center gap-2"><Tag className="size-4" /> Tag {fmtN(count)} node(s) with an MSP</span>}
       footer={<>
         <Button onClick={() => go(true)} loading={busy}>Remove MSP tag</Button>
         <Button onClick={() => onClose(false)}>Cancel</Button>
@@ -421,7 +427,7 @@ function MspTagDialog({ lobId, keys, onClose }: { lobId: number; keys: string[];
         <div className="rounded-lg bg-surface-2 px-3 py-2 text-[12px] text-fg-2">
           Only nodes <b>without an MSP in the uploaded inventory</b> are tagged (nodes whose MSP comes from the file are skipped and keep it).
           The tag stays when the inventory is uploaded again, as long as the file still leaves the MSP blank. Tip: filter <b>MSP = Unassigned MSP</b>,
-          tick the header box to select every matching node, then tag.
+          then <b>Select all … matching</b> (above the table) to tag every matching node at once — any number of nodes.
         </div>
       </div>
     </Modal>

@@ -18,6 +18,11 @@ export const TYPE: Record<string, { c: string; tag: string; label: string }> = {
   file: { c: "#b45309", tag: "FL", label: "Process / file" }, cve: { c: "#e11d48", tag: "CV", label: "Vulnerability" }, policy: { c: "#16a34a", tag: "PL", label: "Policy" },
   ndr: { c: "#f97316", tag: "ND", label: "NDR alert" }, rule: { c: "#475569", tag: "RL", label: "Matrix rule" }, netblock: { c: "#0f766e", tag: "NB", label: "Network block" },
   ioc: { c: "#be123c", tag: "IO", label: "Checked IOC" },
+  scan: { c: "#9333ea", tag: "SC", label: "VA scan" }, vapub: { c: "#c2410c", tag: "VP", label: "VA public entry" },
+  satellite: { c: "#ca8a04", tag: "ST", label: "Satellite host" }, niam: { c: "#0d9488", tag: "NE", label: "NIAM node" },
+  exception: { c: "#4d7c0f", tag: "EX", label: "Risk exception" }, service: { c: "#b91c1c", tag: "PT", label: "Internet service" },
+  sensor: { c: "#15803d", tag: "SV", label: "Sensor build" },
+  loghost: { c: "#65a30d", tag: "SP", label: "Splunk log host" }, notable: { c: "#e11d48", tag: "NT", label: "Splunk notable" },
 };
 const color = (t: string) => TYPE[t]?.c || "#94a3b8";
 
@@ -26,9 +31,11 @@ const POS: Record<string, [number, number]> = {
   lob: [110, 80], msp: [110, 230], asset: [350, 160], agent: [610, 160], policy: [860, 70], user: [860, 220],
   ip: [350, 360], subnet: [120, 380], rule: [140, 520], netblock: [350, 540], ndr: [560, 560], cve: [560, 380],
   detection: [790, 380], tactic: [960, 300], file: [960, 470], ioc: [790, 540],
+  sensor: [480, 50], service: [230, 290], loghost: [230, 650], notable: [680, 660], scan: [1160, 80], vapub: [1160, 200], satellite: [1160, 320], niam: [1160, 440], exception: [1160, 560],
 };
 
-const SHORT: Record<string, string> = { lob: "LOB", agent: "CS agent", policy: "Policy", user: "User", detection: "Detection", tactic: "MITRE tactic", file: "Process / file",
+const SHORT: Record<string, string> = { loghost: "Splunk host", notable: "ES notable", scan: "VA scan", vapub: "VA public", satellite: "Satellite", niam: "NIAM node", exception: "Exception",
+  service: "Internet port", sensor: "Sensor build", lob: "LOB", agent: "CS agent", policy: "Policy", user: "User", detection: "Detection", tactic: "MITRE tactic", file: "Process / file",
   cve: "CVE", netblock: "Net block", ioc: "IOC", ndr: "NDR alert", rule: "Matrix rule", ip: "IP address", asset: "Asset", subnet: "Subnet", msp: "MSP" };
 
 export function OntologyView({ onPick }: { onPick: (type: string) => void }) {
@@ -40,7 +47,7 @@ export function OntologyView({ onPick }: { onPick: (type: string) => void }) {
   return (
     <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_300px]">
       <div className="relative overflow-hidden rounded-2xl border border-border bg-[radial-gradient(circle_at_30%_20%,var(--violet-soft),transparent_45%),radial-gradient(circle_at_80%_80%,var(--accent-soft),transparent_45%)]">
-        <svg viewBox="0 0 1060 620" className="h-auto w-full">
+        <svg viewBox="0 0 1260 710" className="h-auto w-full">
           <defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" className="fill-muted" /></marker></defs>
           {data.relations.map((r: any, i: number) => {
             const [x1, y1] = POS[r.from] || [0, 0];

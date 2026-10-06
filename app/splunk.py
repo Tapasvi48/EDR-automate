@@ -60,6 +60,9 @@ def asset_splunk(hosts: str = "", ips: str = ""):
     cfg = settings()
     if not terms:
         return {"configured": bool(cfg["url"]) or config.DEMO, "rows": []}
+    stored = _stored_hosts(terms, addrs)
+    if stored is not None:  # synced by the Splunk automation: instant, no live search
+        return stored
     if config.DEMO:  # simulated: most hosts log to Windows / Linux indexes, some are silent
         seed = int(hashlib.md5(",".join(terms).encode()).hexdigest(), 16)
         if seed % 5 == 0:
@@ -86,6 +89,27 @@ def asset_splunk(hosts: str = "", ips: str = ""):
     return {"configured": True, "rows": sorted(rows, key=lambda r: r["last_seen"], reverse=True), "days": cfg["days"]}
 
 
+def _stored_hosts(terms, addrs):
+    """The synced Splunk host table (Splunk section): rows per index for the asset's hosts, or None when nothing is synced."""
+    try:
+        with db.get_conn() as c:
+            if not c.execute("SELECT 1 FROM splunk_hosts LIMIT 1").fetchone():
+                return None
+            ph = ",".join("?" * len(terms))
+            norm = [db.norm_hostname(t) for t in terms]
+            rows = db.rows(c, f"""SELECT host, last_seen, events_7d, events_24h, indexes, sourcetypes FROM splunk_hosts
+                                  WHERE host IN ({ph}) OR host_norm IN ({ph}) OR asset_ip IN ({",".join("?" * max(1, len(addrs)))})""",
+                           terms + norm + (addrs or [""]))
+    except Exception:  # noqa: BLE001
+        return None
+    out = []
+    for r in rows:
+        for i, idx in enumerate([x for x in (r["indexes"] or "").split(", ") if x] or ["(all)"]):
+            out.append({"host": r["host"], "index": idx, "sourcetype": r["sourcetypes"] if i == 0 else "", "count": r["events_7d"] or r["events_24h"] or 0,
+                        "last_seen": r["last_seen"]})
+    return {"configured": True, "rows": sorted(out, key=lambda x: x["last_seen"] or "", reverse=True), "days": 7, "stored": True}
+
+
 NOTABLE_INDEX = "notable"  # Splunk Enterprise Security notable events
 DEMO_RULES = [("Brute force access behaviour detected", "high", "Credential Access"),
               ("Excessive failed logins", "medium", "Credential Access"), ("Unusual outbound traffic volume", "high", "Exfiltration"),
@@ -105,6 +129,19 @@ def asset_splunk_detections(hosts: str = "", ips: str = "", date_from: str = Que
     cfg = settings()
     if not terms:
         return {"configured": bool(cfg["url"]) or config.DEMO, "rows": []}
+    try:  # synced notables (Splunk section) first
+        with db.get_conn() as c:
+            if c.execute("SELECT 1 FROM splunk_notables LIMIT 1").fetchone():
+                ph = ",".join("?" * len(terms))
+                rows = db.rows(c, f"""SELECT created_at, rule name, urgency, domain category, src, dest, host, status FROM splunk_notables
+                                      WHERE (host IN ({ph}) OR dest IN ({ph}) OR src IN ({ph}) OR asset_ip IN ({ph}))
+                                      AND created_at >= ? AND created_at <= ? ORDER BY created_at DESC LIMIT 500""",
+                               terms * 4 + [d_from, d_to + "T23:59:59Z"])
+                for r in rows:
+                    r["severity"] = (r.pop("urgency") or "").title()
+                return {"configured": True, "rows": rows, "stored": True}
+    except Exception:  # noqa: BLE001
+        pass
     if config.DEMO:
         seed = int(hashlib.md5(("n" + ",".join(terms)).encode()).hexdigest(), 16)
         start = datetime.strptime(d_from, "%Y-%m-%d").replace(tzinfo=timezone.utc)

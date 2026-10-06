@@ -42,6 +42,15 @@ TYPES = {
     "rule": ("Matrix rule", "Network rule", "Communication matrix", "an allowed flow (source → destination, ports)"),
     "netblock": ("Network block", "Organization", "WHOIS / RDAP", "who a public IP range is registered to"),
     "ioc": ("Checked IOC", "Indicator", "IOC checks", "an IP / domain / hash checked against threat intel"),
+    "scan": ("VA scan", "Scan", "VA scan uploads", "one vulnerability scan upload of a LOB"),
+    "vapub": ("VA public entry", "Exposure record", "VA public inventory", "a public IP ↔ private IP row handed to the VA team"),
+    "satellite": ("Satellite host", "Device (patching)", "Red Hat Satellite", "a Linux host with its errata and MBSS compliance"),
+    "niam": ("NIAM node", "Network element", "NIAM dump", "a network element (NE ID) and its IP"),
+    "exception": ("Risk exception", "Exception", "SOD uploads", "an accepted vulnerability (IP / subnet / LOB scope, expiry)"),
+    "service": ("Internet service", "Network service", "Internet DB scan", "an open port seen from the internet on a public IP"),
+    "sensor": ("Sensor build", "Software", "CrowdStrike", "a Falcon sensor version and its N / N-1 / N-2 level"),
+    "loghost": ("Splunk log host", "Log source", "Splunk", "a host sending events to Splunk, with its indexes and last event"),
+    "notable": ("Splunk notable", "Detection finding", "Splunk ES", "an Enterprise Security notable event"),
 }
 # (from, to, label, source, count SQL)
 RELS = [
@@ -63,6 +72,16 @@ RELS = [
     ("ndr", "ip", "involves", "Seceon NDR", "SELECT COUNT(*) FROM ndr_alerts"),
     ("ip", "netblock", "registered to", "WHOIS / RDAP", "SELECT COUNT(*) FROM ip_whois WHERE COALESCE(handle,'')<>''"),
     ("ioc", "detection", "seen in", "IOC checks", "SELECT COUNT(*) FROM ioc_checks WHERE verdict IN ('Seen internally','Malicious')"),
+    ("scan", "ip", "scanned", "VA scans", "SELECT COUNT(*) FROM vuln_scan_hosts"),
+    ("scan", "lob", "for LOB", "VA scans", "SELECT COUNT(*) FROM vuln_scans"),
+    ("vapub", "ip", "public / private IP", "VA public inventory", "SELECT COUNT(*) FROM va_public"),
+    ("satellite", "ip", "has IP", "Red Hat Satellite", "SELECT COUNT(*) FROM satellite_hosts WHERE COALESCE(ip,'')<>''"),
+    ("niam", "ip", "has IP", "NIAM dump", "SELECT COUNT(*) FROM niam_nodes WHERE present=1 AND ip<>''"),
+    ("exception", "cve", "accepts", "SOD uploads", "SELECT COALESCE(SUM(matched),0) FROM vuln_exceptions"),
+    ("ip", "service", "open port", "Internet DB scan", "SELECT COUNT(*) FROM passive_results WHERE status='ok' AND ports<>'[]'"),
+    ("loghost", "ip", "logs for", "Splunk", "SELECT COUNT(*) FROM splunk_hosts WHERE asset_ip IS NOT NULL"),
+    ("notable", "ip", "about", "Splunk ES", "SELECT COUNT(*) FROM splunk_notables WHERE asset_ip IS NOT NULL"),
+    ("agent", "sensor", "runs", "CrowdStrike Hosts", "SELECT COUNT(*) FROM hosts WHERE console_state='active' AND COALESCE(agent_version,'')<>''"),
 ]
 COUNTS = {
     "asset": "SELECT COUNT(*) FROM asset_registry", "agent": "SELECT COUNT(*) FROM hosts WHERE console_state='active'",
@@ -73,6 +92,11 @@ COUNTS = {
     "cve": "SELECT COUNT(*) FROM (SELECT cve FROM spotlight_vulns UNION SELECT cve FROM vuln_findings WHERE status='open' AND COALESCE(cve,'')<>'' AND cve NOT LIKE '%,%')",
     "policy": "SELECT COUNT(*) FROM prevention_policies", "ndr": "SELECT COUNT(*) FROM ndr_alerts", "rule": "SELECT COUNT(*) FROM comm_rules",
     "netblock": "SELECT COUNT(*) FROM whois_nets", "ioc": "SELECT COUNT(DISTINCT value) FROM ioc_checks",
+    "scan": "SELECT COUNT(*) FROM vuln_scans", "vapub": "SELECT COUNT(*) FROM va_public", "satellite": "SELECT COUNT(*) FROM satellite_hosts",
+    "niam": "SELECT COUNT(*) FROM niam_nodes WHERE present=1", "exception": "SELECT COUNT(*) FROM vuln_exceptions",
+    "service": "SELECT COUNT(*) FROM passive_results WHERE status='ok' AND ports<>'[]'",
+    "sensor": "SELECT COUNT(DISTINCT agent_version) FROM hosts WHERE console_state='active'",
+    "loghost": "SELECT COUNT(*) FROM splunk_hosts", "notable": "SELECT COUNT(*) FROM splunk_notables",
 }
 _ONT = {"gen": None, "data": None}
 
@@ -188,6 +212,7 @@ def node(nid):  # noqa: C901 - one branch per entity type
             for x in db.rows(c, "SELECT id, name, severity FROM ndr_alerts WHERE src_ip=? OR dst_ip=? ORDER BY created_at DESC LIMIT ?", (a["ip"], a["ip"], LIM)):
                 n.add("ndr", x["id"], x["name"], "involves", "in", _tone_sev(x["severity"]))
             _rules(c, n, [a["ip"]])
+            _ip_sources(c, n, a["ip"])
         elif t == "agent":
             h = db.one(c, "SELECT * FROM hosts WHERE aid=?", (key,))
             if not h:
@@ -211,6 +236,8 @@ def node(nid):  # noqa: C901 - one branch per entity type
                 n.add("detection", d["id"], d["name"], "fired on", "in", _tone_sev(d["severity"]), d["severity"])
             tot = _safe(c, f"SELECT COUNT(*) FROM detections WHERE aid='{key.replace(chr(39), '')}'")
             n.total("fired on", tot, LIM)
+            if h["agent_version"]:
+                n.add("sensor", h["agent_version"], f"sensor {h['agent_version']}", "runs")
             for v in db.rows(c, "SELECT cve, severity, kev FROM spotlight_vulns WHERE aid=? ORDER BY kev DESC, score DESC LIMIT ?", (key, LIM)):
                 n.add("cve", v["cve"], v["cve"], "vulnerable to", tone="crit" if v["kev"] or (v["severity"] or "").upper() == "CRITICAL" else "warn")
         elif t == "ip":
@@ -242,6 +269,7 @@ def node(nid):  # noqa: C901 - one branch per entity type
             if ic:
                 n.add("ioc", key, f"{key} · {ic['verdict']}", "checked as", tone="crit" if ic["verdict"] == "Malicious" else None)
             _rules(c, n, [key])
+            _ip_sources(c, n, key)
         elif t == "subnet":
             try:
                 net = ipaddress.ip_network(key, strict=False)
@@ -369,6 +397,104 @@ def node(nid):  # noqa: C901 - one branch per entity type
             for side in ("src", "dst"):
                 for ip in re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", r[side] or "")[:6]:
                     n.add("ip", ip, ip, "allows flow" if side == "dst" else "from")
+        elif t == "scan":
+            sc = db.one(c, "SELECT s.*, l.name lob FROM vuln_scans s JOIN lobs l ON l.id=s.lob_id WHERE s.id=?", (int(key) if key.isdigit() else -1,))
+            if not sc:
+                raise HTTPException(404, "No such scan")
+            label, href = f"{sc['lob']} scan {(sc['scan_date'] or sc['uploaded_at'] or '')[:10]}", "/vulnerabilities/"
+            props = {"LOB": sc["lob"], "File": sc["filename"], "Scan date": sc["scan_date"], "Uploaded": sc["uploaded_at"], "Findings": sc["rows"],
+                     "Hosts": sc["hosts"], "New": sc["new_findings"], "Fixed": sc["fixed_findings"], "Reopened": sc["reopened"]}
+            n.add("lob", sc["lob"], sc["lob"], "for LOB")
+            for r in db.rows(c, "SELECT ip FROM vuln_scan_hosts WHERE scan_id=? LIMIT ?", (sc["id"], LIM)):
+                n.add("ip", r["ip"], r["ip"], "scanned")
+            n.total("scanned", sc["hosts"] or 0, LIM)
+        elif t == "vapub":
+            v = db.one(c, "SELECT * FROM va_public WHERE id=?", (int(key) if key.isdigit() else -1,))
+            if not v:
+                raise HTTPException(404, "No such VA public row")
+            label, tone, href = f"{v['public_ip'] or '?'} → {v['private_ip'] or 'no private IP'}", "crit", "/vulnerabilities/?section=vapub"
+            props = {"Public IP": v["public_ip"], "Private IP": v["private_ip"], "LOB": v["lob"], "MSP": v["msp"], "Node type": v["node_type"],
+                     "Application": v["application"], "Path": v["path"], "DMZ": v["dmz"], "Owner": v["owner"], "NIAM": v["niam"]}
+            for ip, rel in ((v["public_ip"], "public IP"), (v["private_ip"], "private IP")):
+                for x in db.all_ips(ip or "")[:4]:
+                    n.add("ip", x, x, rel, tone="crit" if rel == "public IP" else None)
+            if v["lob"]:
+                n.add("lob", v["lob"], v["lob"], "owned by")
+            if v["msp"]:
+                n.add("msp", v["msp"], v["msp"], "managed by")
+        elif t == "satellite":
+            sh = db.one(c, "SELECT * FROM satellite_hosts WHERE host_id=?", (int(key) if key.isdigit() else -1,))
+            if not sh:
+                raise HTTPException(404, "No such Satellite host")
+            label, href = sh["name"], "/patches/"
+            tone = "crit" if (sh["installable_security"] or 0) else None
+            props = {"Host": sh["name"], "IP": sh["ip"], "OS": sh["os"], "Last check-in": sh["last_checkin"], "Security errata": sh["errata_security"],
+                     "Installable security": sh["installable_security"], "MBSS policy": sh["compliance_policy"],
+                     "MBSS passed / failed": f"{sh['compliance_passed'] or 0} / {sh['compliance_failed'] or 0}"}
+            if sh["ip"]:
+                n.add("ip", sh["ip"], sh["ip"], "has IP")
+        elif t == "niam":
+            nn = db.one(c, "SELECT * FROM niam_nodes WHERE ne_id=? AND present=1", (key,))
+            if not nn:
+                raise HTTPException(404, "No such NIAM node")
+            label = f"{key} · {nn['host'] or ''}".strip(" ·")
+            props = {"NE ID": key, "Host": nn["host"], "IP": nn["ip"], "LOB": nn["lobs"], "EDR": nn["edr_status"], "In inventory": "yes" if nn["in_inventory"] else "no"}
+            if nn["ip"]:
+                n.add("ip", nn["ip"], nn["ip"], "has IP")
+        elif t == "exception":
+            e = db.one(c, "SELECT * FROM vuln_exceptions WHERE id=?", (int(key) if key.isdigit() else -1,))
+            if not e:
+                raise HTTPException(404, "No such exception")
+            label, href = e["exception_id"] or f"exception {key}", "/exceptions/"
+            props = {"Exception": e["exception_id"], "Scope": f"{e['scope']} {e['target'] or ''}".strip(), "Plugin": e["plugin_id"], "CVE": e["cve"],
+                     "Vulnerability": e["name"], "Valid till": e["valid_till"], "Approved by": e["approved_by"], "Findings accepted": e["matched"]}
+            for cv in re.findall(r"CVE-\d{4}-\d+", e["cve"] or "", re.I)[:6]:
+                n.add("cve", cv.upper(), cv.upper(), "accepts")
+            if e["scope"] == "IP" and e["target"]:
+                n.add("ip", e["target"], e["target"], "covers")
+            if e["scope"] == "LOB" and e["lob"]:
+                n.add("lob", e["lob"], e["lob"], "covers")
+        elif t == "service":
+            ip, _, port = key.rpartition(":")
+            pr = db.one(c, "SELECT * FROM passive_results WHERE ip=?", (ip,))
+            label, tone, href = f"{ip}:{port}", "crit", f"/ip-search/?q={ip}"
+            props = {"IP": ip, "Port": port, "Scanned": (pr or {}).get("scanned_at"), "Known CVEs on the IP": len(db.jloads((pr or {}).get("vulns"), []) or []),
+                     "Tags": ", ".join(db.jloads((pr or {}).get("tags"), []) or [])}
+            n.add("ip", ip, ip, "open port", "in", "crit")
+        elif t == "sensor":
+            hs = db.rows(c, "SELECT aid, hostname, platform_name FROM hosts WHERE console_state='active' AND agent_version=? LIMIT ?", (key, LIM))
+            tot = _safe(c, f"SELECT COUNT(*) FROM hosts WHERE console_state='active' AND agent_version='{key.replace(chr(39), '')}'")
+            b = db.one(c, "SELECT * FROM sensor_builds WHERE sensor_version=? OR build=? LIMIT 1", (key, key)) or {}
+            label, href = f"sensor {key}", "/sensors/"
+            props = {"Version": key, "Level": b.get("tag"), "Stage": b.get("stage"), "Platform": b.get("platform"), "Agents": tot}
+            for h in hs:
+                n.add("agent", h["aid"], h["hostname"] or h["aid"], "runs", "in")
+            n.total("runs", tot, LIM)
+        elif t == "loghost":
+            h = db.one(c, "SELECT * FROM splunk_hosts WHERE host=?", (key,))
+            if not h:
+                raise HTTPException(404, "No such Splunk host")
+            label, href = f"Splunk: {key}", f"/splunk/?tab=hosts&q={key}"
+            props = {"Host": key, "Last event": h["last_seen"], "Events 24 h": h["events_24h"], "Events 7 d": h["events_7d"], "Indexes": h["indexes"],
+                     "Sourcetypes": h["sourcetypes"], "Asset": h["asset_name"] or h["asset_ip"], "LOB": h["lob"]}
+            if h["asset_ip"]:
+                n.add("ip", h["asset_ip"], h["asset_ip"], "logs for")
+            for r in db.rows(c, "SELECT event_id, rule, urgency FROM splunk_notables WHERE host=? ORDER BY created_at DESC LIMIT ?", (key, LIM)):
+                n.add("notable", r["event_id"], r["rule"], "notable", "in", "crit" if r["urgency"] in ("critical", "high") else "warn")
+        elif t == "notable":
+            x = db.one(c, "SELECT * FROM splunk_notables WHERE event_id=?", (key,))
+            if not x:
+                raise HTTPException(404, "No such notable")
+            label, href = x["rule"], "/splunk/?tab=notables"
+            tone = "crit" if x["urgency"] in ("critical", "high") else "warn"
+            props = {"Rule": x["rule"], "Urgency": x["urgency"], "Domain": x["domain"], "When": x["created_at"], "Source": x["src"], "Destination": x["dest"],
+                     "User": x["user"], "Status": x["status"], "Owner": x["owner"]}
+            if x["host"]:
+                n.add("loghost", x["host"], f"Splunk: {x['host']}", "on host")
+            if x["asset_ip"]:
+                n.add("ip", x["asset_ip"], x["asset_ip"], "about")
+            if x["user"]:
+                n.add("user", x["user"], x["user"], "user")
         elif t == "ioc":
             i = db.one(c, "SELECT * FROM ioc_checks WHERE value=? ORDER BY id DESC LIMIT 1", (key,))
             if not i:
@@ -383,6 +509,32 @@ def node(nid):  # noqa: C901 - one branch per entity type
                 n.add("ip", key, key, "is")
     return {"node": {"id": _nid(t, key), "type": t, "label": label, "tone": tone, "href": href, "props": {k: v for k, v in props.items() if v not in (None, "")}},
             "neighbors": n.items, "more": n.more}
+
+
+def _ip_sources(c, n, ip):
+    """What the other sources say about one IP: VA scans, VA public inventory, Satellite, NIAM, ports open to the internet."""
+    if not ip:
+        return
+    for r in db.rows(c, """SELECT s.id, l.name lob, s.scan_date FROM vuln_scan_hosts h JOIN vuln_scans s ON s.id=h.scan_id
+                           JOIN lobs l ON l.id=s.lob_id WHERE h.ip=? ORDER BY s.scan_date DESC LIMIT 3""", (ip,)):
+        n.add("scan", r["id"], f"{r['lob']} scan {(r['scan_date'] or '')[:10]}", "scanned", "in")
+    for r in db.rows(c, "SELECT id, public_ip, private_ip FROM va_public WHERE public_ip LIKE ? OR private_ip LIKE ? LIMIT 3", (f"%{ip}%", f"%{ip}%")):
+        if ip in db.all_ips(r["public_ip"] or "") + db.all_ips(r["private_ip"] or ""):
+            n.add("vapub", r["id"], f"VA public {r['public_ip'] or ''} → {r['private_ip'] or '–'}", "listed in", "in", "crit")
+    for r in db.rows(c, "SELECT host_id, name, installable_security FROM satellite_hosts WHERE ip=? LIMIT 2", (ip,)):
+        n.add("satellite", r["host_id"], r["name"], "patched by", "in", "warn" if r["installable_security"] else None)
+    for r in db.rows(c, "SELECT ne_id FROM niam_nodes WHERE present=1 AND ip=? LIMIT 3", (ip,)):
+        n.add("niam", r["ne_id"], r["ne_id"], "NIAM node", "in")
+    try:
+        for r in db.rows(c, "SELECT host, last_seen, indexes FROM splunk_hosts WHERE asset_ip=? LIMIT 3", (ip,)):
+            n.add("loghost", r["host"], f"Splunk: {r['host']}", "logs to", tone="good" if (r["last_seen"] or "") > db.now_iso()[:10] else "warn")
+        for r in db.rows(c, "SELECT event_id, rule, urgency FROM splunk_notables WHERE asset_ip=? ORDER BY created_at DESC LIMIT 6", (ip,)):
+            n.add("notable", r["event_id"], r["rule"], "notable", "in", "crit" if r["urgency"] in ("critical", "high") else "warn")
+    except Exception:  # noqa: BLE001 - Splunk not synced yet
+        pass
+    pr = db.one(c, "SELECT ports FROM passive_results WHERE ip=? AND status='ok'", (ip,))
+    for p in (db.jloads((pr or {}).get("ports"), []) or [])[:LIM]:
+        n.add("service", f"{ip}:{p}", f"port {p}", "open port", tone="crit")
 
 
 def _rules(c, n, ips):

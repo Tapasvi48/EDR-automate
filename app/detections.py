@@ -66,14 +66,14 @@ def include_info():
 
 def fetch(client, days=30):
     """Alerts of the last `days` days into the detections table. Returns a one-line summary.
-    Once a day the whole window is re-read; the syncs in between only ask for alerts created or updated since the last
-    fetch (status / analyst changes included), which is a small fraction of the calls."""
+    The window is read in full only the first time (or when the window / informational setting changes); every later sync
+    asks only for alerts created or updated since the last fetch (new detections plus status / analyst changes)."""
     now = datetime.now(timezone.utc)
     since = now - timedelta(days=days)
     st = db.get_settings()
     last, last_full = st.get("detections_last_fetch"), st.get("detections_last_full")
     info = (st.get("detections_include_info") or "0") == "1"
-    full = (not last or not last_full or last_full < _iso(now - timedelta(hours=24)) or st.get("detections_days_fetched") != str(days)
+    full = (not last or not last_full or st.get("detections_days_fetched") != str(days)
             or st.get("detections_info_fetched", "0") != ("1" if info else "0"))
     sev = "" if info else "severity:>=20"  # informational (severity < 20 on the Alerts API's 0-100 scale) not fetched
     if full:
@@ -98,7 +98,7 @@ def fetch(client, days=30):
         c.executemany("INSERT OR REPLACE INTO settings(key, value) VALUES (?,?)", list(upd.items()))
     if full:
         return f"{len(rows):,} detections in the last {days} days"
-    return f"{len(rows):,} detections new or updated since the last sync (full {days}-day re-read once a day)"
+    return f"{len(rows):,} detections new or updated since the last sync"
 
 
 @router.get("/api/asset/detections")

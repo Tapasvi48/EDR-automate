@@ -555,9 +555,29 @@ def refresh(c):
     hidden = {r[0] for r in c.execute("SELECT asset_key FROM registry_hidden")}  # deleted by hand on All inventory
     if hidden:
         rows = [r for r in rows if r[0] not in hidden]
-    c.execute("DELETE FROM asset_registry")
-    c.executemany(f"INSERT INTO asset_registry VALUES ({','.join('?' * 39)})", rows)
+    # write only what changed: at lakhs of assets a re-match changes a few rows, and rewriting the whole table (and its
+    # indexes) cost more than computing it
+    old = {r[0]: tuple(r) for r in c.execute("SELECT * FROM asset_registry")}
+    new_keys = {r[0] for r in rows}
+    gone = [(k,) for k in old if k not in new_keys]
+    changed = [r for r in rows if old.get(r[0]) != tuple(r)]
+    if len(changed) + len(gone) > 0.6 * max(1, len(rows)):  # mostly new: one bulk reload is faster
+        c.execute("DELETE FROM asset_registry")
+        c.executemany(f"INSERT INTO asset_registry VALUES ({','.join('?' * 39)})", rows)
+    else:
+        c.executemany("DELETE FROM asset_registry WHERE asset_key=?", gone)
+        c.executemany(f"INSERT OR REPLACE INTO asset_registry VALUES ({','.join('?' * 39)})", changed)
     VERSION[0] += 1
+
+
+def refresh_vuln_counts(c):
+    """After a scan: copy the open-finding counts and last scan date of every scanned IP onto its registry row (one SQL
+    statement, seconds at crores of findings). Returns how many scanned IPs have no registry row yet (they need a rebuild)."""
+    c.execute("""UPDATE asset_registry SET crit=v.crit, high=v.high, med=v.med, low=v.low, last_scan=v.ls, in_scan=1
+                 FROM (SELECT ip, SUM(crit) crit, SUM(high) high, SUM(med) med, SUM(low) low, MAX(last_scanned_at) ls
+                       FROM vuln_assets GROUP BY ip) v WHERE asset_registry.ip=v.ip""")
+    return c.execute("""SELECT COUNT(*) FROM (SELECT DISTINCT ip FROM vuln_assets) v
+                        WHERE NOT EXISTS (SELECT 1 FROM asset_registry r WHERE r.ip=v.ip)""").fetchone()[0]
 
 
 # ------------------------------------------------------------------ queries
@@ -799,7 +819,7 @@ def exposure_shadow():
         def add(ip, why):
             if exposed_by_itself(ip) and not listed(ip) and not is_cgnat(ip) and not indirect(ip):
                 seen.setdefault(ip, set()).add(why)
-        for r in c.execute("SELECT DISTINCT ip FROM vuln_findings"):
+        for r in c.execute("SELECT DISTINCT ip FROM vuln_scan_hosts"):  # scanned IPs, without reading every finding
             add(r["ip"], "VA scan")
         for r in c.execute("SELECT DISTINCT connection_ip ip FROM hosts WHERE console_state='active' AND COALESCE(connection_ip,'')<>''"):
             add(r["ip"], "CrowdStrike connection IP")
@@ -807,7 +827,7 @@ def exposure_shadow():
             for ip in owners:
                 if ip and ranges(ip):
                     add(ip, f"In shadow range {ranges(ip)}")
-        scanned = {r["ip"] for r in c.execute("SELECT DISTINCT ip FROM vuln_findings")}
+        scanned = {r["ip"] for r in c.execute("SELECT DISTINCT ip FROM vuln_scan_hosts")}
         for ip in sorted(seen, key=lambda x: db.ip_to_num(x) or 0):
             o = owners.get(ip) or {}
             inner = [x for x in (o.get("nat_of") or "").split(", ") if x]

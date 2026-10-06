@@ -38,6 +38,7 @@ export default function SettingsPage() {
               <Stat label="Schedule" value={nextSyncLabel(st)} />
             </div>
             <IntervalPicker value={String(st.interval_minutes)} />
+            <PostureRefresh />
             {st.steps?.length ? <SyncProgress status={st} /> : (
               <div className="rounded-xl border border-dashed border-border-strong p-6 text-center text-[13px] text-muted">
                 {st.configured ? "Live progress of the next sync appears here." : "Connect CrowdStrike to start the first sync."}
@@ -160,6 +161,31 @@ function IntervalPicker({ value }: { value: string }) {
     <Field label="Automatic sync" hint="Runs in the background while the app is running; a missed sync starts right after restart.">
       <Select className="max-w-none" value={value} onChange={save} options={INTERVALS} />
     </Field>
+  );
+}
+
+/** What each sync reads: hosts every sync, detections as a delta, slow-changing data once a month (or on demand). */
+function PostureRefresh() {
+  const qc = useQueryClient();
+  const { data: s } = useQuery({ queryKey: ["settings-all"], queryFn: () => api<any>("/api/settings") });
+  const [busy, setBusy] = React.useState(false);
+  const days = String(s?.posture_refresh_days || "30");
+  const saveDays = async (v: string) => { await api("/api/settings", { method: "PUT", body: { posture_refresh_days: v } }); qc.invalidateQueries({ queryKey: ["settings-all"] }); toast.success("Saved"); };
+  const now = async () => { setBusy(true); try { const r = await api<any>("/api/sync/refresh-posture", { method: "POST" }); r.ok ? toast.success(r.message) : toast.message(r.message); qc.invalidateQueries({ queryKey: ["sync-status"] }); } finally { setBusy(false); } };
+  return (
+    <div className="rounded-xl border border-border p-3 text-[12.5px]">
+      <div className="mb-2 font-semibold">What each sync reads</div>
+      <div className="grid gap-1 text-fg-2 sm:grid-cols-3">
+        <span><b className="text-fg">Hosts</b> · every sync (changes since the last one, full read daily)</span>
+        <span><b className="text-fg">Detections</b> · only new / updated since the last sync</span>
+        <span><b className="text-fg">Policies · sensor OS support · Spotlight</b> · every {days} days{s?.posture_last_fetch ? ` (last ${fmtDt(s.posture_last_fetch).slice(0, 10)})` : ""}</span>
+      </div>
+      <div className="mt-2.5 flex flex-wrap items-center gap-2">
+        <span className="text-muted">Refresh policies, sensor OS and Spotlight every</span>
+        <Select className="w-32" value={days} onChange={saveDays} options={[["7", "7 days"], ["14", "14 days"], ["30", "30 days"], ["60", "60 days"], ["90", "90 days"]].map(([v, l]) => ({ value: v, label: l }))} />
+        <Button size="sm" loading={busy} onClick={now}><RefreshCw /> Refresh now</Button>
+      </div>
+    </div>
   );
 }
 

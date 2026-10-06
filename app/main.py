@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import asset360, commatrix, config, cs_posture, db, detections, satellite, seceon, splunk, falcon, feasibility, sensor_support, filetemplates, sod, inventory, legacy, niam, posture, queries, registry, sync, threats, passive, surface, alerts, intel, spotlight, subnets, whois, falconmcp, ai_hunt, fabric, kb, briefs, ioc, chat, vulns, cql, ontology, cqlhub, learn
+from . import asset360, commatrix, config, cs_posture, db, detections, satellite, seceon, splunk, falcon, feasibility, sensor_support, filetemplates, sod, inventory, legacy, niam, posture, queries, registry, sync, threats, passive, surface, alerts, intel, spotlight, subnets, whois, falconmcp, ai_hunt, fabric, kb, briefs, ioc, chat, vulns, cql, ontology, cqlhub, learn, splunk_sync
 from .exporter import xlsx_response
 from .extra import router as extra_router
 
@@ -50,6 +50,7 @@ async def lifespan(app):
     if not config.DEMO:
         sync.start_scheduler()
     ai_hunt.warmup()  # load the on-prem model now, not on the first question
+    splunk_sync.start_scheduler()
     yield
     falconmcp.shutdown()  # stop the managed falcon-mcp process with the console
 
@@ -448,6 +449,18 @@ def _start_sync(trigger):
         return False
     threading.Thread(target=sync.run_sync, kwargs={"trigger": trigger}, daemon=True).start()
     return True
+
+
+@app.post("/api/sync/refresh-posture")
+def refresh_posture():
+    """Re-read prevention policies, sensor builds / supported OS and Spotlight on the next sync (normally once a month), and
+    start that sync now."""
+    db.set_settings({"posture_force": "1"})
+    if config.DEMO or not falcon.is_configured():
+        return {"ok": False, "message": "Marked: they are re-read on the next sync (not connected to CrowdStrike now)"}
+    if not sync.STATUS["running"]:
+        _start_sync("manual")
+    return {"ok": True, "message": "Re-reading policies, sensor OS support and Spotlight now"}
 
 
 @app.post("/api/sync")
@@ -1239,6 +1252,11 @@ def inventory_tag_msp(lob_id: int, data: dict = Body(...)):
     Only nodes without an MSP from the upload (or already tagged by hand) take a tag; it stays across later uploads while the
     uploaded row's MSP is blank. keys: row keys "lob_id|item_key" (or bare item keys of this LOB)."""
     keys = []
+    if isinstance(data.get("filter"), dict):  # "select all matching": the server picks the rows, so any number works (10 lakh too)
+        flt = {k: str(v) for k, v in data["filter"].items() if k not in ("page", "size", "__all", "sort", "dir")}
+        with db.get_conn() as c:
+            _, frm, where, params, _ = _inventory_query(flt, lob_id)
+            keys = [r[0] for r in c.execute(f"SELECT ic.item_key FROM {frm} {where}", params)]
     for k in data.get("keys") or []:
         lid, _, item = str(k).partition("|")  # table row key "lob_id|item_key" (item keys can contain "|" themselves)
         if not (lid.isdigit() and item):
@@ -1704,7 +1722,7 @@ app.include_router(falconmcp.router)
 app.include_router(ai_hunt.router)
 from . import vapublic  # noqa: E402
 for _r in (fabric.router, kb.router, briefs.router, ioc.router, chat.router, cql.router, ontology.router, cqlhub.router, learn.router,
-           vapublic.router):
+           vapublic.router, splunk_sync.router):
     app.include_router(_r)
 
 FRONTEND = config.BASE_DIR / "frontend" / "out"

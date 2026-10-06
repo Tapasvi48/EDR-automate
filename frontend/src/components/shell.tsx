@@ -27,6 +27,12 @@ const NAV: { section?: string; items: { href: string; label: string; icon: React
     { href: "/falcon-mcp/?tab=fabric", label: "Data fabric", icon: Layers },
     { href: "/falcon-mcp/?tab=kb", label: "Knowledge base", icon: BookOpen },
   ] },
+  { section: "SIEM & logging", items: [
+    { href: "/splunk/", label: "Splunk overview", icon: Database },
+    { href: "/splunk/?tab=coverage", label: "Logging coverage", icon: ShieldAlert },
+    { href: "/splunk/?tab=notables", label: "Splunk detections", icon: Siren },
+    { href: "/splunk/?tab=sync", label: "Splunk sync", icon: RefreshCw },
+  ] },
   { section: "Attack surface", items: [
     { href: "/surface/", label: "Attack surface", icon: Earth },
     { href: "/passive-scan/", label: "Internet DB scan", icon: ScanSearch },

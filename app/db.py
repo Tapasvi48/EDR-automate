@@ -319,7 +319,15 @@ CREATE TABLE IF NOT EXISTS vuln_findings (
     UNIQUE (lob_id, finding_key)
 );
 CREATE INDEX IF NOT EXISTS ix_vf_ip ON vuln_findings(ip);
-CREATE INDEX IF NOT EXISTS ix_vf_lob ON vuln_findings(lob_id, status, sev_rank);
+DROP INDEX IF EXISTS ix_vf_lob;
+-- list order (severity, then IP) served straight from the index, with and without a LOB filter: no sort of crores of rows
+CREATE INDEX IF NOT EXISTS ix_vf_lob2 ON vuln_findings(lob_id, status, sev_rank DESC, ip_num, id);
+CREATE INDEX IF NOT EXISTS ix_vf_order ON vuln_findings(status, sev_rank DESC, ip_num, id);
+-- per LOB / plugin: open finding and host counts (the "top vulnerabilities" panels), rebuilt after each scan
+CREATE TABLE IF NOT EXISTS vuln_plugin_stats (
+    lob_id INTEGER NOT NULL, plugin_id TEXT, name TEXT, severity TEXT, sev_rank INTEGER, hosts INTEGER, findings INTEGER, cve TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_vps_lob ON vuln_plugin_stats(lob_id);
 CREATE INDEX IF NOT EXISTS ix_vf_plugin ON vuln_findings(plugin_id);
 
 -- Last scan that covered each IP of a LOB
@@ -568,6 +576,7 @@ CREATE TABLE IF NOT EXISTS msp_daily (
 # NIAM dump: Host (IP) -> NE ID. Full snapshot per upload; nodes missing from a later dump keep present=0.
 # columns added after the first release: (table, column, type)
 MIGRATIONS = [
+    ("vuln_assets", "exploitable", "INTEGER DEFAULT 0"), ("vuln_assets", "accepted", "INTEGER DEFAULT 0"),
     ("spotlight_vulns", "title", "TEXT"), ("spotlight_vulns", "description", "TEXT"), ("spotlight_vulns", "published", "TEXT"),
     ("spotlight_vulns", "vector", "TEXT"), ("spotlight_vulns", "kev", "INTEGER"), ("spotlight_vulns", "kev_due", "TEXT"),
     ("spotlight_vulns", "vendor_advisory", "TEXT"), ("spotlight_vulns", "refs", "TEXT"), ("spotlight_vulns", "app_vendor", "TEXT"),
@@ -817,7 +826,15 @@ def connect():
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA temp_store=MEMORY")
     conn.execute("PRAGMA cache_size=-64000")
+    conn.execute("PRAGMA mmap_size=4294967296")  # read big tables through the OS page cache (shared by every connection)
     return conn
+
+
+def bulk(conn):
+    """For a connection that reads / writes crores of rows (imports, re-matching): a large page cache so index updates do
+    not thrash (1 crore findings insert ~60x faster than with the default cache)."""
+    conn.execute("PRAGMA cache_size=-786432")  # 768 MB, allocated only as used
+    conn.execute("PRAGMA temp_store=MEMORY")
 
 
 # ------------------------------------------------------------------ data generation (drives the API response cache)
@@ -825,7 +842,7 @@ def connect():
 # cached answer computed under one generation is never served after the data it was built from changed.
 GEN = [0]
 _GEN_LOCK = threading.Lock()
-_GEN_IGNORE = {"sync_log"}  # progress lines written during a sync do not change what any page shows
+_GEN_IGNORE = {"sync_log", "vuln_stage"}  # progress lines written during a sync do not change what any page shows
 _WRITE_ACTIONS = {sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE, sqlite3.SQLITE_DROP_TABLE,
                   sqlite3.SQLITE_CREATE_TABLE, sqlite3.SQLITE_ALTER_TABLE}
 _dirty = set()  # ids of connections that wrote
@@ -841,7 +858,7 @@ def _write_watch(conn):
     cid = id(conn)
 
     def auth(action, arg1, arg2, dbname, source):
-        if action in _WRITE_ACTIONS and dbname in ("main", None) and arg1 not in _GEN_IGNORE and not str(arg1 or "").startswith("sqlite_"):
+        if action in _WRITE_ACTIONS and dbname in ("main", None) and arg1 not in _GEN_IGNORE and not str(arg1 or "").startswith(("sqlite_", "vstage_")):
             _dirty.add(cid)
             bump_gen()
         return sqlite3.SQLITE_OK

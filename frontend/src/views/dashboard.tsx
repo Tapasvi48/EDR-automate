@@ -311,6 +311,31 @@ function SodSection() {
   );
 }
 
+/** SIEM logging at a glance (Splunk section): only once Splunk has been synced. */
+function SiemStrip() {
+  const { data: s } = useQuery({ queryKey: ["splunk-summary"], queryFn: () => api<any>("/api/splunk/summary"), staleTime: 60_000 });
+  if (!s?.last?.sync_at) return null;
+  const c = s.coverage;
+  const pc = c.assets ? Math.round((100 * c.logging) / c.assets) : 0;
+  const items: [string, React.ReactNode, string, string][] = [
+    ["Assets logging to Splunk", `${pc}%`, pc >= 90 ? "text-good-fg" : pc >= 70 ? "text-warn-fg" : "text-crit-fg", "/splunk/?tab=coverage&log=logging"],
+    ["EDR but no logs", fmtN(c.edr_no_logs), c.edr_no_logs ? "text-crit-fg" : "", "/splunk/?tab=coverage&gap=edr_no_logs"],
+    ["Exposed, no logs", fmtN(c.exposed_no_logs), c.exposed_no_logs ? "text-crit-fg" : "", "/splunk/?tab=coverage&gap=exposed_no_logs"],
+    ["EPS now", fmtN(Math.round(s.eps.now)), "", "/splunk/?tab=eps"],
+    ["Open Splunk notables", fmtN(s.notables.open), s.notables.open_crit_high ? "text-serious-fg" : "", "/splunk/?tab=notables&open=1"],
+  ];
+  return (
+    <div className="mb-4 flex flex-wrap items-stretch gap-2 rounded-2xl border border-border bg-surface p-2 shadow-card">
+      <Link href="/splunk/" className="flex items-center gap-2 rounded-xl px-3 py-1.5 text-[12.5px] font-semibold hover:bg-surface-2">SIEM · Splunk<span className="text-[11px] font-normal text-muted">synced {fmtRel(s.last.sync_at)}</span></Link>
+      {items.map(([l, v, cls, href]) => (
+        <Link key={l} href={href} className="flex min-w-[130px] flex-1 flex-col rounded-xl px-3 py-1.5 hover:bg-surface-2">
+          <span className={cn("text-[17px] font-semibold tabular", cls)}>{v}</span><span className="text-[11.5px] text-muted">{l}</span>
+        </Link>
+      ))}
+    </div>
+  );
+}
+
 export default function Overview() {
   const { data: d, error: dErr, refetch: dRetry } = useQuery({ queryKey: ["overview"], queryFn: () => api<any>("/api/overview"), refetchInterval: 60_000 });
   if (!d) return <Loading error={dErr} retry={() => dRetry()} />;
@@ -336,6 +361,7 @@ export default function Overview() {
           <Button variant="primary" onClick={() => downloadExcel("/api/reports/executive")}><FileSpreadsheet /> Executive report</Button></>}
       />
 
+      <SiemStrip />
       <div className="grid gap-4 lg:grid-cols-3">
         <Hero title="EDR coverage" href="/coverage/" value={lobT.applicable ? `${pct(lobT.installed, lobT.applicable)}%` : "–"}
           sub={`${fmtN(lobT.installed)} installed of ${fmtN(lobT.applicable)} EDR-applicable nodes · ${fmtN(lobT.nodes)} total hosts in inventory`}>

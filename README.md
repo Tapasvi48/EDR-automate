@@ -138,6 +138,37 @@ in between fetch records only for agents that are new, came back, or changed / c
 - **Local model:** Ollama (`ollama pull qwen3:8b`, or `qwen3:4b` on machines with 8 GB RAM) or any OpenAI-compatible server
   (vLLM, LM Studio); Settings → AI model.
 
+## Splunk SIEM (left menu → SIEM & logging)
+Synced from Splunk on a schedule (default hourly; Sync & settings in the section) and matched to the asset registry:
+- **Overview**: % of assets logging, EDR but no logs, exposed with no logs, silent hosts, unknown log sources (Splunk hosts in
+  no inventory), EPS now / 24 h average / 7-day peak, license GB per day, open ES notables, coverage per LOB.
+- **Asset coverage** (every asset with Logging / Silent / No logs), **Hosts**, **Log sources** (index · sourcetype with volume,
+  hosts, EPS, stale flag), **EPS** (hourly per index), **Detections** (ES notables with status / owner), **Indexes & license**
+  (size, retention, newest event, GB per day), **Forwarders** (version, last connection), **Sync** (live progress, history).
+- Each sync reads only what changed: host last-event (24 h) and notables since the last fetch every sync, EPS from the last
+  stored hour; per-source detail, indexes, forwarders and license once a day; Full refresh re-reads all. Steps that need
+  `_internal` or ES access are skipped (not failed) when the token may not read them.
+- Splunk notables appear in Unified alerts, Asset 360 and the data-fabric graph; the AI SOC answers "which assets are not
+  sending logs to Splunk?". Sample-data mode simulates Splunk.
+
+## Large data (lakhs of IPs, crores of findings)
+- **Scan imports stream**: the file (CSV of any size, or Excel) is read row by row into a staging table, never held in memory.
+  The check (new / still open / reopened / fixed) and the import are SQL over that table and run as background jobs with a
+  progress bar, in batches of 2.5 lakh rows so the rest of the site keeps working. After a scan only what a scan changes is
+  refreshed (exceptions, that LOB's scanned assets, risk scores, the registry's vulnerability counts); new IPs are added to the
+  registry in the background.
+- **Re-matching writes only what changed** (inventory matches, risk scores, asset registry), so a sync or an upload no longer
+  rewrites every row. Large connections use a big page cache; reads use memory-mapped I/O.
+- **Pages read small summary tables** (per-IP counts, per-plugin stats) instead of scanning every finding, and the findings
+  list is served in index order (no sort of crores of rows).
+- `scripts/scale_bench.py` fills a copy of the sample database with lakhs of hosts / nodes / findings and times the pipeline
+  and the main pages (never touches your data).
+
+## CrowdStrike sync: what is read when
+Hosts: every sync (changes since the last one; a full read once a day). Detections: only alerts new or updated since the last
+sync (the full window is read once, at the start). Prevention policies, sensor builds / supported OS and Spotlight: once every
+30 days (Sync & settings → change the interval, or **Refresh now**).
+
 ## Communication matrix: one template for every layout
 Download the template (Templates → Communication matrix) and use its **Unified matrix** sheet: one row per flow, read without
 column matching. It covers published services (public / NAT IP → inside IP), outbound source NAT (inside IP → outside / public

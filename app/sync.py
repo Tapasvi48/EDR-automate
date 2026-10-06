@@ -404,10 +404,13 @@ def _do_sync(started, prog):
             counts["message"] = "NIC history skipped"
 
     fetched = db.jloads(settings.get("sensor_support_fetched"), {}) or {}
-    if (fetched.get("at") or "") > (datetime.now(timezone.utc) - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ") \
-            and not fetched.get("kernel_error"):
-        # sensor builds and the supported-kernel list (up to 120 calls) change a few times a month: once a day is plenty
-        prog.skip("sensors", f"fetched {fetched.get('at')}; refreshed once a day")
+    # policies, sensor builds / supported OS and Spotlight change slowly: re-read once every posture_refresh_days (default a
+    # month), or on the next sync after "Refresh now"; hosts and detections are read on every sync
+    p_days = max(1, int(settings.get("posture_refresh_days") or 30))
+    p_cut = (datetime.now(timezone.utc) - timedelta(days=p_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    p_force = (settings.get("posture_force") or "0") == "1"
+    if (fetched.get("at") or "") > p_cut and not fetched.get("kernel_error") and not p_force:
+        prog.skip("sensors", f"fetched {fetched.get('at')[:10]}; refreshed every {p_days} days (Sync & settings → Refresh now)")
     else:
         prog.start("sensors")
         try:
@@ -423,15 +426,20 @@ def _do_sync(started, prog):
     except Exception as e:  # noqa: BLE001 - optional scope (Alerts: Read)
         prog.warn("detections", f"Detections skipped: {e}")
 
-    prog.start("posture")
-    from . import cs_posture
-    msgs = []
-    for fn in (cs_posture.fetch_spotlight, cs_posture.fetch_policies):
-        try:
-            msgs.append(fn(client))
-        except Exception as e:  # noqa: BLE001 - optional scopes
-            msgs.append(f"skipped: {e}")
-    prog.done("posture", " · ".join(msgs))
+    last_posture = settings.get("posture_last_fetch") or ""
+    if last_posture > p_cut and not p_force:
+        prog.skip("posture", f"Spotlight and policies fetched {last_posture[:10]}; refreshed every {p_days} days")
+    else:
+        prog.start("posture")
+        from . import cs_posture
+        msgs = []
+        for fn in (lambda cl: cs_posture.fetch_spotlight(cl, full_every_days=0), cs_posture.fetch_policies):
+            try:
+                msgs.append(fn(client))
+            except Exception as e:  # noqa: BLE001 - optional scopes
+                msgs.append(f"skipped: {e}")
+        prog.done("posture", " · ".join(msgs))
+        db.set_settings({"posture_last_fetch": db.now_iso(), "posture_force": "0"})
 
     prog.start("analyze")
     with db.get_conn() as c:

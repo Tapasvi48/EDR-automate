@@ -32,6 +32,7 @@ CATALOG = [
     ("exposure", "Internet exposure", "asset_registry", None, "Console (derived)", "Device", "exposed assets with evidence", "/exposure/"),
     ("passive", "Internet DB scans", "passive_results", "scanned_at", "Shodan InternetDB", "Network endpoint", "open ports / CVEs seen from the internet", "/passive-scan/"),
     ("whois", "WHOIS / ownership", "whois_nets", "fetched_at", "RDAP (APNIC, RIPE…)", "Network block", "who an IP block is registered to; enterprise marks", "/surface/"),
+    ("va_public", "VA public inventory", "va_public", None, "VA public inventory uploads", "Exposure record", "public ↔ private IPs given to the VA team, with LOB / MSP", "/vulnerabilities/?section=vapub"),
     ("niam", "NIAM dump", "niam_nodes", "last_seen_at", "NIAM uploads", "Device", "network elements (NE ID, IP)", "/integrations/"),
     ("ndr", "Seceon NDR alerts", "ndr_alerts", "received_at", "Seceon webhook / uploads", "Network activity", "network detections with source / destination IPs", "/alerts/"),
     ("satellite", "Patching & MBSS", "satellite_hosts", "last_checkin", "Red Hat Satellite", "Device", "errata, compliance per Linux host", "/patches/"),
@@ -269,6 +270,14 @@ def fabric_alerts(request: Request):
                   "device": {"hostname": r["host"], "ip": r["src_ip"], "aid": None}, "actor": None, "mitre": {"tactic": r["category"], "technique": None},
                   "src_ip": r["src_ip"], "dst_ip": r["dst_ip"], "id": r["id"]}
                  for r in db.rows(c, "SELECT * FROM ndr_alerts ORDER BY created_at DESC LIMIT 5000")]
+        try:
+            rows += [{"time": r["created_at"], "source": "Splunk ES", "class": "Detection Finding", "severity": (r["urgency"] or "").title(),
+                      "severity_id": SEV_ID.get((r["urgency"] or "").lower(), 0), "title": r["rule"], "status": r["status"] or "New",
+                      "device": {"hostname": r["host"], "ip": r["asset_ip"], "aid": None}, "actor": r["owner"], "mitre": {"tactic": r["domain"], "technique": None},
+                      "src_ip": r["src"], "dst_ip": r["dest"], "id": r["event_id"]}
+                     for r in db.rows(c, "SELECT * FROM splunk_notables ORDER BY created_at DESC LIMIT 5000")]
+        except Exception:  # noqa: BLE001 - Splunk not synced yet
+            pass
     rows.sort(key=lambda r: r["time"] or "", reverse=True)
     if p.get("source"):
         rows = [r for r in rows if r["source"] in db.multi(p, "source")]
@@ -362,6 +371,17 @@ def local_exposed_assets(c, a):
                           FROM asset_registry r WHERE r.exposed=1{w} ORDER BY r.edr_status NOT IN ('Online','Offline') DESC, r.crit DESC, r.high DESC LIMIT 2000""", p)
 
 
+def local_no_logs(c, a):
+    """Assets with a CrowdStrike agent (or every asset with edr=any) that send no logs to Splunk in the silent window."""
+    from .splunk_sync import cfg as sp_cfg, _silent_cut
+    cut = _silent_cut(sp_cfg())
+    w, p = _lob_where(a)
+    edr = "" if (a.get("edr") or "") == "any" else " AND r.edr_status IN ('Online','Offline')"
+    return db.rows(c, f"""SELECT r.ip, r.name, r.lobs, r.edr_status, r.exposed, s.ls last_log FROM asset_registry r
+                          LEFT JOIN (SELECT asset_ip, MAX(last_seen) ls FROM splunk_hosts WHERE asset_ip IS NOT NULL GROUP BY asset_ip) s ON s.asset_ip=r.ip
+                          WHERE (r.in_inventory=1 OR r.in_edr=1){edr} AND (s.ls IS NULL OR s.ls < ?){w} ORDER BY r.exposed DESC, s.ls LIMIT 2000""", [cut] + p)
+
+
 def local_coverage_gaps(c, a):
     w, p = _lob_where(a)
     return db.rows(c, f"""SELECT r.ip, r.name, r.lobs, r.msps, r.node_type, r.os, r.exposed FROM asset_registry r
@@ -428,7 +448,7 @@ def local_timeline(c, a):
     return timeline(c, a.get("host") or a.get("ip") or "", int(a.get("days") or 30))
 
 
-LOCAL = {"exposed_assets": local_exposed_assets, "exposed_no_edr": local_exposed_no_edr, "coverage_gaps": local_coverage_gaps, "kev_exposed": local_kev_exposed,
+LOCAL = {"no_logs": local_no_logs, "exposed_assets": local_exposed_assets, "exposed_no_edr": local_exposed_no_edr, "coverage_gaps": local_coverage_gaps, "kev_exposed": local_kev_exposed,
          "riskiest_assets": local_riskiest, "lob_posture": local_lob_posture, "asset_owner": local_owner, "asset_timeline": local_timeline}
 
 

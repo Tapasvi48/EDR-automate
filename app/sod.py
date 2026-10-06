@@ -147,8 +147,20 @@ def apply(c):
     lobs = {r["id"]: (r["name"] or "").lower() for r in c.execute("SELECT id, name FROM lobs")}
     import ipaddress
     upd, counts = [], {}
-    for f in db.rows(c, """SELECT id, lob_id, ip, plugin_id, cve, name, port, status, exception_ref FROM vuln_findings
-                          WHERE status IN ('open','accepted')"""):
+    # only findings an exception could cover (by plugin / CVE / name), plus the ones accepted today: not every open finding
+    # (that is crores of rows at scale)
+    conds, prm = ["status='accepted'"], []
+    for col, vals in (("plugin_id", list(by_plugin)), ("LOWER(TRIM(name))", list(by_name))):
+        for i in range(0, len(vals), 500):
+            part = vals[i:i + 500]
+            conds.append(f"(status='open' AND {col} IN ({','.join('?' * len(part))}))")
+            prm += part
+    for cv in list(by_cve)[:2000]:
+        conds.append("(status='open' AND cve LIKE ?)")
+        prm.append(f"%{cv}%")
+    cand_sql = " OR ".join(conds)
+    for f in db.rows(c, f"""SELECT id, lob_id, ip, plugin_id, cve, name, port, status, exception_ref FROM vuln_findings
+                           WHERE {cand_sql}""", prm):
         cands = list(by_plugin.get(f["plugin_id"] or "", []))
         for cv in _cves(f["cve"]):
             cands += by_cve.get(cv, [])

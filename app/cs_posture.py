@@ -57,7 +57,8 @@ def fetch_spotlight(client, cap=200_000, full_every_days=7):
     now_dt = datetime.now(timezone.utc)
     st = db.get_settings()
     last, last_full = st.get("spotlight_last_fetch"), st.get("spotlight_last_full")
-    full = not last or not last_full or last_full < (now_dt - timedelta(days=full_every_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    full = (not last or not last_full or full_every_days <= 0
+            or last_full < (now_dt - timedelta(days=full_every_days)).strftime("%Y-%m-%dT%H:%M:%SZ"))
     with db.get_conn() as c:  # findings stored by an older version (no name / description / record): read everything again
         full = full or c.execute("SELECT 1 FROM spotlight_vulns WHERE raw IS NULL LIMIT 1").fetchone() is not None
     if full:

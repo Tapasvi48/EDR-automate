@@ -62,6 +62,9 @@ DEFAULT_SETTINGS = {
     "falcon_member_cid": "",
     # Days of CrowdStrike detections fetched on each sync (Alerts API)
     "detections_days": "30",
+    "posture_refresh_days": "30",   # prevention policies, sensor builds / supported OS, Spotlight: re-read once a month
+    "posture_force": "0",           # 1 = re-read them on the next sync (Refresh now)
+    "posture_last_fetch": "",
     # Informational detections (severity < 20): not fetched and not counted unless switched on (Detections page)
     "detections_include_info": "0",
     # Red Hat Satellite (packages, errata / remediation, OpenSCAP MBSS compliance) - entered in Integrations
@@ -75,6 +78,10 @@ DEFAULT_SETTINGS = {
     "splunk_index": "*",
     "splunk_days": "7",
     "splunk_verify_ssl": "1",
+    "splunk_sync_minutes": "60",    # Splunk automation: sync every N minutes (0 = manual only)
+    "splunk_silent_hours": "24",    # a host / log source with no event for this long is Silent
+    "splunk_notable_index": "notable",
+    "splunk_last": "{}",
     # Seceon NDR webhook token (generated on the Integrations page)
     "seceon_webhook_token": "",
     # ServiceNow CMDB inventory source (planned) - entered in Inventory sources

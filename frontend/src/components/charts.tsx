@@ -70,18 +70,27 @@ export function DayBars({ data, series, height = 210, onClick, xKey = "day", sta
   );
 }
 
-export function TrendLines({ data, series, height = 230, xKey = "day" }: { data: any[]; series: Series[]; height?: number; xKey?: string }) {
+/** "2026-10-05T18:00:00Z" -> "5 Oct 18:00" (hourly series) */
+export const shortHour = (v: string) => {
+  const d = new Date(v);
+  return isNaN(+d) ? String(v) : `${d.getDate()} ${d.toLocaleString("en", { month: "short" })} ${String(d.getHours()).padStart(2, "0")}:00`;
+};
+
+export function TrendLines({ data, series, height = 230, xKey = "day", xFmt }: { data: any[]; series: Series[]; height?: number; xKey?: string; xFmt?: (v: string) => string }) {
+  const fmt = xFmt || (xKey === "hour" ? shortHour : shortDay);
+  const animate = data.length * series.length < 400;  // big series render at once (no slow animation)
   return (
     <div>
       <Legend series={series} />
       <ResponsiveContainer width="100%" height={height}>
         <LineChart data={data} margin={{ top: 6, right: 10, left: -8, bottom: 0 }}>
           <CartesianGrid vertical={false} />
-          <XAxis dataKey={xKey} tickFormatter={shortDay} tickLine={false} minTickGap={24} />
+          <XAxis dataKey={xKey} tickFormatter={fmt} tickLine={false} minTickGap={36} />
           <YAxis tickLine={false} axisLine={false} width={48} tickFormatter={(v) => fmtN(v)} />
-          <Tooltip cursor={{ stroke: "var(--border-strong)", strokeDasharray: "3 3" }} content={<ChartTip series={series} xFmt={shortDay} />} />
+          <Tooltip cursor={{ stroke: "var(--border-strong)", strokeDasharray: "3 3" }} content={<ChartTip series={series} xFmt={fmt} />} />
           {series.map((s) => (
-            <Line key={s.key} dataKey={s.key} stroke={s.color} strokeWidth={2} dot={false} activeDot={{ r: 4, strokeWidth: 2, stroke: "var(--surface)" }} />
+            <Line key={s.key} dataKey={s.key} stroke={s.color} strokeWidth={series.length > 4 ? 1.6 : 2} dot={false} isAnimationActive={animate}
+              activeDot={{ r: 4, strokeWidth: 2, stroke: "var(--surface)" }} />
           ))}
         </LineChart>
       </ResponsiveContainer>

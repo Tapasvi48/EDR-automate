@@ -28,8 +28,8 @@ def level_of(score):
 def _days_since(ts, now):
     if not ts:
         return None
-    try:
-        return max(0, int((now - datetime.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)).total_seconds() // 86400))
+    try:  # fromisoformat is C-fast; strptime cost 1.4 s per lakh assets
+        return max(0, int((now - datetime.fromisoformat(ts[:19]).replace(tzinfo=timezone.utc)).total_seconds() // 86400))
     except ValueError:
         return None
 
@@ -97,17 +97,14 @@ def refresh(c):
                 "msp": v["msp"], "msp_id": v["msp_id"], "live": None, "applicable": 0, "in_inventory": 0, "coverage_status": None,
                 "edr_status": v["edr_status"] or "Not Installed", "edr_installed": None, "aid": v["aid"], "hostname": v["hostname"],
                 "edr_last_seen": None, "crit": 0, "high": 0, "med": 0, "low": 0, "exploitable": 0, "last_scan": None}
-        a.update(crit=v["crit"] or 0, high=v["high"] or 0, med=v["med"] or 0, low=v["low"] or 0, last_scan=v["last_scanned_at"])
+        a.update(crit=v["crit"] or 0, high=v["high"] or 0, med=v["med"] or 0, low=v["low"] or 0, last_scan=v["last_scanned_at"],
+                 exploitable=(v["exploitable"] if "exploitable" in v.keys() else 0) or 0)
     # last scan also for inventory nodes whose scan found nothing (vuln_assets covers every scanned IP, this is a safety net)
     for s in db.rows(c, "SELECT lob_id, ip, scanned_at FROM vuln_scan_hosts"):
         a = assets.get((s["lob_id"], s["ip"]))
         if a and not a["last_scan"]:
             a["last_scan"] = s["scanned_at"]
-    for r in db.rows(c, """SELECT lob_id, ip, COUNT(*) n FROM vuln_findings WHERE status='open' AND sev_rank>=3
-                           AND LOWER(exploit_ease) LIKE '%exploit%' AND LOWER(exploit_ease) NOT LIKE 'no %' GROUP BY lob_id, ip"""):
-        a = assets.get((r["lob_id"], r["ip"]))
-        if a:
-            a["exploitable"] = r["n"]
+    # exploitable critical / high counts come with vuln_assets (computed in the same pass as the other counts)
     offline_seen = {r["aid"]: r["last_seen"] for r in c.execute("SELECT aid, last_seen FROM hosts WHERE aid IS NOT NULL")}
     rows = []
     for a in assets.values():
@@ -120,11 +117,21 @@ def refresh(c):
                      a["msp_id"], a["live"], a["applicable"], a["in_inventory"], a["coverage_status"], a["aid"], a["hostname"],
                      a["edr_status"], a["edr_last_seen"], a["crit"], a["high"], a["med"], a["low"], a["exploitable"], a["last_scan"],
                      a["scan_age_days"], a["scan_bucket"], score, level_of(score), json.dumps(factors)))
-    c.execute("DELETE FROM asset_risk")
-    c.executemany("""INSERT INTO asset_risk(lob_id, asset_key, ip, ip_num, item_key, node_name, node_type, msp, msp_id, live, applicable,
-                     in_inventory, coverage_status, aid, hostname, edr_status, edr_last_seen, crit, high, med, low, exploitable,
-                     last_scan, scan_age_days, scan_bucket, score, level, factors)
-                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", rows)
+    cols = """lob_id, asset_key, ip, ip_num, item_key, node_name, node_type, msp, msp_id, live, applicable,
+              in_inventory, coverage_status, aid, hostname, edr_status, edr_last_seen, crit, high, med, low, exploitable,
+              last_scan, scan_age_days, scan_bucket, score, level, factors"""
+    # write only changed rows (a scan or sync changes few scores; rewriting lakhs of rows was most of this step)
+    old = {(r[0], r[1]): tuple(r) for r in c.execute(f"SELECT {cols} FROM asset_risk")}
+    keys = {(r[0], r[1]) for r in rows}
+    gone = [k for k in old if k not in keys]
+    changed = [r for r in rows if old.get((r[0], r[1])) != tuple(r)]
+    ins = f"INSERT OR REPLACE INTO asset_risk({cols}) VALUES ({','.join('?' * 28)})"
+    if len(changed) + len(gone) > 0.6 * max(1, len(rows)):
+        c.execute("DELETE FROM asset_risk")
+        c.executemany(ins, rows)
+    else:
+        c.executemany("DELETE FROM asset_risk WHERE lob_id=? AND asset_key=?", gone)
+        c.executemany(ins, changed)
     capture_msp_day(c)
 
 

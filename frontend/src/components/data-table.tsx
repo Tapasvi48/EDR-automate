@@ -46,6 +46,10 @@ type Props<T> = {
   /** row checkboxes: the parent keeps the selected row keys (e.g. for a bulk delete) */
   selected?: Set<string>;
   onSelectedChange?: (s: Set<string>) => void;
+  /** "Select all N matching" without downloading the rows (the parent acts on the filter server-side) */
+  onSelectAllMatching?: (params: Record<string, string>, total: number) => void;
+  /** shown instead of selected.size (e.g. every matching row) */
+  selectedCount?: number;
 };
 
 export function DataTable<T extends Record<string, any>>(p: Props<T>) {
@@ -127,9 +131,16 @@ export function DataTable<T extends Record<string, any>>(p: Props<T>) {
   const fields = React.useMemo(() => fieldList(p.columns, rows), [p.columns, rows]);
   const ffs = Object.entries(p.state).filter(([k, v]) => k.startsWith("ff_") && v);
   const selectAllMatching = async () => {
+    if (p.onSelectAllMatching) {
+      const { page: _p, size: _s, ...flt } = apiParams;
+      p.onSelectAllMatching(flt, total);
+      return;
+    }
     const all = await api<{ rows: T[] }>(p.endpoint, { params: { ...apiParams, page: "1", __all: "1" } });
     p.onSelectedChange?.(new Set(all.rows.map(rk)));
   };
+  const nSel = p.selectedCount ?? p.selected?.size ?? 0;
+  const pageAll = rows.length > 0 && rows.every((r) => p.selected?.has(rk(r)));
 
   const toggleSort = (s: string) => {
     if (p.state.sort === s) p.setState({ dir: p.state.dir === "asc" ? "desc" : "asc" });
@@ -159,13 +170,13 @@ export function DataTable<T extends Record<string, any>>(p: Props<T>) {
         <span className="text-fg-2">
           <b className="tabular text-fg">{q.data ? fmtN(total) : "–"}</b> {p.noun || "rows"}
         </span>
-        {p.onSelectedChange && total > 0 && (p.selected?.size ?? 0) < total && (
+        {p.onSelectedChange && total > 0 && nSel < total && (
           <Button size="sm" variant="soft" onClick={selectAllMatching} title="Select every row that matches the current filters, on all pages">
             Select all {fmtN(total)}{total > rows.length ? " matching" : ""}
           </Button>
         )}
-        {p.onSelectedChange && (p.selected?.size ?? 0) > 0 && (
-          <span className="text-[12px] text-fg-2">{fmtN(p.selected!.size)} selected · <button className="text-accent-fg hover:underline" onClick={() => p.onSelectedChange?.(new Set())}>clear</button></span>
+        {p.onSelectedChange && nSel > 0 && (
+          <span className="text-[12px] text-fg-2">{fmtN(nSel)} selected · <button className="text-accent-fg hover:underline" onClick={() => p.onSelectedChange?.(new Set())}>clear</button></span>
         )}
         <div className="flex-1" />
         {p.toolbar}
@@ -226,6 +237,12 @@ export function DataTable<T extends Record<string, any>>(p: Props<T>) {
           </Button>
         )}
       </div>
+      {p.onSelectedChange && pageAll && total > rows.length && nSel < total && (
+        <div className="flex items-center justify-center gap-2 border-b border-border bg-accent-soft/50 px-3 py-1.5 text-[12.5px]">
+          All {fmtN(rows.length)} rows on this page are selected.
+          <button className="font-semibold text-accent-fg hover:underline" onClick={selectAllMatching}>Select all {fmtN(total)} matching rows</button>
+        </div>
+      )}
       <div className="relative overflow-auto scroll-thin" style={{ maxHeight: p.maxHeight || "calc(100vh - 260px)" }}>
         {q.isFetching && <div className="loadbar absolute inset-x-0 top-0 z-20 h-0.5 overflow-hidden" />}
         <table className="w-full border-separate border-spacing-0 text-[12.8px]">

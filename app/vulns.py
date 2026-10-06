@@ -212,7 +212,8 @@ def refresh_assets(c, lob_id=None):
     counts = {}
     for r in c.execute(f"""SELECT lob_id, ip, SUM(status='open' AND sev_rank=4) crit, SUM(status='open' AND sev_rank=3) high,
             SUM(status='open' AND sev_rank=2) med, SUM(status='open' AND sev_rank=1) low, SUM(status='open' AND sev_rank=0) info,
-            SUM(status='fixed') fixed FROM vuln_findings {where} GROUP BY lob_id, ip""", params):
+            SUM(status='fixed') fixed, SUM(status='accepted') accepted, SUM(status='open' AND sev_rank>=3 AND LOWER(COALESCE(exploit_ease,'')) LIKE '%exploit%'
+            AND LOWER(exploit_ease) NOT LIKE 'no %') exploitable FROM vuln_findings {where} GROUP BY lob_id, ip""", params):
         counts[(r["lob_id"], r["ip"])] = r
     scans = {(r["lob_id"], r["ip"]): r for r in c.execute(f"SELECT * FROM vuln_scan_hosts {where}", params)}
     keys = set(counts) | set(scans)
@@ -256,10 +257,16 @@ def refresh_assets(c, lob_id=None):
                      (cn["crit"] or 0) if cn else 0, (cn["high"] or 0) if cn else 0, (cn["med"] or 0) if cn else 0,
                      (cn["low"] or 0) if cn else 0, (cn["info"] or 0) if cn else 0, (cn["fixed"] or 0) if cn else 0,
                      1 if iv else 0, iv["item_key"] if iv else None, iv["node_name"] if iv else None, msp, msp_id,
-                     iv["node_type"] if iv else None, iv["live"] if iv else None, aid, hostname, status))
+                     iv["node_type"] if iv else None, iv["live"] if iv else None, aid, hostname, status, (cn["exploitable"] or 0) if cn else 0,
+                     (cn["accepted"] or 0) if cn else 0))
     c.executemany("""INSERT INTO vuln_assets(lob_id, ip, ip_num, last_scan_id, last_scanned_at, crit, high, med, low, info, fixed,
-                     in_inventory, item_key, node_name, msp, msp_id, node_type, live, aid, hostname, edr_status)
-                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", rows)
+                     in_inventory, item_key, node_name, msp, msp_id, node_type, live, aid, hostname, edr_status, exploitable, accepted)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", rows)
+    # top-vulnerability panels read this small table instead of grouping crores of findings on every page load
+    c.execute(f"DELETE FROM vuln_plugin_stats {where}", params)
+    c.execute(f"""INSERT INTO vuln_plugin_stats(lob_id, plugin_id, name, severity, sev_rank, hosts, findings, cve)
+                  SELECT lob_id, plugin_id, MAX(name), MAX(severity), MAX(sev_rank), COUNT(DISTINCT ip), COUNT(*), MAX(cve) FROM vuln_findings
+                  {where + (' AND' if where else 'WHERE')} status='open' AND sev_rank>=2 GROUP BY lob_id, plugin_id, name""", params)
 
 
 # ------------------------------------------------------------------ queries
@@ -361,12 +368,11 @@ def assets_query(p):
 
 def summary(c, lob_id=None):
     where, params = ("WHERE f.lob_id=?", (lob_id,)) if lob_id else ("", ())
-    sev = db.one(c, f"""SELECT SUM(status='open' AND sev_rank=4) crit, SUM(status='open' AND sev_rank=3) high,
-        SUM(status='open' AND sev_rank=2) med, SUM(status='open' AND sev_rank=1) low, SUM(status='open' AND sev_rank=0) info,
-        SUM(status='fixed') fixed, SUM(status='accepted') accepted,
-        COUNT(DISTINCT CASE WHEN status='open' AND sev_rank>=1 THEN ip END) vulnerable_hosts
-        FROM vuln_findings f {where}""", params)
     aw, ap = ("WHERE a.lob_id=?", (lob_id,)) if lob_id else ("", ())
+    # from the per-IP counts (vuln_assets), not by scanning every finding
+    sev = db.one(c, f"""SELECT SUM(a.crit) crit, SUM(a.high) high, SUM(a.med) med, SUM(a.low) low, SUM(a.info) info, SUM(a.fixed) fixed,
+        SUM(COALESCE(a.accepted, 0)) accepted, COUNT(DISTINCT CASE WHEN a.crit + a.high + a.med + a.low > 0 THEN a.ip END) vulnerable_hosts
+        FROM vuln_assets a {aw}""", ap)
     assets = db.one(c, f"""SELECT COUNT(*) scanned, SUM(a.crit + a.high > 0 AND a.edr_status NOT IN ('Online','Offline')) crit_high_no_edr,
         SUM(a.edr_status NOT IN ('Online','Offline')) no_edr, SUM(a.in_inventory=0) not_in_inventory,
         MAX(a.last_scanned_at) last_scan FROM vuln_assets a {aw}""", ap)
@@ -378,9 +384,9 @@ def summary(c, lob_id=None):
         SUM(a.med) med, SUM(a.low) low, COUNT(*) scanned, SUM(a.crit + a.high + a.med + a.low > 0) vulnerable,
         SUM(a.crit + a.high > 0 AND a.edr_status NOT IN ('Online','Offline')) crit_high_no_edr, MAX(a.last_scanned_at) last_scan
         FROM vuln_assets a JOIN lobs l ON l.id=a.lob_id {aw} GROUP BY a.lob_id, a.msp_id ORDER BY crit DESC, high DESC""", ap)
-    top = db.rows(c, f"""SELECT plugin_id, name, severity, sev_rank, COUNT(DISTINCT ip) hosts, MAX(cve) cve FROM vuln_findings f
-        {where + (' AND' if where else 'WHERE')} status='open' AND sev_rank>=2
-        GROUP BY plugin_id, name ORDER BY sev_rank DESC, hosts DESC LIMIT 15""", params)
+    top = db.rows(c, f"""SELECT plugin_id, name, MAX(severity) severity, MAX(sev_rank) sev_rank, SUM(hosts) hosts, MAX(cve) cve
+        FROM vuln_plugin_stats {'WHERE lob_id=?' if lob_id else ''} GROUP BY plugin_id, name ORDER BY sev_rank DESC, hosts DESC LIMIT 15""",
+        (lob_id,) if lob_id else ())
     edr = db.rows(c, f"""SELECT a.edr_status label, COUNT(*) n, SUM(a.crit) crit, SUM(a.high) high FROM vuln_assets a {aw}
         GROUP BY 1 ORDER BY n DESC""", ap)
     scans = db.rows(c, f"""SELECT s.*, l.name lob FROM vuln_scans s JOIN lobs l ON l.id=s.lob_id
@@ -396,10 +402,10 @@ def _page(p):
 
 @router.post("/api/vulns/parse")
 def vuln_parse(data: dict = Body(...)):
-    parsed = inventory.parse_upload(data["token"], data.get("sheet"), data.get("header_row"))
+    parsed = inventory.peek_upload(data["token"], data.get("sheet"), data.get("header_row"))  # streams: any size
     return {"token": data["token"], "filename": parsed["filename"], "sheets": parsed["sheets"], "sheet": parsed["sheet"],
-            "header_row": parsed["header_row"], "headers": parsed["headers"], "row_count": len(parsed["rows"]),
-            "sample": parsed["rows"][:6], "mapping": suggest_mapping(parsed["headers"]),
+            "header_row": parsed["header_row"], "headers": parsed["headers"], "row_count": parsed["row_count"],
+            "sample": parsed["sample"], "mapping": suggest_mapping(parsed["headers"]),
             "fields": [{"key": k, "label": l, "required": r} for k, l, r in VULN_FIELDS]}
 
 
@@ -414,19 +420,35 @@ def _load(data):
 
 @router.post("/api/lobs/{lob_id}/vulns/preview")
 def vuln_preview(lob_id: int, data: dict = Body(...)):
-    _, _, findings, warnings = _load(data)
+    """Stage the file (streamed, any size) and count what the import would change. Small files answer at once; big ones return
+    {job, status} to poll at /api/vulns/jobs/{job}."""
     with db.get_conn() as c:
-        return preview(c, lob_id, findings, warnings)
+        if not db.one(c, "SELECT id FROM lobs WHERE id=?", (lob_id,)):
+            raise HTTPException(404, "LOB not found")
+    job = start_stage(lob_id, data)
+    j = _wait(job)
+    if j.get("status") == "error":
+        raise HTTPException(400, j.get("error") or "The file could not be read")
+    if j.get("status") == "ready":
+        return {**j["preview"], "job": job}
+    return {"job": job, "status": j.get("status"), "read": j.get("read", 0)}
 
 
 @router.post("/api/lobs/{lob_id}/vulns/commit")
 def vuln_commit(lob_id: int, data: dict = Body(...)):
-    parsed, mapping, findings, warnings = _load(data)
-    with db.get_conn() as c:
-        if not db.one(c, "SELECT id FROM lobs WHERE id=?", (lob_id,)):
-            raise HTTPException(404, "LOB not found")
-        return commit(c, lob_id, findings, warnings, filename=parsed["filename"], note=data.get("note", ""),
-                      uploaded_by=data.get("uploaded_by", ""), mapping=mapping)
+    job = data.get("job")
+    if not job:  # older clients: stage first
+        job = start_stage(lob_id, data)
+        j = _wait(job)
+        if j.get("status") != "ready":
+            raise HTTPException(409, j.get("error") or "Large file: check it first, then import")
+    start_commit(job, lob_id, data)
+    j = _wait(job, until=("done", "error"))
+    if j.get("status") == "error":
+        raise HTTPException(500, j.get("error"))
+    if j.get("status") == "done":
+        return j["result"]
+    return {"job": job, "status": j.get("status"), "step": j.get("step")}
 
 
 @router.get("/api/vulns/summary")
@@ -527,3 +549,284 @@ def vuln_clear(lob_id: int):
         from .inventory import refresh_soon
         refresh_soon(c)
     return {"ok": True}
+
+
+# ------------------------------------------------------------------ scale: streaming, staged scan import (crores of rows)
+# The file is streamed into vuln_stage in chunks (never held in memory), the preview counts (new / still open / reopened /
+# fixed) are SQL over the staged rows, and the commit is a handful of set-based statements. Both run as background jobs with
+# progress, so a 1-crore-row scan never blocks the site. After the commit only what a scan changes is refreshed: the scanned
+# assets of that LOB, exceptions, risk scores and the registry's vulnerability counts (exposure is rebuilt in the background).
+import threading
+import time
+import uuid as _uuid
+
+STAGE_COLS = ["finding_key", "ip", "ip_num", "plugin_id", "name", "severity", "sev_rank", "protocol", "port", "synopsis", "description",
+              "solution", "plugin_text", "see_also", "cve", "exploit_ease", "first_discovered", "last_observed", "vuln_pub_date",
+              "patch_pub_date", "remarks", "os", "extra"]
+JOBS = {}
+_JOBS_LOCK = threading.Lock()
+CHUNK = 50_000
+WAIT_SMALL = 25  # seconds a preview / commit request waits before handing back a job id to poll
+
+
+def _job(job_id, **kw):
+    with _JOBS_LOCK:
+        j = JOBS.setdefault(job_id, {"id": job_id})
+        j.update(kw)
+        for old in [k for k, v in JOBS.items() if v.get("finished_at", "9") < db.now_iso()[:10]]:  # forget yesterday's jobs
+            JOBS.pop(old, None)
+        return dict(j)
+
+
+def _stage_table(job_id):
+    if not re.fullmatch(r"[0-9a-f]{16}|[a-z]+", job_id or ""):
+        raise ValueError("bad job id")
+    return f"vstage_{job_id}"
+
+
+def _ensure_stage(c):  # old shared staging table (kept for databases that have it)
+    pass
+
+
+_KEY_IDX = None
+
+
+def _row_fn(idx, mapping, extra_headers):
+    """A fast per-row converter: column positions resolved once, repeated IPs / dates parsed once (an IP has many findings)."""
+    from functools import lru_cache
+    pos = {k: idx[mapping[k]] for k in VULN_KEYS if mapping.get(k) in idx}
+    xpos = [(h, idx[h]) for h in extra_headers]
+    ip_c = lru_cache(maxsize=200_000)(lambda v: inventory.norm_ip(v))
+    num_c = lru_cache(maxsize=200_000)(db.ip_to_num)
+    ts_c = lru_cache(maxsize=50_000)(lambda v: (db.parse_ts(v) or v) if v else "")
+    sev_c = lru_cache(maxsize=1000)(norm_severity)
+
+    def get(r, k):
+        i = pos.get(k)
+        return r[i].strip() if i is not None else ""
+
+    def conv(r):
+        ip = ip_c(get(r, "ip"))
+        if not ip:
+            return None
+        sev = sev_c(get(r, "severity"))
+        plugin, name, port, proto = get(r, "plugin_id"), get(r, "name"), get(r, "port"), get(r, "protocol").lower()
+        extra = {h: r[i] for h, i in xpos if r[i]}
+        key = "|".join([ip, plugin or hashlib.sha1(name.encode()).hexdigest()[:12], port, proto])
+        return (key, ip, num_c(ip), plugin, name, sev, SEV_RANK[sev], proto, port, get(r, "synopsis"), get(r, "description"),
+                get(r, "solution"), get(r, "plugin_text"), get(r, "see_also"), get(r, "cve"), get(r, "exploit_ease"),
+                ts_c(get(r, "first_discovered")), ts_c(get(r, "last_observed")), ts_c(get(r, "vuln_pub_date")),
+                ts_c(get(r, "patch_pub_date")), get(r, "remarks"), get(r, "os"), json.dumps(extra) if extra else "{}")
+    return conv
+
+
+def _stage(job_id, lob_id, token, sheet, header_row, mapping):
+    if not mapping.get("ip"):
+        raise ValueError("Map the IP Address column")
+    if not mapping.get("name") and not mapping.get("plugin_id"):
+        raise ValueError("Map the Vulnerability Name or Plugin ID column")
+    st = inventory.stream_upload(token, sheet, header_row)
+    idx = {h: i for i, h in enumerate(st["headers"])}
+    mapped = set(v for v in mapping.values() if v)
+    extra_headers = [h for h in st["headers"] if h not in mapped and _norm(h) not in ("sno", "srno", "slno", "serialno", "sn")]
+    conv = _row_fn(idx, mapping, extra_headers)
+    tbl = _stage_table(job_id)
+    read = no_ip = 0
+    t0 = time.time()
+    with db.get_conn() as c:
+        db.bulk(c)
+        cols = ", ".join(f"{k} {'INTEGER' if k in ('ip_num', 'sev_rank') else 'TEXT'}" for k in STAGE_COLS)
+        c.execute(f"DROP TABLE IF EXISTS {tbl}")
+        c.execute(f"CREATE TABLE {tbl} ({cols})")  # no index while loading: appends are cheap
+        ins = f"INSERT INTO {tbl}({', '.join(STAGE_COLS)}) VALUES ({','.join('?' * len(STAGE_COLS))})"
+        buf = []
+        for r in st["rows"]:
+            read += 1
+            f = conv(r)
+            if f is None:
+                no_ip += 1
+            else:
+                buf.append(f)
+            if len(buf) >= CHUNK:
+                c.executemany(ins, buf)
+                buf = []
+                if read % (CHUNK * 4) == 0:
+                    c.commit()
+                    _job(job_id, read=read, rate=round(read / max(0.1, time.time() - t0)))
+        if buf:
+            c.executemany(ins, buf)
+        _job(job_id, read=read, step="removing repeated rows")
+        # repeated IP + plugin + port rows: keep the first one, then index once (one sort instead of millions of random inserts)
+        c.execute(f"""DELETE FROM {tbl} WHERE rowid IN (SELECT rowid FROM (SELECT rowid, ROW_NUMBER() OVER (PARTITION BY finding_key ORDER BY rowid) rn
+                      FROM {tbl}) WHERE rn > 1)""")
+        c.execute(f"CREATE UNIQUE INDEX ix_{tbl}_k ON {tbl}(finding_key)")
+        c.execute(f"CREATE INDEX ix_{tbl}_ip ON {tbl}(ip)")
+        staged = c.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+    warnings = []
+    if read - no_ip - staged:
+        warnings.append(f"{read - no_ip - staged:,} repeated rows (same IP + plugin + port) merged")
+    if no_ip:
+        warnings.append(f"{no_ip:,} rows skipped: no IP address")
+    if not staged:
+        raise ValueError("No vulnerability rows found with this mapping")
+    return {"filename": st["filename"], "read": read, "staged": staged, "warnings": warnings, "mapping": mapping, "lob_id": lob_id}
+
+
+def _stage_preview(c, job_id, lob_id, warnings):
+    tbl = _stage_table(job_id)
+    q = lambda sql, *a: c.execute(sql, a).fetchone()[0]  # noqa: E731
+    rows = q(f"SELECT COUNT(*) FROM {tbl}")
+    hosts = q(f"SELECT COUNT(DISTINCT ip) FROM {tbl}")
+    seen = q(f"""SELECT COUNT(*), SUM(f.status='fixed') FROM {tbl} s JOIN vuln_findings f ON f.lob_id=? AND f.finding_key=s.finding_key""", lob_id)
+    reopened = q(f"""SELECT COUNT(*) FROM {tbl} s JOIN vuln_findings f ON f.lob_id=? AND f.finding_key=s.finding_key WHERE f.status='fixed'""", lob_id)
+    fixed = q(f"""SELECT COUNT(*) FROM vuln_findings f WHERE f.lob_id=? AND f.status IN ('open','accepted')
+                  AND f.ip IN (SELECT ip FROM {tbl}) AND NOT EXISTS (SELECT 1 FROM {tbl} s WHERE s.finding_key=f.finding_key)""", lob_id)
+    sev = {r[0]: r[1] for r in c.execute(f"SELECT severity, COUNT(*) FROM {tbl} GROUP BY 1")}
+    scan_date = q(f"SELECT MAX(last_observed) FROM {tbl} WHERE last_observed GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T*'") or db.now_iso()
+    first = not c.execute("SELECT 1 FROM vuln_scans WHERE lob_id=? LIMIT 1", (lob_id,)).fetchone()
+    sample = db.rows(c, f"SELECT ip, severity, name, port, plugin_id FROM {tbl} LIMIT 50")
+    new = rows - seen
+    return {"rows": rows, "hosts": hosts, "new": new, "reopened": reopened, "still_open": seen - reopened, "fixed": fixed,
+            "severity": sev, "warnings": warnings, "scan_date": scan_date, "first_scan": first, "sample": sample}
+
+
+def _commit_stage(c, job_id, lob_id, filename, note, uploaded_by, mapping, warnings, progress=lambda s: None, pv=None):
+    tbl = _stage_table(job_id)
+    pv = pv or _stage_preview(c, job_id, lob_id, warnings)
+    scan_date = pv["scan_date"]
+    sid = c.execute("""INSERT INTO vuln_scans(lob_id, filename, note, uploaded_by, uploaded_at, scan_date, rows, hosts,
+                       new_findings, fixed_findings, reopened, still_open, mapping, warnings) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (lob_id, filename, note, uploaded_by, db.now_iso(), scan_date, pv["rows"], pv["hosts"], pv["new"], pv["fixed"],
+                     pv["reopened"], pv["still_open"], json.dumps(mapping), json.dumps(warnings))).lastrowid
+    lo, hi = c.execute(f"SELECT MIN(rowid), MAX(rowid) FROM {tbl}").fetchone()
+    BATCH = 250_000  # rows per transaction: other writers (tagging, edits) wait for one batch, not the whole crore-row import
+
+    def batches(label):
+        for a in range(lo or 0, (hi or 0) + 1, BATCH):
+            progress(f"{label} · {min(100, round(100 * (a - (lo or 0)) / max(1, (hi or 0) - (lo or 0) + 1)))}%")
+            yield a, a + BATCH - 1
+            c.commit()
+    for a, b in batches("marking fixed findings"):  # the scanned IPs of this batch: their findings this scan no longer reports
+        c.execute(f"""UPDATE vuln_findings SET status='fixed', fixed_scan_id=?, fixed_at=? WHERE lob_id=? AND status IN ('open','accepted')
+                      AND ip IN (SELECT DISTINCT ip FROM {tbl} WHERE rowid BETWEEN ? AND ?)
+                      AND NOT EXISTS (SELECT 1 FROM {tbl} s WHERE s.finding_key=vuln_findings.finding_key)""", (sid, scan_date, lob_id, a, b))
+    # three narrow updates instead of one wide one: SQLite re-indexes every row whose indexed columns appear in SET, even when the
+    # value is the same, so the bulk statement leaves the indexed ones (ip, plugin, port, status, severity) alone
+    keyed = {"finding_key", "first_discovered", "ip", "ip_num", "plugin_id", "port", "protocol", "severity", "sev_rank"}
+    sets = ", ".join(f"{k}=COALESCE(NULLIF(s.{k}, ''), vuln_findings.{k})" for k in STAGE_COLS if k not in keyed)  # empty cell keeps our value
+    for a, b in batches("updating findings seen again"):
+        c.execute(f"""UPDATE vuln_findings SET status='open', reopened=reopened + (vuln_findings.status='fixed'), fixed_scan_id=NULL, fixed_at=NULL
+                      FROM {tbl} s WHERE s.rowid BETWEEN ? AND ? AND vuln_findings.lob_id=? AND vuln_findings.finding_key=s.finding_key
+                      AND vuln_findings.status<>'open'""", (a, b, lob_id))
+        c.execute(f"""UPDATE vuln_findings SET severity=s.severity, sev_rank=s.sev_rank FROM {tbl} s
+                      WHERE s.rowid BETWEEN ? AND ? AND vuln_findings.lob_id=? AND vuln_findings.finding_key=s.finding_key
+                      AND vuln_findings.sev_rank<>s.sev_rank""", (a, b, lob_id))
+        c.execute(f"""UPDATE vuln_findings SET {sets},
+                      first_discovered=CASE WHEN COALESCE(vuln_findings.first_discovered,'')='' THEN s.first_discovered
+                                            WHEN COALESCE(s.first_discovered,'')='' THEN vuln_findings.first_discovered
+                                            ELSE MIN(vuln_findings.first_discovered, s.first_discovered) END, last_scan_id=?
+                      FROM {tbl} s WHERE s.rowid BETWEEN ? AND ? AND vuln_findings.lob_id=? AND vuln_findings.finding_key=s.finding_key""",
+                  (sid, a, b, lob_id))
+    if pv["new"]:
+        cols = ", ".join(STAGE_COLS)
+        for a, b in batches("adding new findings"):
+            c.execute(f"""INSERT INTO vuln_findings(lob_id, {cols}, status, first_scan_id, last_scan_id)
+                          SELECT ?, {', '.join('s.' + k for k in STAGE_COLS)}, 'open', ?, ? FROM {tbl} s WHERE s.rowid BETWEEN ? AND ?
+                          AND NOT EXISTS (SELECT 1 FROM vuln_findings f WHERE f.lob_id=? AND f.finding_key=s.finding_key)""",
+                      (lob_id, sid, sid, a, b, lob_id))
+    c.execute(f"""INSERT OR REPLACE INTO vuln_scan_hosts(lob_id, ip, scan_id, scanned_at)
+                 SELECT ?, ip, ?, MAX(CASE WHEN last_observed GLOB '[0-9][0-9][0-9][0-9]-*' THEN last_observed ELSE ? END)
+                 FROM {tbl} GROUP BY ip""", (lob_id, sid, scan_date))
+    c.execute(f"DROP TABLE IF EXISTS {tbl}")
+    return {"scan_id": sid, **{k: pv[k] for k in ("rows", "hosts", "new", "reopened", "still_open", "fixed", "scan_date")}, "warnings": warnings}
+
+
+def after_scan(c, lob_id, progress=lambda s: None):
+    """What a scan changes, and nothing else: exceptions, the LOB's scanned assets, risk scores, registry vulnerability counts.
+    IPs no source knew before need a registry rebuild (new rows, exposure by a public scanned IP): queued in the background."""
+    from . import posture, registry, sod
+    progress("applying exceptions (SOD)")
+    sod.apply(c)
+    progress("matching scanned IPs with inventory and CrowdStrike")
+    refresh_assets(c, lob_id)
+    progress("risk scores")
+    posture.refresh(c)
+    progress("asset registry counts")
+    new_ips = registry.refresh_vuln_counts(c)
+    if new_ips:
+        from .inventory import refresh_soon
+        refresh_soon(c, label="Adding newly scanned IPs to the asset registry", registry_only=True)
+
+
+def _run_job(job_id, fn):
+    def go():
+        try:
+            fn()
+        except Exception as e:  # noqa: BLE001
+            _job(job_id, status="error", error=str(e)[:500], finished_at=db.now_iso())
+    threading.Thread(target=go, daemon=True, name=f"vuln-{job_id[:6]}").start()
+
+
+def _wait(job_id, until=("ready", "done", "error")):
+    t = time.time()
+    while time.time() - t < WAIT_SMALL:
+        j = JOBS.get(job_id) or {}
+        if j.get("status") in until:
+            return dict(j)
+        time.sleep(0.15)
+    return dict(JOBS.get(job_id) or {})
+
+
+def _cleanup_stage():
+    """Drop staging tables of previews that were never imported (other jobs, or from before a restart)."""
+    try:
+        with db.get_conn() as c:
+            live = {_stage_table(j) for j, v in JOBS.items() if v.get("status") in ("staging", "ready", "committing")}
+            for (t,) in c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'vstage_%'").fetchall():
+                if t not in live:
+                    c.execute(f"DROP TABLE IF EXISTS {t}")
+            c.execute("DROP TABLE IF EXISTS vuln_stage")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def start_stage(lob_id, data):
+    _cleanup_stage()
+    job_id = _uuid.uuid4().hex[:16]
+    mapping = {k: v for k, v in (data.get("mapping") or {}).items() if v}
+    _job(job_id, status="staging", lob_id=lob_id, read=0, started_at=db.now_iso(), token=data["token"])
+
+    def work():
+        info = _stage(job_id, lob_id, data["token"], data.get("sheet"), data.get("header_row"), mapping)
+        with db.get_conn() as c:
+            pv = _stage_preview(c, job_id, lob_id, info["warnings"])
+        _job(job_id, status="ready", preview=pv, info=info, read=info["read"], finished_at=db.now_iso())
+    _run_job(job_id, work)
+    return job_id
+
+
+def start_commit(job_id, lob_id, data):
+    j = JOBS.get(job_id)
+    if not j or j.get("status") != "ready" or j.get("lob_id") != lob_id:
+        raise HTTPException(409, "Check the file again before importing (the staged scan expired or belongs to another LOB)")
+    info = j["info"]
+    _job(job_id, status="committing", step="starting", started_at=db.now_iso())
+
+    def work():
+        t0 = time.time()
+        with db.get_conn() as c:
+            db.bulk(c)
+            res = _commit_stage(c, job_id, lob_id, info["filename"], data.get("note", ""), data.get("uploaded_by", ""), info["mapping"],
+                                info["warnings"], progress=lambda s: _job(job_id, step=s), pv=j.get("preview"))
+            c.commit()
+            after_scan(c, lob_id, progress=lambda s: _job(job_id, step=s))
+        _job(job_id, status="done", result={**res, "seconds": round(time.time() - t0, 1)}, finished_at=db.now_iso())
+    _run_job(job_id, work)
+
+
+@router.get("/api/vulns/jobs/{job_id}")
+def vuln_job(job_id: str):
+    j = JOBS.get(job_id)
+    if not j:
+        raise HTTPException(404, "Unknown or expired import job")
+    return {k: v for k, v in j.items() if k != "info"}

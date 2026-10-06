@@ -168,9 +168,100 @@ def parse_upload(token, sheet=None, header_row=None):
     body = [(r + [""] * len(hdrs))[:len(hdrs)] for r in body]
     out = {"filename": filename, "sheets": sheets, "sheet": sheet, "header_row": header_row, "headers": hdrs, "rows": body}
     _parsed_cache[ck] = out
-    while len(_parsed_cache) > 8:
+    cells = lambda o: len(o["rows"]) * max(1, len(o["headers"]))  # noqa: E731
+    while len(_parsed_cache) > 8 or (len(_parsed_cache) > 1 and sum(cells(o) for o in _parsed_cache.values()) > 6_000_000):
         _parsed_cache.popitem(last=False)
     return out
+
+
+def _header_index(rows_iter_first, header_row):
+    """Header row (auto: the first row with 2+ filled cells within the first 30) and de-duplicated header names."""
+    first = rows_iter_first
+    if header_row is None:
+        header_row = 1
+        for i, r in enumerate(first[:30]):
+            if sum(1 for v in r if v) >= 2:
+                header_row = i + 1
+                break
+    header_row = max(1, int(header_row))
+    headers = first[header_row - 1] if len(first) >= header_row else []
+    seen, hdrs = {}, []
+    for i, h in enumerate(headers):
+        h = h or f"Column {i + 1}"
+        if h in seen:
+            seen[h] += 1
+            h = f"{h} ({seen[h]})"
+        else:
+            seen[h] = 1
+        hdrs.append(h)
+    return header_row, hdrs
+
+
+def _raw_iter(token, sheet=None):
+    """(filename, sheets, sheet, iterator of raw rows as lists of cleaned strings) — streams the file, never loads it whole.
+    CSV: read line by line. Excel: calamine's row iterator (openpyxl read-only as fallback)."""
+    path = _upload_path(token)
+    filename = path.name.split("__", 1)[1]
+    ext = path.suffix.lower()
+    if ext in (".csv", ".txt"):
+        fh = open(path, encoding="utf-8-sig", errors="replace", newline="")
+        head = fh.read(5000)
+        fh.seek(0)
+        try:
+            dialect = csv.Sniffer().sniff(head, delimiters=",;\t|")
+        except csv.Error:
+            dialect = csv.excel
+
+        def gen():
+            with fh:
+                for r in csv.reader(fh, dialect):
+                    yield [_cell(v) for v in r]
+        return filename, ["CSV"], "CSV", gen()
+    if ext in (".xlsx", ".xlsm"):
+        try:
+            from python_calamine import CalamineWorkbook
+            wb = CalamineWorkbook.from_path(str(path))
+            names = wb.sheet_names
+            title = sheet if sheet in names else names[0]
+            sh = wb.get_sheet_by_name(title)
+            return filename, names, title, ([_cell(v) for v in r] for r in sh.iter_rows())
+        except ImportError:
+            from openpyxl import load_workbook
+            wb = load_workbook(path, read_only=True, data_only=True)
+            names = wb.sheetnames
+            ws = wb[sheet] if sheet in names else wb[names[0]]
+            return filename, names, ws.title, ([_cell(v) for v in r] for r in ws.iter_rows(values_only=True))
+    raise ValueError("Unsupported file type. Upload .xlsx, .xlsm or .csv (save .xls as .xlsx first).")
+
+
+def stream_upload(token, sheet=None, header_row=None):
+    """Like parse_upload, for files of any size: dict(filename, sheets, sheet, header_row, headers, rows=<iterator>)."""
+    filename, sheets, title, it = _raw_iter(token, sheet)
+    first = []
+    for r in it:
+        first.append(r)
+        if len(first) >= 30:
+            break
+    hr, hdrs = _header_index(first, header_row)
+    n = len(hdrs)
+
+    def body():
+        import itertools
+        for r in itertools.chain(first[hr:], it):
+            if any(v for v in r):
+                yield (r + [""] * n)[:n]
+    return {"filename": filename, "sheets": sheets, "sheet": title, "header_row": hr, "headers": hdrs, "rows": body()}
+
+
+def peek_upload(token, sheet=None, header_row=None, sample=6):
+    """Headers, a few sample rows and the row count of an upload without keeping it in memory (counts by streaming)."""
+    st = stream_upload(token, sheet, header_row)
+    rows, count = [], 0
+    for r in st["rows"]:
+        if len(rows) < sample:
+            rows.append(r)
+        count += 1
+    return {**{k: v for k, v in st.items() if k != "rows"}, "sample": rows, "row_count": count}
 
 
 def suggest_mapping(headers, template=None):
@@ -773,6 +864,13 @@ def refresh_matches(c, lob_id=None, checkpoint=None):
         results.append((1 if feasibility.is_applicable(feasible, installed) else 0, coverage_status(feasible, state),
                         feasible, why, os_, os_src, os_status))
     updates = [(*u[:12], *results[u[12]], *u[13:]) for u in updates]
+    # write only the rows whose match / feasibility changed: after a sync or scan almost none do, and rewriting lakhs of
+    # unchanged rows (and their indexes) was the slowest part of a re-match
+    cur = {(r[19], r[20]): tuple(r[:19]) for r in c.execute(
+        f"""SELECT matched_aid, match_method, match_count, cs_hostname, cs_console_state, cs_online_state, cs_last_seen, cs_agent_version,
+            cs_os, edr_actual, verification, edr_state, applicable, coverage_status, feasible, feasible_reason, os_resolved, os_source,
+            os_support, lob_id, item_key FROM inventory_current {where}""", params)}
+    updates = [u for u in updates if cur.get((u[19], u[20])) != tuple(u[:19])]
     c.executemany(
         """UPDATE inventory_current SET matched_aid=?, match_method=?, match_count=?, cs_hostname=?, cs_console_state=?,
            cs_online_state=?, cs_last_seen=?, cs_agent_version=?, cs_os=?, edr_actual=?, verification=?,
@@ -969,6 +1067,7 @@ def _refresh_worker():
         try:
             _set_pending("full" if full else "registry")
             with db.get_conn() as c:
+                db.bulk(c)
                 if full:
                     refresh_matches(c, checkpoint=c.commit)
                 else:
