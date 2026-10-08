@@ -904,6 +904,38 @@ def _is_private(net):
     return not is_public(str(net.network_address))
 
 
+def vip_map(rules):
+    """{private NAT / VIP IP: {backend private IPs}}. A private IP in the destination-NAT column of a row that also names a
+    private backend destination is a translation layer (load-balancer VIP, firewall NAT), not a host: public 202.x -> VIP
+    10.4.x -> server 10.1.x. Rows can chain (202.x -> VIP in one row, VIP -> server in another)."""
+    out = {}
+    for r in rules:
+        nat_priv = [str(n.network_address) for n in parse_addresses(r["dst_nat"])[1] if n.num_addresses == 1 and _is_private(n)]
+        if not nat_priv:
+            continue
+        backs = [str(n.network_address) for n in parse_addresses(r["dst"])[1] if n.num_addresses == 1 and _is_private(n)]
+        for v in nat_priv:
+            for b in backs:
+                if b != v:
+                    out.setdefault(v, set()).add(b)
+    return out
+
+
+def resolve_vips(ips, vmap):
+    """The real hosts behind addresses: a VIP is replaced by its backends (following chains), any other IP stays."""
+    out, seen, todo = [], set(), list(ips)
+    while todo:
+        ip = todo.pop(0)
+        if ip in seen:
+            continue
+        seen.add(ip)
+        if ip in vmap:
+            todo += sorted(vmap[ip])
+        else:
+            out.append(ip)
+    return out
+
+
 def matrix_pairs(rules):
     """(pub_of, priv_of): private IP -> its public / NAT IPs and back, from every NAT pair of the matrix rows (destination <->
     destination NAT, source <-> source NAT, same row)."""
@@ -922,6 +954,13 @@ def matrix_pairs(rules):
                         continue
                     pub_of.setdefault(priv, set()).add(pub)
                     priv_of.setdefault(pub, set()).add(priv)
+    vmap = vip_map(rules)
+    for vip in [v for v in pub_of if v in vmap]:  # public -> VIP -> server: the public IP is the server's
+        pubs = pub_of.pop(vip)
+        for b in resolve_vips([vip], vmap):
+            pub_of.setdefault(b, set()).update(pubs)
+        for p in pubs:
+            priv_of[p] = (priv_of.get(p, set()) - {vip}) | set(resolve_vips([vip], vmap))
     return pub_of, priv_of
 
 
@@ -960,6 +999,7 @@ def matrix_ips(c):
     # public ranges or your ASNs' advertised prefixes, when you marked it enterprise, or when inventory / VA / NIAM has it.
     natted, direct = matrix_owned(rules)
     our_public = natted | direct
+    vmap = vip_map(rules)
     # private IP <-> its public / NAT IPs: the matrix NAT pairs, plus inventory NAT columns
     pub_of, priv_of = matrix_pairs(rules)
     for ip, rr in reg.items():
@@ -1073,7 +1113,11 @@ def matrix_ips(c):
         cat = ("exposed" if ours and roles & {"exposed", "public", "snat", "public_src"} else "outbound" if ours and "outbound" in roles
                else "unknown" if not ours and (e["kind"] == "name" or why.startswith("public IP in our rules")) else "external" if not ours else "internal")
         addr = e["address"][5:] if e["kind"] == "name" else e["address"]
-        if e["kind"] == "ip" and _is_private(n):
+        if e["kind"] == "ip" and _is_private(n) and addr in vmap:  # NAT / VIP: a translation layer, not a host
+            private_ip, public_ip, akind = addr, ", ".join(sorted(pub_of.get(addr, ()))), "vip"
+            why = f"NAT / VIP in front of {', '.join(resolve_vips([addr], vmap)[:4])} (not a host)"
+            cat = "internal"
+        elif e["kind"] == "ip" and _is_private(n):
             private_ip, public_ip = addr, ", ".join(sorted(pub_of.get(addr, ())))
             akind = "private_public" if public_ip else "private_only"
         elif e["kind"] == "ip":
@@ -1092,7 +1136,7 @@ def matrix_ips(c):
     return out
 
 
-ASSET_KIND = {"private_public": "Private + public / NAT IP", "private_only": "Private IP only", "public_only": "Public IP only (ours, no private IP)",
+ASSET_KIND = {"vip": "NAT / VIP (translation layer, not a host)", "private_public": "Private + public / NAT IP", "private_only": "Private IP only", "public_only": "Public IP only (ours, no private IP)",
               "external": "Public IP, not ours", "subnet": "Subnet / range", "name": "Host / object name"}
 
 

@@ -58,7 +58,7 @@ export default function SplunkView() {
           {" "}<Link className="underline" href="/connectors/">Integrations</Link>, then sync.</Callout>
       )}
       {st?.running && <div className="mb-4"><SyncProgress status={st} compact /></div>}
-      {never && !st?.running ? (
+      {never && !st?.running && tab !== "sync" ? (  // Settings must open before the first sync too
         <Card className="p-8 text-center">
           <div className="mx-auto mb-3 flex size-12 items-center justify-center rounded-2xl bg-accent-soft text-accent-fg"><Database className="size-6" /></div>
           <div className="text-[15px] font-semibold">No Splunk data yet</div>
@@ -82,7 +82,7 @@ export default function SplunkView() {
           {tab === "notables" && <Notables state={state} set={set} replaceAll={replaceAll} />}
           {tab === "indexes" && <Indexes />}
           {tab === "forwarders" && <Forwarders />}
-          {tab === "sync" && <SyncTab st={st} sync={sync} />}
+          {tab === "sync" && <SyncTab st={st} sync={sync} configured={!!s.configured} demo={!!s.demo} />}
         </>
       )}
     </div>
@@ -293,7 +293,7 @@ function Forwarders() {
   );
 }
 
-function SyncTab({ st, sync }: { st: any; sync: (full?: boolean) => void }) {
+function SyncTab({ st, sync, configured, demo }: { st: any; sync: (full?: boolean) => void; configured?: boolean; demo?: boolean }) {
   const qc = useQueryClient();
   const [minutes, setMinutes] = React.useState(String(st?.minutes ?? 60));
   const [silent, setSilent] = React.useState(String(st?.silent_hours ?? 24));
@@ -312,6 +312,12 @@ function SyncTab({ st, sync }: { st: any; sync: (full?: boolean) => void }) {
         </Card>
       </div>
       <div className="space-y-4">
+        <Card className="p-4 text-[12.5px]">
+          <div className="mb-2 flex items-center gap-2 text-[13px] font-semibold">Connection
+            {configured ? <Badge tone="good">connected</Badge> : <Badge tone="warn">{demo ? "sample data" : "not connected"}</Badge>}</div>
+          <p className="text-fg-2">The Splunk management URL (port 8089), the token and the TLS check are set on the Integrations page.</p>
+          <Link href="/connectors/" className="mt-2 inline-block"><Button size="sm"><Settings2 /> Splunk connection settings</Button></Link>
+        </Card>
         <Card className="p-4">
           <div className="mb-3 text-[13px] font-semibold">Schedule</div>
           <div className="space-y-3">

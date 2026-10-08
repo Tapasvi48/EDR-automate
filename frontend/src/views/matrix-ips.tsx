@@ -17,7 +17,7 @@ const ROLE: Record<string, [string, string]> = {
 const AKIND: [string, string, string][] = [
   ["private_public", "Private + public / NAT IP", "crit"], ["private_only", "Private IP only", "info"],
   ["public_only", "Public IP only (ours)", "violet"], ["external", "Public IP, not ours", "neutral"],
-  ["subnet", "Subnet / range", "neutral"], ["name", "Host / object name", "neutral"],
+  ["vip", "NAT / VIP (not a host)", "neutral"], ["subnet", "Subnet / range", "neutral"], ["name", "Host / object name", "neutral"],
 ];
 const VIEWS: [string, string, string][] = [
   ["exposed", "Ours & internet exposed", "crit"], ["outbound", "Ours & talking to internet", "warn"], ["public", "Our public / NAT IPs", "violet"],

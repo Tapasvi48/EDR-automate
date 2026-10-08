@@ -10,7 +10,7 @@ import { fmtN } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { Badge, Button, Card, Kpi, KpiGrid, Loading, Modal, PageHeader, Tabs } from "@/components/ui";
 import { SimpleTable } from "@/components/data-table";
-import { Mono, SeverityBadge } from "@/components/badges";
+import { EdrBadge, Mono, SeverityBadge } from "@/components/badges";
 import { RegistryTable } from "@/components/registry-table";
 
 const RULES: [string, string, string][] = [
@@ -178,6 +178,10 @@ function ShadowTable({ data }: { data: any }) {
         { key: "ip", label: "Public IP", render: (x: any) => <Link className="font-mono text-[12px] text-accent-fg hover:underline" href={`/ip-search/?q=${encodeURIComponent(x.internal_ip || x.ip)}`}>{x.ip}</Link> },
         { key: "asset", label: "Asset", render: (x: any) => <span>{x.asset || "–"}{x.internal_ip && <span className="ml-1 text-[11.5px] text-muted">({x.internal_ip})</span>}</span> },
         { key: "lobs", label: "LOB" },
+        { key: "edr_status", label: "EDR status", render: (x: any) => <span className="flex flex-col items-start gap-0.5"><EdrBadge s={x.edr_status} />
+          {(x.edr_detail || "").startsWith("matched by public IP") && <Badge tone="violet" title={x.edr_detail}>Public IP match</Badge>}
+          {(x.cs_hostname || x.edr_detail) && <span className="text-[11px] text-muted">{[x.cs_hostname, x.edr_detail].filter(Boolean).join(" · ")}</span>}</span> },
+        { key: "msps", label: "MSP", render: (x: any) => x.msps || <span className="text-muted">–</span> },
         { key: "port", label: "Port", render: (x: any) => x.whole_ip ? <span className="text-[12px] text-muted">whole IP{x.scanned ? "" : " · not scanned"}</span> : <b className="font-mono">{x.port}/{x.protocol}</b> },
         { key: "seen_by", label: "Seen by", render: (x: any) => <span className="text-[12px]">{x.seen_by}</span> },
         { key: "max_rank", label: "Worst open finding", render: (x: any) => x.max_rank >= 0 ? <SeverityBadge s={SEV[x.max_rank]} /> : <span className="text-muted">none open</span> },

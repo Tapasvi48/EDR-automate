@@ -78,13 +78,41 @@ def known_public(c):
                 add(e["address"], "matrix", None, e.get("name"))
     except Exception:  # noqa: BLE001 - no matrix
         pass
-    for r in c.execute("SELECT ip, asset_ip, asset_name FROM passive_results"):
-        add(r["ip"], "passive", r["asset_ip"], r["asset_name"])
     for e in _setting_list(c, RANGES_KEY):
         for n in _nets(e.get("value")):
             if n.version == 4 and n.num_addresses <= 256:
                 for a in (n if n.num_addresses > 1 else [n.network_address]):
                     add(str(a), "your ranges")
+    # a passive scan result is evidence about an IP, not proof it is ours: it only adds to an IP another source already
+    # calls ours, or one inside your ranges / your ASNs' prefixes (IPs scanned by mistake would otherwise stay here forever)
+    import ipaddress
+    ours = [n for e in _setting_list(c, RANGES_KEY) for n in _nets(e.get("value")) if n.version == 4]
+    asns = _setting_list(c, ASNS_KEY)
+    if asns:
+        for p in db.rows(c, f"SELECT prefix FROM asn_prefixes WHERE asn IN ({','.join('?' * len(asns))})", asns):
+            try:
+                n = ipaddress.ip_network(p["prefix"])
+            except ValueError:
+                continue
+            if n.version == 4:
+                ours.append(n)
+    import bisect
+    spans = []  # your ranges + ASN prefixes merged into disjoint [start, end] spans, so one bisect answers "is it inside"
+    for s, e in sorted((int(n.network_address), int(n.broadcast_address)) for n in ours):
+        if spans and s <= spans[-1][1] + 1:
+            spans[-1][1] = max(spans[-1][1], e)
+        else:
+            spans.append([s, e])
+    starts = [s for s, _ in spans]
+    for r in c.execute("SELECT ip, asset_ip, asset_name FROM passive_results"):
+        ip = r["ip"]
+        if ip in out:
+            add(ip, "passive", r["asset_ip"], r["asset_name"])
+            continue
+        num = db.ip_to_num(ip)
+        i = bisect.bisect_right(starts, num) - 1 if num is not None else -1
+        if i >= 0 and spans[i][1] >= num:
+            add(ip, "passive", r["asset_ip"], r["asset_name"])
     return out
 
 

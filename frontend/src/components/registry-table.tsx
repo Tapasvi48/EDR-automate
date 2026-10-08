@@ -46,7 +46,10 @@ const LINK_KEYS: Record<string, (v: string) => string> = {
   exposure_src: (v) => `Exposed via ${v}`, edr_applicable: () => "EDR applicable (incl. EDR-only assets)",
   os_source: (v) => (v === "none" ? "OS unknown" : `OS from ${({ edr: "CrowdStrike", inventory: "inventory", scan: "VA scan" } as any)[v] || v}`),
 };
-const MAIN_KEYS = ["q", "has", "missing", "lob", "msp", "node_type", "edr_status", "exposed", "vulns", "feasibility", "niam", "scanned", "os", "exposure_src", "whitelisted"];
+// evidence sources of internet exposure (multi-select: an asset matches when any of the picked sources exposes it)
+const EXPOSED_BY: [string, string][] = [["inventory", "LOB inventory"], ["matrix", "Communication matrix"], ["va", "VA public inventory"], ["scan", "VA scan"],
+  ["ip", "Public IP"], ["edr", "CrowdStrike connection IP"], ["passive", "Passive scan"], ["manual", "Marked by hand"]];
+const MAIN_KEYS = ["q", "has", "missing", "lob", "msp", "node_type", "edr_status", "edr_match", "exposed", "vulns", "feasibility", "niam", "scanned", "os", "exposure_src", "whitelisted"];
 
 export function RegistryTable({ state, set, reset, fixed, storageKey = "registry", hideExposure, allowDelete }: {
   state: Record<string, string>; set: any; reset: () => void; fixed?: Record<string, string>; storageKey?: string; hideExposure?: boolean;
@@ -86,7 +89,7 @@ export function RegistryTable({ state, set, reset, fixed, storageKey = "registry
   const lobName = (id: number) => meta?.lobs.find((l) => l.id === id)?.name || "";
   const linkPills = Object.keys(LINK_KEYS).filter((k) => state[k]);
   const anyActive = linkPills.length + MAIN_KEYS.filter((k) => state[k]).length > 0;
-  const moreCount = ["missing", "niam", "scanned", "msp", "node_type", "os", "feasibility", "edr_status", "vulns", "exposure_src", "whitelisted"].filter((k) => state[k]).length;
+  const moreCount = ["missing", "niam", "scanned", "msp", "node_type", "os", "feasibility", "edr_status", "edr_match", "vulns", "exposure_src", "whitelisted"].filter((k) => state[k] && !(hideExposure && k === "exposure_src")).length;
   const cols: Column[] = [
     { key: "ip", label: "IP", render: (r) => r.ip ? <Link className="font-mono text-[12px] text-accent-fg hover:underline" href={`/ip-search/?q=${encodeURIComponent(r.ip)}`}>{r.ip}</Link> : <span className="text-muted">no IP</span> },
     { key: "name", label: "Name", render: (r) => <b>{r.name || <span className="font-normal text-muted">–</span>}</b> },
@@ -97,7 +100,9 @@ export function RegistryTable({ state, set, reset, fixed, storageKey = "registry
     { key: "os", label: "OS", render: (r) => <OsCell os={r.os} src={r.os_source} /> },
     { key: "feasibility", label: "EDR feasible", render: (r) => <FeasibleBadge v={r.feasibility} reason={r.feasibility_reason} /> },
     { key: "edr_status", label: "CrowdStrike", render: (r) => (
-      <span className="inline-flex items-center gap-1.5"><EdrBadge s={r.edr_status} />{r.edr_detail && r.edr_detail !== "in console" && <span className="text-[11px] text-muted">{r.edr_detail}</span>}</span>) },
+      <span className="inline-flex items-center gap-1.5"><EdrBadge s={r.edr_status} />
+        {(r.edr_detail || "").startsWith("matched by public IP") ? <Badge tone="violet" title={r.edr_detail}>Public IP match</Badge>
+          : r.edr_detail && r.edr_detail !== "in console" && <span className="text-[11px] text-muted">{r.edr_detail}</span>}</span>) },
     { key: "last_scan", label: "VA scan", render: (r) => r.in_scan ? <span>{fmtDt(r.last_scan).slice(0, 10)}</span> : <span className="text-muted">Not scanned</span> },
     { key: "crit", label: "Crit / High / Med / Low", render: (r) => r.in_scan ? <SevCounts c={r.crit} h={r.high} m={r.med} l={r.low} /> : null },
     { key: "ne_ids", label: "NIAM", sort: false, render: (r) => r.in_niam ? <span className="text-xs">{r.ne_ids || "Yes"}</span> : <span className="text-muted">No</span> },
@@ -137,6 +142,7 @@ export function RegistryTable({ state, set, reset, fixed, storageKey = "registry
             options={[["inventory", `LOB inventory${count("inventory")}`], ["edr", `CrowdStrike${count("edr")}`], ["scan", `VA scan${count("scan")}`], ["niam", `NIAM${count("niam")}`]]} />
           <FilterSelect label="LOB" value={state.lob} onChange={(v) => set({ lob: v, msp: undefined })} any="All" options={(meta?.lobs || []).map((l) => ({ value: l.id, label: l.name }))} />
           {!hideExposure && <FilterSelect single label="Internet" value={state.exposed} onChange={(v) => set({ exposed: v })} any="Any" options={[["1", `Exposed${count("exposed")}`], ["0", "Not exposed"]]} />}
+          {hideExposure && <FilterSelect label="Exposed by" value={state.exposure_src} onChange={(v) => set({ exposure_src: v })} any="Any source" options={EXPOSED_BY} />}
           <Popover.Root>
             <Popover.Trigger asChild>
               <Button size="sm" variant={moreCount ? "soft" : "default"}><SlidersHorizontal /> More filters{moreCount > 0 && <Badge tone="info" className="ml-0.5">{moreCount}</Badge>}</Button>
@@ -160,6 +166,7 @@ export function RegistryTable({ state, set, reset, fixed, storageKey = "registry
                 <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted">EDR & risk</div>
                 <div className="mb-4 flex flex-wrap gap-2">
                   <FilterSelect label="CrowdStrike" value={state.edr_status} onChange={(v) => set({ edr_status: v })} any="Any" options={[["Online", "Online"], ["Offline", "Offline (incl. EDR history)"], ["Not Installed", "No agent"]]} />
+                  <FilterSelect single label="EDR matched by" value={state.edr_match} onChange={(v) => set({ edr_match: v })} any="Any" options={[["public_ip", "Public IP (tag: Public IP match)"]]} />
                   <FilterSelect label="EDR feasible" value={state.feasibility} onChange={(v) => set({ feasibility: v })} any="Any"
                     options={[["Yes", "Feasible"], ["No", `Not feasible${count("not_feasible")}`], ["To be decided", `To be decided${count("to_be_decided")}`], ["Unidentified", `Unidentified${count("unidentified")}`]]} />
                   <FilterSelect label="Vulnerabilities" value={state.vulns} onChange={(v) => set({ vulns: v })} any="Any"
@@ -169,11 +176,11 @@ export function RegistryTable({ state, set, reset, fixed, storageKey = "registry
                   <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted">Internet exposure</div>
                   <div className="flex flex-wrap gap-2">
                     <FilterSelect label="Exposed by" value={state.exposure_src} onChange={(v) => set({ exposure_src: v })} any="Any source"
-                      options={[["inventory", "Inventory"], ["matrix", "Communication matrix"], ["scan", "VA scan"], ["ip", "Public IP"], ["edr", "CrowdStrike connection IP"], ["passive", "Passive scan"], ["manual", "Marked by hand"]]} />
+                      options={EXPOSED_BY} />
                     <FilterSelect single label="Whitelisted" value={state.whitelisted} onChange={(v) => set({ whitelisted: v })} options={[["1", "Yes"], ["0", "No"]]} />
                   </div>
                 </>}
-                {moreCount > 0 && <Button size="sm" variant="ghost" className="mt-3" onClick={() => set(Object.fromEntries(["missing", "niam", "scanned", "msp", "node_type", "os", "edr_status", "feasibility", "vulns", "exposure_src", "whitelisted"].map((k) => [k, undefined])))}><X /> Clear these</Button>}
+                {moreCount > 0 && <Button size="sm" variant="ghost" className="mt-3" onClick={() => set(Object.fromEntries(["missing", "niam", "scanned", "msp", "node_type", "os", "edr_status", "edr_match", "feasibility", "vulns", "exposure_src", "whitelisted"].map((k) => [k, undefined])))}><X /> Clear these</Button>}
               </Popover.Content>
             </Popover.Portal>
           </Popover.Root>

@@ -1720,9 +1720,9 @@ app.include_router(subnets.router)
 app.include_router(whois.router)
 app.include_router(falconmcp.router)
 app.include_router(ai_hunt.router)
-from . import vapublic  # noqa: E402
+from . import edrlookup, vapublic  # noqa: E402
 for _r in (fabric.router, kb.router, briefs.router, ioc.router, chat.router, cql.router, ontology.router, cqlhub.router, learn.router,
-           vapublic.router, splunk_sync.router):
+           vapublic.router, splunk_sync.router, edrlookup.router):
     app.include_router(_r)
 
 FRONTEND = config.BASE_DIR / "frontend" / "out"

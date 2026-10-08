@@ -1,7 +1,7 @@
 "use client";
 import * as React from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Upload } from "lucide-react";
+import { FileSearch, Upload } from "lucide-react";
 import { api } from "@/lib/api";
 import { useMeta, useUrlState } from "@/lib/hooks";
 import { daysAgo, fillDays, fmtN, today } from "@/lib/format";
@@ -9,6 +9,7 @@ import { Button, Card, CardHeader, Kpi, KpiGrid, Loading, PageHeader } from "@/c
 import { COLORS, DayBars } from "@/components/charts";
 import { HostTable } from "@/components/host-table";
 import { MappedUpload } from "@/components/mapped-upload";
+import { EdrLookup } from "@/components/edr-lookup";
 
 /** Offline = offline in the console + EDR history (agents that left the console, or known only from an old EDR export).
  *  One row per device: duplicate agents of a machine are merged. */
@@ -26,6 +27,7 @@ export default function Health() {
   const { data: series } = useQuery({ queryKey: ["series", "offline", "29"], queryFn: () => api<any>("/api/series", { params: { kind: "offline", start: daysAgo(29), end: today() } }) });
   const { data: meta } = useMeta();
   const [upload, setUpload] = React.useState(false);
+  const [lookup, setLookup] = React.useState(false);
   if (!d) return <Loading error={error} retry={() => refetch()} />;
   const k = d.kpi;
   const days = meta?.settings.auto_remove_days || "90";
@@ -36,7 +38,10 @@ export default function Health() {
     <div>
       <PageHeader title="Offline"
         sub={`Devices whose CrowdStrike agent is not checking in: offline in the console, removed from it (auto-removed after ${days} days offline, or deleted), or known only from an uploaded old EDR inventory. One row per device.`}
-        actions={<Button onClick={() => setUpload(true)}><Upload /> Upload old EDR inventory</Button>} />
+        actions={<>
+          <Button onClick={() => setLookup(true)}><FileSearch /> EDR lookup (match a list)</Button>
+          <Button onClick={() => setUpload(true)}><Upload /> Upload old EDR inventory</Button>
+        </>} />
       <KpiGrid className="mb-4 grid-cols-[repeat(auto-fill,minmax(180px,1fr))]">
         <Kpi label="All offline" value={k.offline + (h?.devices ?? 0)} tone="crit" foot="console + EDR history" active={view === "all"} onClick={() => pick("all")} />
         <Kpi label="Offline in the console" value={k.offline} tone="serious" foot={`${fmtN(k.offline_lt24h)} today · ${fmtN(k.offline_gt30d)} > 30 days`} active={view === "console"} onClick={() => pick("console")} />
@@ -55,6 +60,7 @@ export default function Health() {
       <HostTable key={view} state={state} set={set} reset={() => pick(view)} defaults={v.defaults} fixed={v.fixed} omit={["view"]}
         storageKey="offline" removalFilter={view !== "console"} />
       {upload && <MappedUpload kind="edr" open onOpenChange={setUpload} />}
+      {lookup && <EdrLookup open onOpenChange={setLookup} />}
     </div>
   );
 }

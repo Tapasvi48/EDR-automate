@@ -285,7 +285,7 @@ def refresh(c):
     # --- communication matrix, every sheet type: internet-facing rows expose what they point at. A row matches an asset by
     # its private / internal IP (or a subnet / range containing it), its public / NAT IP, or its host name.
     from .commatrix import parse_addresses  # cached per cell text
-    from .commatrix import PATTERNS, internet_without_nat, load_rules, matrix_owned, reclassify
+    from .commatrix import PATTERNS, internet_without_nat, load_rules, matrix_owned, reclassify, resolve_vips, vip_map
     import bisect
     reclassify(c)  # rows uploaded under older inbound logic are judged again (manual marks kept)
     active_rules = load_rules(c)
@@ -296,6 +296,17 @@ def refresh(c):
 
     def ours_ip(ip):
         return not is_public(ip) or ip in direct
+    # private NAT / VIP addresses (load balancer, firewall NAT) are a translation layer, not hosts: their exposure goes to the
+    # backend server(s) behind them (public 202.x -> VIP 10.4.x -> server 10.1.x lists 10.1.x, not 10.4.x)
+    vmap = vip_map(active_rules)
+
+    def row_hosts(rule):
+        """(real hosts, VIPs) a rule's destination side names: the row's own private NAT IPs are VIPs when it also names a
+        private backend, and any VIP is replaced by its backends."""
+        d, n = singles(rule["dst"]), singles(rule["dst_nat"])
+        vips = {ip for ip in n if not is_public(ip)} if any(not is_public(ip) for ip in d) else set()
+        hosts = resolve_vips([ip for ip in d + n if ip not in vips], vmap)
+        return hosts, sorted(vips | {ip for ip in d + n if ip in vmap})
     lob_ids = {r[1].lower(): r[0] for r in c.execute("SELECT id, name FROM lobs")}
 
     def singles(text):
@@ -315,7 +326,7 @@ def refresh(c):
     for rule in active_rules:  # create the matrix-only assets first, so the matching below finds them
         snat = [ip for ip in singles(rule["src_nat"]) if is_public(ip)]
         if rule["inbound_internet"]:
-            for ip in singles(rule["dst"]) + singles(rule["dst_nat"]):
+            for ip in row_hosts(rule)[0]:
                 if ours_ip(ip):
                     mark_matrix(ip, rule)
         if snat or internet_without_nat(rule, natted | direct):  # private sources behind a public source NAT IP, or let out
@@ -336,7 +347,7 @@ def refresh(c):
     from .vapublic import _ips as va_ips
     for v in db.rows(c, "SELECT * FROM va_public"):
         pubs = [ip for ip in va_ips(v["public_ip"]) if is_public(ip)]
-        privs = [ip for ip in va_ips(v["private_ip"]) if not is_public(ip)]
+        privs = resolve_vips([ip for ip in va_ips(v["private_ip"]) if not is_public(ip)], vmap)
         # as many public as private IPs in one row (ip1;ip2 | ip3;ip4): paired in order, not every one with every one
         pair_of = dict(zip(privs, pubs)) if len(privs) == len(pubs) > 1 else None
         m_priv = sorted(set().union(*[m_priv_of.get(p, set()) for p in pubs])) if pubs else []
@@ -443,9 +454,21 @@ def refresh(c):
         if not rule["inbound_internet"]:
             continue
         st = rule.get("sheet_type") or "rules"
-        inner = {k for k in hits_for(rule["dst"]) if keep(k)}
-        publ = {k for k in hits_for(rule["dst_nat"]) if keep(k)}
-        pubs = [str(n.network_address) for n in parse_addresses(rule["dst_nat"])[1] if n.num_addresses == 1]
+        hosts, vips = row_hosts(rule)
+        vipset = set(vips)
+
+        def real(keys):  # a matched asset that is a VIP stands for the backend asset(s) behind it
+            out = set()
+            for k in keys:
+                ip = reg[k]["ip"]
+                if ip in vipset or ip in vmap:
+                    out |= {b for b in resolve_vips([ip], vmap) if b in reg}
+                else:
+                    out.add(k)
+            return {k for k in out if keep(k)}
+        inner = real(hits_for(rule["dst"])) | {ip for ip in hosts if ip in reg and not is_public(ip) and keep(ip)}
+        publ = {k for k in real(hits_for(rule["dst_nat"])) if reg[k]["ip"] and is_public(reg[k]["ip"])}
+        pubs = [str(n.network_address) for n in parse_addresses(rule["dst_nat"])[1] if n.num_addresses == 1 and is_public(str(n.network_address))]
         svc = f"{(rule['protocol'] or 'any').upper()} {rule['ports'] or 'any port'}"
         where = f"{rule.get('sheet') or ''}".strip()
         who = " · ".join(x for x in (rule.get("application"), rule.get("app_owner") and f"owner {rule['app_owner']}") if x)
@@ -457,6 +480,8 @@ def refresh(c):
             text = (f"{KIND.get(st, 'Matrix sheet')}{f' ‘{where}’' if where else ''}: public IP {rule['dst_nat'] or '–'}"
                     + (f" → {rule['dst']}" if rule["dst"] else "") + (f" · {svc}" if rule["ports"] else "")
                     + (f" · {who}" if who else "") + (f" · firewall {rule['firewall']}" if rule["firewall"] else ""))
+        if vips:
+            text += f" · through NAT / VIP {', '.join(vips[:3])}"
         for k in inner | publ:
             reason(reg[k], "matrix", text, "Matrix · " + (rule.get("sheet") or rule.get("workbook") or "rules"))
         for k in inner:
@@ -495,6 +520,32 @@ def refresh(c):
         for k in hit:
             reason(reg[k], "passive", f"Passive scan (Shodan InternetDB, {(r['scanned_at'] or '')[:10]}): open ports {ports} on {r['ip']}",
                    "Passive scan")
+    # --- CrowdStrike by PUBLIC IP: an asset with no agent matched yet takes the agent whose external (egress) or connection IP is
+    # the asset's own public IP or one of its public / NAT IPs. Only a public IP that ONE agent uses counts (an office egress IP
+    # many laptops share says nothing about this asset); several agents behind it are noted instead. Tagged "matched by public IP".
+    by_pub_ip = {}
+    for h in db.rows(c, """SELECT aid, hostname, external_ip, connection_ip, online_state, last_seen FROM hosts
+                          WHERE console_state='active' AND (COALESCE(external_ip,'')<>'' OR COALESCE(connection_ip,'')<>'')"""):
+        for ip in {h["external_ip"], h["connection_ip"]}:
+            if ip and is_public(ip):
+                by_pub_ip.setdefault(ip, {})[h["aid"]] = h
+    if by_pub_ip:
+        for s in reg.values():
+            if s["edr_status"] not in (None, "Not Installed"):
+                continue
+            pubs = ([s["ip"]] if s["ip"] and is_public(s["ip"]) else []) + sorted(s["public_ips"])
+            for p in pubs:
+                agents = by_pub_ip.get(p)
+                if not agents:
+                    continue
+                if len(agents) == 1:
+                    h = next(iter(agents.values()))
+                    s.update(edr_status="Online" if h["online_state"] == "online" else "Offline", aid=h["aid"], cs_hostname=h["hostname"],
+                             edr_last_seen=h["last_seen"], edr_detail=f"matched by public IP {p}", in_edr=1)
+                    add_name(s, h["hostname"])
+                else:
+                    s["edr_detail"] = s["edr_detail"] or f"public IP {p} shared by {len(agents)} agents (not matched)"
+                break
     # --- EDR feasibility of assets in no inventory: CrowdStrike has it -> feasible (and applicable); anything else found only
     # by a VA scan / NIAM (or a future source) is unidentified and stays out of the applicable count
     for s in reg.values():
@@ -520,6 +571,15 @@ def refresh(c):
             reason(s, "manual", f"Marked internet exposed by hand: {e['value']} ({note})", f"Manual · {note}"[:60])
     listed = _whitelisted_fn(c)
     indirect = _net_fn(ip_list(c, "indirect"))
+    lob_name = {r[0]: r[1] for r in c.execute("SELECT id, name FROM lobs")}
+    msp_name, msp_id_of, msp_ids_by_name = {}, {}, {}
+    for r in c.execute("SELECT id, lob_id, name FROM msps"):
+        msp_name[r[0]] = r[2]
+        msp_id_of[(r[1], (r[2] or "").strip().lower())] = r[0]
+        msp_ids_by_name.setdefault((r[2] or "").strip().lower(), set()).add(r[0])
+    agent_owner = {}  # aid -> [(lob_id, msp_id)]: inventory matches and agent tags (host_map)
+    for r in c.execute("SELECT aid, lob_id, msp_id FROM host_map ORDER BY source='tag'"):
+        agent_owner.setdefault(r[0], []).append((r[1], r[2]))
     rows = []
     for s in reg.values():
         # indirectly exposed: CGNAT (100.64.0.0/10) or a telecom range you listed; reachable only through another network
@@ -538,11 +598,25 @@ def refresh(c):
         exposed = 1 if s["reasons"] and not cg and not wl and not front else 0
         srcs = [x for x, f in (("inventory", s["in_inventory"]), ("edr", s["in_edr"]), ("scan", s["in_scan"]), ("niam", s["in_niam"]),
                                ("matrix", s.get("in_matrix")), ("va", s.get("in_va_pub"))) if f]
+        # LOB / MSP for an asset no inventory row gave them: the CrowdStrike agent's own assignment (agent tags / MSP tagging,
+        # also for agents matched by public IP), then the matrix row / VA sheet
+        if (not s["lobs"] or not s["msps"]) and s.get("aid") in agent_owner:
+            for lid, mid in agent_owner[s["aid"]]:
+                if lid in lob_name and not s["lobs"]:
+                    s["lobs"][lid] = lob_name[lid]
+                if mid in msp_name and not s["msps"]:
+                    s["msps"][mid] = msp_name[mid]
         if not s["msps"] and s.get("va_msp"):  # MS Partner from the VA public inventory, for hosts no inventory owns
             s["msps"][0] = s["va_msp"]
         if not s["lobs"] and s.get("matrix_lob"):  # LOB named in the matrix row, for assets no inventory owns
             lid = lob_ids.get(s["matrix_lob"].strip().lower())
             s["lobs"][lid if lid is not None else 0] = s["matrix_lob"]
+        if 0 in s["msps"]:  # an MSP known only by name (VA sheet, unlinked inventory row): use its id so the MSP filter finds it
+            nm = s["msps"].pop(0)
+            mid = next((msp_id_of.get((lid, nm.strip().lower())) for lid in s["lobs"] if msp_id_of.get((lid, nm.strip().lower()))), None)
+            if mid is None and len(msp_ids_by_name.get(nm.strip().lower(), ())) == 1:
+                mid = next(iter(msp_ids_by_name[nm.strip().lower()]))
+            s["msps"][mid if mid is not None else 0] = nm
         rows.append((s["asset_key"], s["ip"], db.ip_to_num(s["ip"]), ", ".join(s["names"][:3]) or None,
                      ", ".join(sorted(set(s["lobs"].values()))) or None, "," + ",".join(str(i) for i in s["lobs"]) + ",",
                      ", ".join(sorted(set(s["msps"].values()))) or None, "," + ",".join(str(i) for i in s["msps"]) + ",",
@@ -624,6 +698,8 @@ def query(p):
         vals = p["edr_status"].split("|")
         w.append(f"r.edr_status IN ({','.join('?' * len(vals))})")
         params += vals
+    if p.get("edr_match") == "public_ip":  # CrowdStrike agent found through the asset's public IP
+        w.append("r.edr_detail LIKE 'matched by public IP%'")
     for flag in ("cgnat", "whitelisted"):
         if p.get(flag) in ("0", "1"):
             w.append(f"r.{flag}=?")
@@ -812,7 +888,7 @@ def exposure_shadow():
     from .commatrix import shadow_ports
     out = []
     with db.get_conn() as c:
-        owners = {r["ip"]: r for r in db.rows(c, "SELECT ip, name, nat_of, lobs FROM asset_registry")}
+        owners = {r["ip"]: r for r in db.rows(c, "SELECT ip, name, nat_of, lobs, msps, edr_status, edr_detail, cs_hostname FROM asset_registry")}
         listed, indirect, ranges = _whitelisted_fn(c), _net_fn(ip_list(c, "indirect")), _net_fn(ip_list(c, "shadow"))
         seen = {}
 
@@ -834,7 +910,10 @@ def exposure_shadow():
             ports, rules = shadow_ports(c, ip, inner)
             internal = inner[0] if inner else None
             io = owners.get(internal) or {} if internal else {}
+            edr = io if io.get("edr_status") else o  # the internal asset's agent when the IP fronts one, else the IP's own
             base = {"asset": io.get("name") or o.get("name"), "internal_ip": internal, "lobs": io.get("lobs") or o.get("lobs"),
+                    "msps": io.get("msps") or o.get("msps"), "edr_status": edr.get("edr_status") or "Not Installed",
+                    "edr_detail": edr.get("edr_detail"), "cs_hostname": edr.get("cs_hostname"),
                     "rules_on_ip": len(rules), "seen_by": ", ".join(sorted(seen[ip]))}
             if ports:
                 for p in ports:

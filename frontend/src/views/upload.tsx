@@ -12,8 +12,9 @@ import { UploadWizard } from "@/components/upload-wizard";
 import { TagWizard } from "@/components/tag-wizard";
 import { MappedUpload } from "@/components/mapped-upload";
 import { MatrixUpload } from "@/components/matrix-upload";
+import { EdrLookup } from "@/components/edr-lookup";
 
-type Kind = "inventory" | "tags" | "vulns" | "edr" | "niam" | "sod" | "comm" | "ndr" | "vapub";
+type Kind = "inventory" | "tags" | "vulns" | "edr" | "niam" | "sod" | "comm" | "ndr" | "vapub" | "edrlookup";
 type Open = null | { kind: Kind; lob?: { id: number; name: string } };
 
 export default function UploadCenter() {
@@ -61,6 +62,8 @@ export default function UploadCenter() {
       desc: "Nessus-format export (IP Address, Vulnerability Name, Severity, Port, Plugin ID, CVE, dates…). Tracks new / fixed findings and each host's last scan." },
     { k: "vapub", icon: <ShieldAlert className="size-5" />, title: "VA public inventory", needsLob: false,
       desc: "Publicly reachable hosts for the VA team (Public IP, Private IP, LOB, MS Partner, DMZ…). Checked against the LOB inventory and the communication matrix; every host is listed as internet exposed." },
+    { k: "edrlookup", icon: <FileClock className="size-5" />, title: "EDR lookup (match a list)", needsLob: false,
+      desc: "Any Excel with an IP and / or hostname column: matched to every CrowdStrike asset (console, removed, old EDR import) and returned with EDR status, OS and last seen appended. Nothing is saved." },
     { k: "edr", icon: <FileClock className="size-5" />, title: "Old EDR inventory", needsLob: false,
       desc: "An older CrowdStrike host export. Agents no longer in the live console are kept as “Old EDR import” in EDR history and used for matching." },
     { k: "tags", icon: <Tags className="size-5" />, title: "Agent tags (AID + MSP)", needsLob: true,
@@ -117,6 +120,7 @@ export default function UploadCenter() {
       {open?.kind === "comm" && <MatrixUpload open onOpenChange={(o) => !o && setOpen(null)} />}
       {open?.kind === "ndr" && <MappedUpload kind="ndr" open onOpenChange={(o) => !o && setOpen(null)} />}
       {open?.kind === "vapub" && <MappedUpload kind="vapub" open onOpenChange={(o) => !o && setOpen(null)} />}
+      {open?.kind === "edrlookup" && <EdrLookup open onOpenChange={(o) => !o && setOpen(null)} />}
     </div>
   );
 }
